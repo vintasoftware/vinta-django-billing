@@ -88,8 +88,11 @@ _DEFAULTS: dict[str, Any] = {
     "SITE_DOMAIN": None,
     # Three-letter ISO code stamped on money the project does not qualify.
     "DEFAULT_CURRENCY": "USD",
-    # How long a subscription stays in `grace` after a failed renewal before the
-    # dunning schedule restricts it.
+    # How long a subscription stays in `grace` after a failed renewal before
+    # the dunning ladder restricts it. A plan may override it per plan through
+    # `BillingPlan.grace_period_days`; this is the fallback when it does not.
+    # A project carrying `BILLING_DEFAULT_GRACE_PERIOD_DAYS` over from the
+    # origin application can leave it defined -- it is read as a fallback.
     "GRACE_PERIOD_DAYS": 7,
     # Fractions of the effective limit at which `UsageWarningService` emits its
     # "approaching" warning. Reached-the-limit warnings are not configurable:

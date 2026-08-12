@@ -106,7 +106,7 @@ FREE_PLAN_SLUG = "free"
 
 def grace_period_days(subscription: Subscription) -> int:
     """The grace window length for ``subscription``'s plan, falling back to
-    ``BILLING_DEFAULT_GRACE_PERIOD_DAYS`` when the plan leaves it unset.
+    ``VINTA_BILLING['GRACE_PERIOD_DAYS']`` when the plan leaves it unset.
 
     Module-level (not a ``DunningService`` method): ``retry_attempt_ordinal``,
     itself a module-level function so it stays directly importable without a
@@ -116,7 +116,7 @@ def grace_period_days(subscription: Subscription) -> int:
     grace_days = subscription.plan.grace_period_days
     if grace_days is None:
         grace_days = get_setting("GRACE_PERIOD_DAYS")
-    return grace_days
+    return int(grace_days)
 
 
 def retry_attempt_ordinal(subscription: Subscription, at: datetime.datetime) -> int:
