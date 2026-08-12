@@ -1,0 +1,221 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vinta-django-billing"
+dynamic = ["version"]
+description = "Subscriptions, plan limits, entitlements and metered usage for multi-organization Django applications"
+readme = "README.md"
+requires-python = ">=3.11,<3.16"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Hugo Bessa", email = "hugo@vinta.com.br" }]
+keywords = ["vinta-django-billing", "django", "billing", "subscriptions", "saas"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Django",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.0",
+    "Framework :: Django :: 6.1",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Financial",
+    "Typing :: Typed",
+]
+dependencies = [
+    "django>=5.2,<6.3",
+    "django-model-utils>=5.0",
+    "djangorestframework>=3.16",
+    "django-filter>=25.1",
+    "python-dateutil>=2.9",
+    # Read-side query planning for the shipped serializers and viewsets.
+    "django-virtual-models>=0.4,<0.5",
+    # The organization models every table here is scoped to. Only the
+    # library's guaranteed surface is used -- the swappable model reference,
+    # the scoping mixin and the retriever -- never a project-specific field.
+    "vinta-django-orgs>=0.1.1",
+]
+
+[project.optional-dependencies]
+# Provider SDKs. The adapters import them lazily, so a project that only
+# charges through one provider does not install the other.
+stripe = ["stripe>=11.0"]
+mercadopago = ["mercadopago>=3.2,<4"]
+# `billing.tasks` degrades to plain callables when Celery is absent.
+celery = ["celery>=5.4"]
+# Ships the vintasend-backed notifier. Without it the default notifier logs
+# and drops, and any project can register its own.
+vintasend = ["vintasend>=1.2"]
+# OpenAPI schema annotations on the shipped viewsets.
+openapi = ["drf-spectacular>=0.29"]
+
+[project.urls]
+Homepage = "https://github.com/vintasoftware/vinta-django-billing"
+Source = "https://github.com/vintasoftware/vinta-django-billing"
+Changelog = "https://github.com/vintasoftware/vinta-django-billing/blob/main/HISTORY.md"
+
+[dependency-groups]
+test = [
+    "pytest>=8.3",
+    "pytest-django>=4.9",
+    "pytest-cov>=6.0",
+    "model-bakery>=1.20",
+    "freezegun>=1.5",
+    "tox>=4.22",
+    "tox-uv>=1.13",
+]
+dev = [
+    { include-group = "test" },
+    "bump-my-version>=1.0",
+    "django-stubs[compatible-mypy]>=5.1",
+    "djangorestframework-stubs>=3.15",
+    "mypy>=1.14",
+    "pre-commit>=4.6.1",
+    "ruff>=0.16.2",
+    # Installed in the dev environment so the provider adapters and the
+    # optional integrations are actually exercised by the test suite.
+    "stripe>=11.0",
+    "mercadopago>=2.3",
+    "celery>=5.4",
+    "drf-spectacular>=0.28",
+]
+
+[tool.hatch.version]
+path = "billing/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+# `py.typed` ships the annotations to consumers (PEP 561); without it a
+# project installing this one sees `Any` everywhere.
+packages = ["billing"]
+exclude = ["billing/tests"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "billing",
+    "CONTRIBUTING.md",
+    "HISTORY.md",
+    "LICENSE",
+    "README.md",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+python_files = ["test_*.py"]
+addopts = "--strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["billing"]
+omit = ["*/migrations/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
+
+[tool.ruff]
+# Matches the line length the ported code was written and formatted at.
+line-length = 100
+target-version = "py311"
+extend-exclude = ["*/migrations"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "DJ",   # flake8-django
+    "G",    # flake8-logging-format
+    "RUF",
+]
+ignore = [
+    # Member ordering inside models is stylistic and would churn every model.
+    "DJ012",
+    # `_('%(field)s ...') % {...}` is the documented way to interpolate into a
+    # lazy translation string.
+    "UP031",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Assertions and long fixture literals are the point of a test module.
+"tests/*" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["billing", "tests"]
+lines-after-imports = 2
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["mypy_django_plugin.main", "mypy_drf_plugin.main"]
+files = ["billing", "tests"]
+exclude = '(/migrations/)'
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_configs = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+# None of these ship type information.
+module = [
+    "model_utils.*",
+    "mercadopago.*",
+    "vintasend.*",
+    "django_filters.*",
+    "django_virtual_models.*",
+    "stripe.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Annotation debt carried over from the extraction, tracked explicitly rather
+# than by loosening the whole configuration. These modules came across from the
+# application this package was extracted from and were annotated against its
+# models; every module written for this package type-checks clean and stays
+# that way because it is not on this list.
+#
+# Removing an entry here is the unit of work for paying the debt down. Do not
+# add to it: a new module belongs outside this list.
+module = [
+    "billing.billing_views",
+    "billing.notification_contexts",
+    "billing.services.dunning_service",
+    "billing.services.entitlement_service",
+    "billing.services.payment_provider_resolver",
+    "billing.services.payment_service",
+    "billing.services.provider_credentials",
+    "billing.services.subscription_service",
+    "billing.services.usage_warning_service",
+    "billing.tasks",
+]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Tests use fakes and partial doubles on purpose; annotating them to the same
+# standard as the library would mean describing shapes that exist only to be
+# passed to one call.
+module = ["tests.*"]
+ignore_errors = true
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
+
+[tool.bumpversion]
+current_version = "0.1.0"
+commit = true
+tag = true
+
+[[tool.bumpversion.files]]
+filename = "billing/__init__.py"
