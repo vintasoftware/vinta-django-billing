@@ -122,9 +122,13 @@ _DEFAULTS: dict[str, Any] = {
     # False, so every outbound call site refuses it loudly instead of
     # authenticating with an empty credential.
     "PROVIDERS": {},
-    # Which provider an organization with no ``BillingProfile.payment_provider``
-    # pin resolves to.
-    "DEFAULT_PROVIDER": "stripe",
+    # Which provider governs an organization's charges when its billing profile
+    # carries no pin of its own. Empty rather than a guess at "stripe": a
+    # library must not pick which payment processor a project charges through.
+    # Empty is also the correct state for a project whose organizations are all
+    # on a free plan -- the pin is written on the first confirmed charge, not
+    # before.
+    "DEFAULT_PROVIDER": "",
 }
 
 
