@@ -1,0 +1,245 @@
+# vinta-django-billing
+
+Subscriptions, plan limits, entitlements, metered usage and dunning for
+multi-organization Django applications.
+
+Built on [vinta-django-orgs](https://github.com/vintasoftware/vinta-django-orgs):
+every table here is scoped to that library's swappable organization model, and
+the engine reads nothing from it beyond the swappable model reference and the
+tenancy mixin.
+
+> **Status: alpha.** The API will change before 1.0.
+
+## What it is
+
+A billing engine that does not know what it is billing for.
+
+It knows how to resolve an organization's ceiling for a resource, pool usage
+across a reseller subtree, refuse a create that would exceed a limit, meter
+post-paid usage, run a dunning ladder over a failed charge, and close a billing
+period. It does not know what a "seat" is, or a "calendar", or an "API token" —
+those are the host application's, and they come in through registries.
+
+| Ships here | Stays in your project |
+| --- | --- |
+| `Subscription`, `BillingPlan`, `PlanLimit`, `PlanEntitlement`, `BillingProfile`, `Payment`, `Refund`, `MeteredOccurrence`, … | The models being limited |
+| The limit / entitlement / pooling engine | Which resources exist, and how to count them |
+| Stripe and MercadoPago adapters | Provider credentials |
+| Dunning ladder and usage warnings | The notification transport |
+| The billing-root protocol | Whether your organizations even have a hierarchy |
+
+## Install
+
+```bash
+pip install vinta-django-billing            # or: uv add vinta-django-billing
+pip install "vinta-django-billing[stripe]"  # provider SDKs are extras
+```
+
+Extras: `stripe`, `mercadopago`, `openapi`.
+
+```python
+INSTALLED_APPS = [
+    ...,
+    "rest_framework",
+    "organizations.apps.OrganizationsConfig",  # vinta-django-orgs
+    "billing.apps.BillingConfig",
+]
+```
+
+## Register what you bill for
+
+The closed `TextChoices` the engine was extracted with became two registries.
+Register from your `AppConfig.ready()` — the only hook that runs after the app
+registry is populated and before anything serves a request.
+
+```python
+# myproject/billing_setup.py
+from django.utils.translation import gettext_lazy as _
+
+from billing.constants import LimitKind, LimitRemedy
+from billing.counting import count_by_organization, merge_breakdowns
+from billing.registry import entitlements, resources
+from billing.services.entitlement_service import count_metered_occurrences
+
+
+def count_seats(context):
+    """Memberships plus still-open invitations, per organization."""
+    return merge_breakdowns(
+        count_by_organization(
+            Membership.objects.filter(organization_id__in=context.organization_ids)
+        ),
+        count_by_organization(Invitation.objects.pending(context.organization_ids)),
+    )
+
+
+resources.register(
+    "seats",
+    label=_("Seats"),
+    kind=LimitKind.PREPAID,
+    counter=count_seats,
+    remedy=LimitRemedy.UPGRADE_PLAN,
+)
+resources.register(
+    "events",
+    label=_("Events"),
+    kind=LimitKind.POSTPAID,
+    counter=count_metered_occurrences,
+)
+
+entitlements.register("white_label", label=_("White-label branding"))
+```
+
+A counter takes a [`UsageContext`](billing/counting.py) and returns
+`{organization_id: count}`. Organizations at zero must be **absent** from the
+mapping rather than present with a zero — `GROUP BY` never emits a row for them,
+and `count_by_organization` preserves that.
+
+> **Read through the unscoped manager.** On a model using
+> `SingleOrganizationModelMixin`, count through `Model.original_manager`, never
+> `Model.objects`. Usage pools across a whole billing subtree, so a counter is
+> asked about several organizations at once and must not be narrowed to whichever
+> one is bound to the current context. In a background sweep nothing is bound at
+> all, and the scoped manager reports zero for everybody — every ceiling silently
+> reads as empty.
+
+Registering a resource never asks for a migration: the fields storing resource
+keys take their `choices` by callable reference, so the migration state does not
+change when the registry does.
+
+## Enforce a limit
+
+```python
+from billing.services.container import get_entitlement_service
+
+result = get_entitlement_service().check_limit(organization, "seats", delta=1, lock=True)
+if not result.allowed:
+    raise OverLimitError.build(result)
+```
+
+`lock=True` takes `SELECT ... FOR UPDATE` on the billing root's subscription row
+before counting, so two racing creates for the last unit of capacity serialize
+and exactly one sees room. It requires an open transaction.
+
+Three rules the engine holds to, and which are easy to break by accident:
+
+1. **NULL is unlimited, never zero.** A missing limit row means the same. Both
+   fail open — a data gap must never lock a customer out of something they could
+   do yesterday.
+2. **Usage pools at the billing root.** A child organization's usage counts
+   against its root's ceiling, together with the rest of the subtree.
+3. **Counting and checking are inseparable under concurrency.** See `lock`.
+
+## Configure the seams
+
+Everything the engine cannot know, in one settings dict. Every key has a default
+that works, so a flat single-tenant project configures nothing.
+
+```python
+VINTA_BILLING = {
+    # Who pays for whom. Default: every organization is its own billing root.
+    "HIERARCHY": "myproject.billing.ResellerHierarchy",
+    # Who may see and change billing. Default: any member of the organization.
+    "BILLING_MANAGER_PREDICATE": "myproject.billing.is_billing_owner",
+    # Where dunning and warning messages go. Default: log and drop.
+    "NOTIFIER": "myproject.billing.Notifier",
+    # What the meter bills. Default: the single registered postpaid resource.
+    "OCCURRENCE_SOURCE": "myproject.billing.EventOccurrenceSource",
+    "METERED_RESOURCE_KEY": "events",
+    # How a sweep hands each per-subscription job over. Default: run it inline.
+    "JOB_DISPATCHER": "myproject.billing.enqueue",
+    # Per-provider credentials. A provider absent here stays registered -- its
+    # inbound webhook route keeps resolving -- but every outbound call site
+    # refuses it rather than authenticating with an empty credential.
+    "PROVIDERS": {
+        "stripe": {
+            "API_KEY": env("STRIPE_SECRET_KEY"),
+            "WEBHOOK_SECRET": env("STRIPE_WEBHOOK_SECRET"),
+            "PUBLISHABLE_KEY": env("STRIPE_PUBLISHABLE_KEY"),
+        },
+    },
+    "DEFAULT_PROVIDER": "stripe",
+    # Absolute base the provider callback URLs are built against.
+    "SITE_DOMAIN": "api.example.com",
+}
+```
+
+The full list of keys, each with the default it falls back to, is in
+[`billing/conf.py`](billing/conf.py). An unknown key raises rather than being
+ignored, so a typo cannot silently leave you on a default.
+
+### Rendering errors
+
+The services raise typed errors carrying a machine-readable `code`. Point DRF at
+the shipped handler to render them, or call it from your own:
+
+```python
+REST_FRAMEWORK = {
+    "EXCEPTION_HANDLER": "billing.exception_handling.billing_exception_handler",
+}
+```
+
+Over-limit and declined-charge errors render as `402`, subscription-state
+conflicts as `409`, and a provider this deployment holds no credential for as
+`503` — see [`billing/exception_handling.py`](billing/exception_handling.py) for
+the table.
+
+### Organization hierarchies
+
+`vinta-django-orgs`' organization model has a name and a slug and nothing else,
+so the library cannot assume a parent field exists. The default
+`FlatHierarchy` treats every organization as its own billing root. A project
+whose organizations nest subclasses the shipped parent-chain walk:
+
+```python
+from billing.hierarchy import ParentFieldHierarchy
+
+
+class ResellerHierarchy(ParentFieldHierarchy):
+    parent_field = "parent"
+    root_flag_field = "can_invite_organizations"  # a flagged child pays for itself
+```
+
+The walk is cycle-guarded: `parent` is user-mutable data, and returning an
+arbitrary node from a cycle would leave every organization on it billing against
+a different root depending on where the walk started.
+
+### Audit
+
+Transitions are published as Django signals rather than written to an audit log
+this package would have to invent. See [`billing/signals.py`](billing/signals.py).
+They are sent inside the caller's transaction, so a receiver that raises rolls
+the transition back with it.
+
+## REST API
+
+The shipped viewsets are offered as routes rather than a ready-made `urls.py`,
+so you mount them where you want:
+
+```python
+from billing.routing import billing_router, get_extra_patterns
+
+urlpatterns = [
+    path("api/", include(billing_router().urls)),
+    *get_extra_patterns(),
+]
+```
+
+## Development
+
+```bash
+uv sync --all-extras
+uv run pytest
+uv run tox              # the full matrix: py3.11–3.14 x Django 5.2/6.0/6.1
+uv run tox -e swapped   # the suite against a swapped ORGANIZATION_MODEL
+uv run pre-commit install
+```
+
+`tox -e swapped` runs everything again with `ORGANIZATION_MODEL` pointed at a
+project-defined model instead of the one `vinta-django-orgs` ships. Under the
+default settings those are the same class, so a foreign key hardcoded to
+`organizations.Organization` passes the whole suite and only breaks in a project
+that actually swapped the model — this is what catches it.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

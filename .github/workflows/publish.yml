@@ -1,0 +1,116 @@
+name: Publish
+
+# Tags carry no `v` prefix (0.1.0, 0.2.0), matching the sibling libraries.
+# `*` never matches `/`, which keeps archive tags such as `legacy/0.1.0-2017`
+# from triggering a release.
+on:
+  push:
+    tags: ["[0-9]*.[0-9]*.[0-9]*"]
+  # Manual runs cover reruns after a publish fails halfway. Dispatching from
+  # the tag itself is not enough — GitHub reads the workflow file from the
+  # chosen ref, so a tag predating this file cannot run it. Hence an explicit
+  # tag input.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. 0.1.0)"
+        required: true
+        type: string
+
+# `github.ref_name` is the tag on a push, but the branch the run was started
+# from on a dispatch, so every job resolves the tag through this instead.
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # A dispatch defaults to the branch head; build the tagged source.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv build
+
+      # The version is dynamic (hatch reads billing/__init__.py), so the tag
+      # and the package can disagree — pushing 0.2.0 without bumping the file
+      # would upload an artifact labelled 0.1.0, and PyPI would either reject
+      # it as a duplicate or, worse, accept it under the wrong version.
+      # Compare against the built filenames: that is what actually gets
+      # uploaded.
+      - name: Check the tag matches the package version
+        run: |
+          if [ ! -f "dist/vinta_django_billing-${TAG}.tar.gz" ]; then
+            echo "::error::Tag ${TAG} does not match the built distributions:"
+            ls -1 dist
+            echo "::error::Bump __version__ in billing/__init__.py to ${TAG}, or retag."
+            exit 1
+          fi
+          echo "Tag ${TAG} matches the built distributions."
+
+      - name: Check the built distributions
+        run: uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Gates the upload behind the `pypi` environment, so protection rules (a
+    # required reviewer, a tag allowlist) apply before anything reaches PyPI.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/vinta-django-billing/
+    permissions:
+      # Mints the short-lived OIDC token that PyPI trusted publishing exchanges
+      # for an upload token. No API token is stored in the repository.
+      id-token: write
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # `always` rather than the default `automatic`: a misconfigured trusted
+      # publisher should fail the job outright, not fall back to looking for a
+      # token that is not there.
+      - run: uv publish --trusted-publishing always
+
+  attach:
+    name: Attach distributions to the release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # The release is created by hand from the HISTORY.md notes and may not
+      # exist yet when the tag lands, so a missing release is not a failure.
+      - name: Upload the sdist and wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            echo "No release for ${TAG} yet; skipping upload."
+          fi

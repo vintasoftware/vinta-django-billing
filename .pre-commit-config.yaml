@@ -1,0 +1,41 @@
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: debug-statements
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.12.3
+    hooks:
+      # Fails when pyproject.toml changed without refreshing uv.lock.
+      - id: uv-lock
+
+  - repo: local
+    hooks:
+      # Run through uv rather than in an environment pre-commit builds: the
+      # django-stubs plugin loads `tests.settings` and walks the app registry,
+      # so it needs this project and its dependencies actually installed.
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        # mypy is configured with the file set it checks, and the plugin needs
+        # the whole app registry rather than just the changed files.
+        pass_filenames: false
+        require_serial: true

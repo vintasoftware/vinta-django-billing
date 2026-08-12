@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }} / Django ${{ matrix.django }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        django: ["5.2", "6.0", "6.1"]
+        exclude:
+          # Django 6.0 raised the minimum Python version to 3.12.
+          - python-version: "3.11"
+            django: "6.0"
+          - python-version: "3.11"
+            django: "6.1"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run tests
+        run: |
+          env_name="py${{ matrix.python-version }}-django${{ matrix.django }}"
+          uv run --frozen tox -e "${env_name//./}"
+
+      - name: Export coverage
+        run: uv run --frozen coverage xml
+
+      - uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          flags: py${{ matrix.python-version }}-django${{ matrix.django }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+        continue-on-error: true
+
+  swapped-organization-model:
+    name: swapped ORGANIZATION_MODEL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # Every organization relation has to resolve through ORGANIZATION_MODEL.
+      # That is invisible under the default settings, where the swappable
+      # reference and the concrete model are the same class.
+      - run: uv run --frozen tox -e swapped
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      # Runs ruff, mypy and the file-hygiene hooks, exactly as the local hook
+      # does. The mypy hook shells out to `uv run`, so the environment has to
+      # exist before pre-commit starts.
+      - run: uv sync --frozen
+
+      - run: uv run --frozen pre-commit run --all-files --show-diff-on-failure
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv build
+
+      - name: Check the built distributions
+        run: uvx twine check dist/*
