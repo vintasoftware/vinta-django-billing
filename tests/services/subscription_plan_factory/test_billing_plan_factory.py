@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 from model_bakery import baker
-from organizations.conf import get_organization_model
+from vinta_orgs.conf import get_organization_model
 
 from billing.constants import BillingInterval, PaymentProviders
 from billing.models import BillingPlan, Subscription

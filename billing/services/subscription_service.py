@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
-from organizations.models import Organization
+from vinta_orgs.models import Organization
 
 from billing import hierarchy
 from billing.conf import get_setting

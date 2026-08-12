@@ -1,9 +1,9 @@
 """Every organization relation in ``billing`` resolves through ``ORGANIZATION_MODEL``.
 
 These only run under ``tests.settings_swapped``, where the organization model is
-``swapped_orgs.Tenant`` and the concrete ``organizations.Organization`` has no
+``swapped_orgs.Tenant`` and the concrete ``vinta_orgs.Organization`` has no
 table at all. Under the default settings the two are the same class, so a
-hardcoded ``"organizations.Organization"`` target would pass every other test in
+hardcoded ``"vinta_orgs.Organization"`` target would pass every other test in
 the suite and only fail in a project that actually swapped the model.
 
 The suite skips itself rather than failing when run under the default settings,
@@ -15,7 +15,7 @@ from django.apps import apps
 from django.conf import settings
 from django.db import connection
 from model_bakery import baker
-from organizations.conf import get_organization_model
+from vinta_orgs.conf import get_organization_model
 
 from billing.models import (
     BillingProfile,
@@ -27,8 +27,7 @@ from billing.models import (
 pytestmark = [
     pytest.mark.django_db,
     pytest.mark.skipif(
-        getattr(settings, "ORGANIZATION_MODEL", "organizations.Organization")
-        != "swapped_orgs.Tenant",
+        getattr(settings, "ORGANIZATION_MODEL", "vinta_orgs.Organization") != "swapped_orgs.Tenant",
         reason="Only meaningful under tests.settings_swapped.",
     ),
 ]
@@ -50,10 +49,10 @@ ORGANIZATION_RELATIONS = [
 def test_the_stock_organization_model_really_is_swapped_out():
     """Guards the premise of every other test here.
 
-    If ``organizations.Organization`` still had a table, a hardcoded foreign key
+    If ``vinta_orgs.Organization`` still had a table, a hardcoded foreign key
     to it would keep working and the rest of this module would prove nothing.
     """
-    stock = apps.get_model("organizations", "Organization")
+    stock = apps.get_model("vinta_orgs", "Organization")
 
     assert stock._meta.swapped == "swapped_orgs.Tenant"
     assert stock._meta.db_table not in connection.introspection.table_names()
@@ -70,7 +69,7 @@ def test_organization_relations_point_at_the_swapped_model(model_name, field_nam
 def test_the_swapped_model_is_not_the_stock_one():
     """A sanity check on the check: ``related_model is get_organization_model()``
     would also hold if nothing had been swapped."""
-    assert get_organization_model() is not apps.get_model("organizations", "Organization")
+    assert get_organization_model() is not apps.get_model("vinta_orgs", "Organization")
     assert hasattr(get_organization_model(), "external_reference")
 
 

@@ -13,7 +13,10 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ("organizations", "0005_alter_organizationmembership_options"),
+        # ``vinta-django-orgs`` 0.2.0 renamed both apps and collapsed each one's
+        # migrations into a single ``0001_initial`` under the new label, so this
+        # names that rather than the pre-rename leaf it was generated against.
+        ("vinta_orgs", "0001_initial"),
         migrations.swappable_dependency(settings.ORGANIZATION_MODEL),
     ]
 

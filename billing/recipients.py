@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from organizations.models import Organization
+from vinta_orgs.models import Organization
 
 
 def all_members(organization: Organization) -> Sequence[Any]:
@@ -31,7 +31,7 @@ def all_members(organization: Organization) -> Sequence[Any]:
     message that reaches nobody ends in an unexplained suspension, which is a
     worse failure than one extra email.
     """
-    from organizations.conf import get_organization_membership_model
+    from vinta_orgs.conf import get_organization_membership_model
 
     return list(
         get_organization_membership_model()

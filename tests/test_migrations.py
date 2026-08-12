@@ -63,7 +63,7 @@ def test_the_organization_column_points_at_the_swappable_model():
     Getting this wrong only shows up in a project that swapped the model, which
     is exactly the project least able to work around it.
     """
-    from organizations.conf import get_organization_model
+    from vinta_orgs.conf import get_organization_model
 
     from billing.models import BillingProfile
 

@@ -41,7 +41,7 @@ Extras: `stripe`, `mercadopago`, `openapi`.
 INSTALLED_APPS = [
     ...,
     "rest_framework",
-    "organizations.apps.OrganizationsConfig",  # vinta-django-orgs
+    "vinta_orgs.apps.OrganizationsConfig",  # vinta-django-orgs
     "billing.apps.BillingConfig",
 ]
 ```
@@ -237,7 +237,7 @@ uv run pre-commit install
 `tox -e swapped` runs everything again with `ORGANIZATION_MODEL` pointed at a
 project-defined model instead of the one `vinta-django-orgs` ships. Under the
 default settings those are the same class, so a foreign key hardcoded to
-`organizations.Organization` passes the whole suite and only breaks in a project
+`vinta_orgs.Organization` passes the whole suite and only breaks in a project
 that actually swapped the model — this is what catches it.
 
 ## License

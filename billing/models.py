@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, ClassVar
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q, UniqueConstraint
-from organizations.conf import organization_model_string
+from vinta_orgs.conf import organization_model_string
 
 from billing.base_models import BaseModel
 from billing.constants import (

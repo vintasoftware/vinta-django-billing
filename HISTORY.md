@@ -1,5 +1,13 @@
 # History
 
+## Unreleased
+
+- Requires `vinta-django-orgs>=0.2.0,<0.3`, which renamed its apps: every
+  `organizations.*` import, the `INSTALLED_APPS` and middleware paths, and the
+  app label in the initial migration's dependency are now `vinta_orgs.*`. The
+  dependency is upper-bounded from here on — it is pre-1.0 and moving, and an
+  uncapped floor let the rename reach CI unannounced.
+
 ## 0.1.0 (unreleased)
 
 Initial extraction from the `payments` app of a multi-organization scheduling

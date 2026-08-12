@@ -49,7 +49,7 @@ class TestFlatHierarchy:
         assert FlatHierarchy().pooled_organization_ids(organization) == [organization.pk]
 
     def test_root_filter_matches_everything(self, organization, other_organization):
-        from organizations.conf import get_organization_model
+        from vinta_orgs.conf import get_organization_model
 
         matched = get_organization_model().objects.filter(FlatHierarchy().billing_root_q())
 

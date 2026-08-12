@@ -49,7 +49,7 @@ from collections.abc import Iterable, Sequence
 from decimal import Decimal
 
 from django.db import transaction
-from organizations.conf import get_organization_model
+from vinta_orgs.conf import get_organization_model
 
 from billing.metering import get_occurrence_source
 from billing.models import MeteredOccurrence, Subscription

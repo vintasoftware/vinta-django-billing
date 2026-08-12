@@ -19,10 +19,10 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from organizations.models import Organization
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
 from rest_framework.views import APIView
+from vinta_orgs.models import Organization
 
 from billing.conf import get_object_from_setting
 
@@ -43,7 +43,7 @@ def any_member_may_manage_billing(user: Any, organization: Organization | None) 
     if organization is None or user is None or not user.is_authenticated:
         return False
 
-    from organizations.conf import get_organization_membership_model
+    from vinta_orgs.conf import get_organization_membership_model
 
     membership_model = get_organization_membership_model()
     return membership_model.objects.filter(user=user, organization=organization).exists()

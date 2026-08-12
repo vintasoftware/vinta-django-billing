@@ -8,7 +8,7 @@ identical so a project migrating off that app sees no schema change.
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from model_utils.fields import AutoCreatedField, AutoLastModifiedField
-from organizations.mixins import SingleOrganizationModelMixin
+from vinta_orgs.mixins import SingleOrganizationModelMixin
 
 
 class IndexedTimeStampedModel(models.Model):

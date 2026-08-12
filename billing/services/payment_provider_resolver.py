@@ -16,7 +16,7 @@ read path and the write path.
 
 import logging
 
-from organizations.models import Organization
+from vinta_orgs.models import Organization
 
 from billing.conf import get_setting
 from billing.models import BillingProfile
