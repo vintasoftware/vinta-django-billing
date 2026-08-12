@@ -20,8 +20,6 @@ from django.db.models import QuerySet, Sum
 from django.utils import timezone
 from django_virtual_models.generic_views import GenericVirtualModelViewMixin
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
-from organizations.conf import get_organization_model
-from organizations.models import Organization
 from rest_framework import mixins, serializers, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied
@@ -31,6 +29,8 @@ from rest_framework.response import Response
 from rest_framework.serializers import BaseSerializer
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.viewsets import GenericViewSet, ViewSet
+from vinta_orgs.conf import get_organization_model
+from vinta_orgs.models import Organization
 
 from billing.constants import BillingState
 from billing.filtersets import (

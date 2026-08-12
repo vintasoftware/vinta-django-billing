@@ -28,7 +28,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "rest_framework",
-    "organizations.apps.OrganizationsConfig",
+    "vinta_orgs.apps.OrganizationsConfig",
     "billing.apps.BillingConfig",
     # Registers the resources and entitlements the suite bills for, standing in
     # for a host application. Nothing in `billing` knows these exist.
@@ -38,7 +38,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "organizations.middleware.OrganizationMiddleware",
+    "vinta_orgs.middleware.OrganizationMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",

@@ -4,7 +4,7 @@
 
 import pytest
 from model_bakery import baker
-from organizations.conf import get_organization_model
+from vinta_orgs.conf import get_organization_model
 
 from billing.constants import PaymentProviders
 from billing.exceptions import PaymentProviderNotConfiguredError

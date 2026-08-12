@@ -39,7 +39,12 @@ dependencies = [
     # The organization models every table here is scoped to. Only the
     # library's guaranteed surface is used -- the swappable model reference,
     # the scoping mixin and the retriever -- never a project-specific field.
-    "vinta-django-orgs>=0.1.1",
+    #
+    # Upper-bounded because it is pre-1.0 and moving: 0.2.0 renamed both apps,
+    # which changes every import path and app label here. An uncapped floor let
+    # that release reach CI unannounced and break `main`. Raise the cap
+    # deliberately, with the migration in the same change.
+    "vinta-django-orgs>=0.2.0,<0.3",
 ]
 
 [project.optional-dependencies]

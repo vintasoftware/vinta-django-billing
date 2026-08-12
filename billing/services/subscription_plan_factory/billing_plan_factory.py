@@ -8,10 +8,9 @@ class BillingPlanFactory(BaseSubscriptionPlanFactory):
     """Builds the payment-gateway-facing ``CreatedPlan`` dataclass from a
     ``Subscription``'s catalog ``BillingPlan``.
 
-    Replaces the dead ``OrganizationSubscriptionPlanFactory``, which read the
-    now-deleted per-organization subscription-plan model that used to live in the
-    ``organizations`` app, and never actually implemented ``make_plan_from_subscription``
-    — the method name ``PaymentService`` calls.
+    The plan a subscriber is charged against is the catalog row, read straight
+    off ``subscription.plan`` -- there is no per-organization plan model to
+    resolve through first.
     """
 
     def make_plan_from_subscription(self, subscription: Subscription) -> CreatedPlan:

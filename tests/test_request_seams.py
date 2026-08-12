@@ -7,8 +7,8 @@ that forgets to narrow, hands one tenant another's billing.
 
 import pytest
 from django.test import override_settings
-from organizations.state import organization_context
 from rest_framework.test import APIRequestFactory
+from vinta_orgs.state import organization_context
 
 from billing.permissions import (
     IsBillingManager,

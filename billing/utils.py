@@ -21,8 +21,8 @@ def get_request_organization(request: HttpRequest | Any) -> Model | None:
     if organization is not None:
         return organization  # type: ignore[no-any-return]
 
-    from organizations.middleware import get_organization
-    from organizations.state import get_current_organization
+    from vinta_orgs.middleware import get_organization
+    from vinta_orgs.state import get_current_organization
 
     if isinstance(request, HttpRequest):
         organization = get_organization(request)

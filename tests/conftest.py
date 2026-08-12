@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from organizations.conf import get_organization_membership_model, get_organization_model
+from vinta_orgs.conf import get_organization_membership_model, get_organization_model
 
 from billing.constants import BillingInterval, BillingState, LimitKind
 from billing.models import BillingPlan, PlanLimit, Subscription

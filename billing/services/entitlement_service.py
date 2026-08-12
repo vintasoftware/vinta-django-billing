@@ -24,7 +24,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from django.db.models import Sum
-from organizations.models import Organization
+from vinta_orgs.models import Organization
 
 from billing.constants import BillingState, LimitKind, LimitRemedy
 from billing.counting import UsageContext, count_by_organization

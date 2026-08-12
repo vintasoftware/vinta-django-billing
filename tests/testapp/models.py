@@ -8,7 +8,7 @@ invitations), and neither is mentioned anywhere in ``billing``.
 
 from django.conf import settings
 from django.db import models
-from organizations.mixins import SingleOrganizationModelMixin
+from vinta_orgs.mixins import SingleOrganizationModelMixin
 
 
 class Widget(SingleOrganizationModelMixin):

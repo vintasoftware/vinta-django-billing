@@ -3,14 +3,14 @@
 The whole point of this app is to be *different* from the concrete models
 ``vinta-django-orgs`` ships: a different app label, a different table, and an
 extra field neither of the stock models has. If any foreign key in ``billing``
-still pointed at ``organizations.Organization``, the swap would take the stock
+still pointed at ``vinta_orgs.Organization``, the swap would take the stock
 model's table out of existence underneath it and every one of those relations
 would break — which is exactly what ``tests/test_swappable_models.py`` asserts
 does *not* happen.
 """
 
 from django.db import models
-from organizations.models import AbstractOrganization, AbstractOrganizationMembership
+from vinta_orgs.models import AbstractOrganization, AbstractOrganizationMembership
 
 
 class Tenant(AbstractOrganization):

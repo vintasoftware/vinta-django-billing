@@ -18,7 +18,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
-from organizations.models import Organization
+from vinta_orgs.models import Organization
 
 from billing.constants import BillingState, LimitWarningLevel
 from billing.models import LimitWarningNotification, Subscription
