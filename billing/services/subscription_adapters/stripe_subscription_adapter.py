@@ -109,12 +109,10 @@ def _select_payment_intent_id(payments: object) -> str | None:
     `InvoicePayment` collection) -- never blindly `data[0]`. Stripe does not
     document an ordering guarantee for this list, and a dunning-recovered
     invoice carries *both* the dead card's failed attempt and the new card's
-    successful one: `data[0]` picked the failed attempt's PaymentIntent in
-    this phase's reproduction, whose status (`"pending"` in the reviewer's
-    repro) matches neither `APPROVED` nor any `FAILED_SUBSCRIPTION_PAYMENT
-    _STATUSES` member, so nothing happened even though the balance was
-    genuinely collected (Billing API Contract Hardening, Phase 4 reviewer
-    finding BLOCKER 2).
+    successful one: `data[0]` picked the failed attempt's PaymentIntent in a
+    recorded reproduction, whose status (`"pending"`) matches neither
+    `APPROVED` nor any `FAILED_SUBSCRIPTION_PAYMENT_STATUSES` member, so
+    nothing happened even though the balance was genuinely collected.
 
     Prefers the entry whose own `status` (`InvoicePayment.status`, one of
     `"open"`, `"paid"`, `"canceled"`) is `"paid"` -- the one that actually
@@ -140,17 +138,18 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
     provider = PaymentProviders.STRIPE
     #: Stripe's `Stripe-Signature` header signs `{timestamp}.{raw_body}` — the
     #: entire body — unlike MercadoPago's narrower manifest. See
-    #: `payments.services.stripe_signature.verify_stripe_event`.
+    #: `billing.services.stripe_signature.verify_stripe_event`.
     verifies_full_body = True
 
-    def __init__(self, api_key: str, webhook_secret: str = ""):
+    def __init__(self, api_key: str = "", webhook_secret: str = ""):
         self.api_key = api_key
         self.webhook_secret = webhook_secret
 
     @property
     def is_configured(self) -> bool:
-        """See ``BaseSubscriptionAdapter.is_configured``. ``STRIPE_SECRET_KEY`` is
-        the credential every outbound Stripe call is made with (``api_key=``)."""
+        """See ``BaseSubscriptionAdapter.is_configured``. The ``stripe`` provider
+        entry's ``API_KEY`` is the credential every outbound Stripe call is made
+        with (``api_key=``)."""
         return bool(self.api_key)
 
     def create_subscription_plan(self, plan: Plan) -> str:
@@ -376,7 +375,7 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
         links in that chain are always empty in practice -- which is exactly
         why the subscription-level default (the one `update_subscription_payment_token`
         pins) is the one that actually wins when `payment_token` is omitted,
-        not an accident of Stripe's ordering. This phase's original probe
+        not an accident of Stripe's ordering. The original probe
         could not confirm the subscription-vs-customer half of that
         precedence because it had updated both to the new card. Passing
         `payment_token` explicitly here removes the ambiguity entirely: every
@@ -384,8 +383,7 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
         `retry_payment` just attached (`update_subscription_payment_token`,
         called immediately before this).
 
-        When `payment_token` is **empty** (Billing API Contract Hardening,
-        Phase 5 -- the dunning ladder's own call, via
+        When `payment_token` is **empty** (the dunning ladder's own call, via
         `SubscriptionService.retry_failed_charge`), `payment_method` is
         omitted from `Invoice.pay` entirely rather than passed as `""` --
         Stripe rejects an explicit empty string, and omitting the key is what
@@ -407,10 +405,9 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
 
         **`stripe.CardError` and `stripe.InvalidRequestError` are both
         translated into `ChargeDeclinedError`** -- a live Stripe test-mode
-        probe of this exact call (Billing API Contract Hardening, Phase 5
-        BLOCKER) proved a still-dead card on file (the *common* dunning-tick
-        outcome) raises `stripe.CardError` from `Invoice.pay`, uncaught. A
-        Tier 4 reviewer then proved, with a second runnable probe, that a
+        probe of this exact call proved a still-dead card on file (the *common*
+        dunning-tick outcome) raises `stripe.CardError` from `Invoice.pay`,
+        uncaught. A second runnable probe then proved that a
         customer with **no** default payment method at all -- the payer
         detached their card in the billing portal, also a canonical dunning
         population -- makes `Invoice.pay` raise `stripe.InvalidRequestError`
@@ -421,8 +418,8 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
         `SubscriptionService.retry_failed_charge` as a raw provider exception,
         which the codebase's adapter abstraction never allows past this layer
         (`SubscriptionService` must not import `stripe` types), and would have
-        propagated out of the `process_dunning_for_subscription` Celery task
-        -- see that task's own docstring for why an uncaught raise there is a
+        propagated out of the `process_dunning_for_subscription` job
+        -- see that job's own docstring for why an uncaught raise there is a
         permanent, per-subscription redelivery loop, not a one-off failure.
 
         Both are folded into the **same** `ChargeDeclinedError` rather than a
@@ -632,8 +629,7 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
         `Invoice.pay` had genuinely collected the real balance on the *actual*
         past-due invoice named in the `invoice.paid` event -- money moved, but
         no `Payment` row, no `PaymentStatusUpdate`, and the subscription rode
-        GRACE straight to RESTRICTED (Billing API Contract Hardening, Phase 4
-        reviewer finding BLOCKER 1).
+        GRACE straight to RESTRICTED.
 
         `customer.subscription.*` events have no specific invoice to resolve
         against -- their `data.object` *is* the subscription itself, not

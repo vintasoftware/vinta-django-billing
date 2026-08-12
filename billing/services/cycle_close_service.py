@@ -45,8 +45,8 @@ Five properties carry that weight:
 
 5. **Best-effort across subscriptions.** One subscription's close failing (a
    declined charge, a provider error) must not abort the sweep for the rest — the
-   beat task fans out one Celery task per subscription, each catching and logging
-   its own failure (``payments.tasks.close_subscription_billing_period``).
+   sweep fans out one job per subscription, each catching and logging
+   its own failure (``billing.jobs.close_subscription_billing_period``).
 
 6. **Persisting the closed-period statement can never undo a committed charge or
    block the roll.** ``_close_one_period`` writes a durable ``BillingPeriodSummary``
@@ -111,7 +111,7 @@ def overage_idempotency_key(subscription: Subscription, period_start: datetime.d
     **The single most important line here.** It is forwarded to the provider's own
     idempotency header (via ``PaymentService.create_payment`` ->
     ``BasePaymentAdapter.process``), so two
-    attempts to close the *same* period — a Celery redelivery, or a retry after a
+    attempts to close the *same* period — a job redelivery, or a retry after a
     crash between the charge and the period-roll — resolve to **one** charge at the
     provider even when the local ``Payment`` row from the first attempt was rolled
     back. Derived from ``period_start`` (not "now" and not a fresh uuid) precisely
@@ -125,9 +125,9 @@ class CycleCloseService:
     """Closes elapsed billing periods: settles accrued overage, rolls the period
     forward, and applies the period-boundary actions deferred to close time.
 
-    Stateless; built by ``billing.services.container``. Runs from a Celery task, never a
-    request, so it opens its own ``transaction.atomic`` blocks (there is no
-    ``ATOMIC_REQUESTS`` wrapper around a task).
+    Stateless; built by ``billing.services.container``. Runs from a background job,
+    never a request, so it opens its own ``transaction.atomic`` blocks (there is no
+    ``ATOMIC_REQUESTS`` wrapper around a job).
     """
 
     def __init__(
@@ -329,7 +329,7 @@ class CycleCloseService:
         report: ReconciliationReport,
     ) -> None:
         """Write the durable ``BillingPeriodSummary`` (+ one ``BillingPeriodResourceUsage``
-        per ``LimitedResource`` member) for the period just settled.
+        per registered resource) for the period just settled.
 
         **Ordering is the whole point of where this is called from**
         (``_close_one_period``, after ``reconcile_period``/``_charge_overage`` and
@@ -467,7 +467,7 @@ class CycleCloseService:
         This method's failure-isolation behavior is exercised under **test**
         settings only. ``ATOMIC_REQUESTS`` itself does not gate this specific path
         — ``close_subscription`` opens its own explicit ``transaction.atomic()``
-        regardless of that setting, because it runs from a Celery task, never a
+        regardless of that setting, because it runs from a background job, never a
         request — but the covering test still only proves Django's nested-atomic /
         savepoint rollback semantics under pytest-django's own transaction
         wrapping, not against a live worker process under production settings. Do

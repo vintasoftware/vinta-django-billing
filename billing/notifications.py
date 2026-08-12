@@ -1,13 +1,30 @@
 """Where dunning and usage-warning messages go.
 
 The engine decides *that* an organization should be told its card failed or that
-it is close to a limit. It does not decide how -- that is a transport, and every
-project already has one.
+it is close to a limit, and hands over the facts. It does not decide how the
+message is delivered or rendered -- that is a transport, every project already
+has one, and this package deliberately ships no adapter for any of them.
+
+A notifier is anything with :meth:`Notifier.create_notification`. Point
+``NOTIFIER`` at yours:
+
+    # settings.py
+    VINTA_BILLING = {'NOTIFIER': 'myproject.billing.Notifier'}
+
+    # myproject/billing.py
+    class Notifier:
+        def create_notification(self, user_id, notification_type, title,
+                                body_template, context_name, context_kwargs,
+                                **kwargs):
+            my_transport.send(user_id, title, context_name, context_kwargs)
+
+``context_name`` names the message ("dunning_entered_grace_context",
+"approaching_limit_context", ...) and ``context_kwargs`` carries the facts it
+needs. Rendering them into a template is the project's job -- shipping the
+templates here would mean shipping an opinion about the transport too.
 
 Services take a notifier as a constructor argument and fall back to the
-configured default, so a test can pass a recorder without touching settings:
-
-    VINTA_BILLING = {'NOTIFIER': 'billing.notifications.VintaSendNotifier'}
+configured one, so a test can pass a recorder without touching settings.
 """
 
 from __future__ import annotations
@@ -22,9 +39,9 @@ logger = logging.getLogger(__name__)
 class NotificationTypes:
     """The delivery channels the shipped services ask for.
 
-    Values match ``vintasend.constants.NotificationTypes`` so the adapter below
-    is a pass-through, but they are declared here so nothing in the engine
-    imports vintasend.
+    A hint to the notifier about which channel the engine intends, not a
+    promise that the project supports it -- a notifier free to ignore the ones
+    it does not implement.
     """
 
     EMAIL = "EMAIL"
@@ -79,48 +96,6 @@ class LoggingNotifier:
                 "context_name": context_name,
             },
         )
-
-
-class VintaSendNotifier:
-    """Adapter onto ``vintasend``. Requires the ``vintasend`` extra."""
-
-    def __init__(self, notification_service: Any = None) -> None:
-        if notification_service is None:
-            # Imported lazily so the module is importable without the extra.
-            # `NotificationService` reads its adapters and backend from the
-            # project's vintasend settings, so it takes no arguments here.
-            from vintasend.services.notification_service import NotificationService
-
-            notification_service = NotificationService()
-        self._service = notification_service
-
-    def create_notification(
-        self,
-        user_id: Any,
-        notification_type: str,
-        title: str,
-        body_template: str,
-        context_name: str,
-        context_kwargs: dict[str, Any],
-        subject_template: str | None = None,
-        preheader_template: str | None = None,
-        send_after: Any = None,
-    ) -> Any:
-        kwargs: dict[str, Any] = {
-            "user_id": user_id,
-            "notification_type": notification_type,
-            "title": title,
-            "body_template": body_template,
-            "context_name": context_name,
-            "context_kwargs": context_kwargs,
-        }
-        if subject_template is not None:
-            kwargs["subject_template"] = subject_template
-        if preheader_template is not None:
-            kwargs["preheader_template"] = preheader_template
-        if send_after is not None:
-            kwargs["send_after"] = send_after
-        return self._service.create_notification(**kwargs)
 
 
 def get_notifier() -> Notifier:

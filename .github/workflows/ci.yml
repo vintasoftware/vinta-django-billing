@@ -49,6 +49,23 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
 
+  swapped-organization-model:
+    name: swapped ORGANIZATION_MODEL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # Every organization relation has to resolve through ORGANIZATION_MODEL.
+      # That is invisible under the default settings, where the swappable
+      # reference and the concrete model are the same class.
+      - run: uv run --frozen tox -e swapped
+
   lint:
     runs-on: ubuntu-latest
     steps:

@@ -1,65 +1,97 @@
-"""Scheduled billing work.
+"""The recurring work this package needs run, as plain callables.
 
-``meter_event_occurrences`` is the only thing that turns computed calendar
-occurrences into billable rows, so the correctness of post-paid billing rests on
-it running — and on it being harmless when it runs twice.
+**No Celery.** These are ordinary functions, so how they are scheduled is
+entirely the project's business -- Celery beat, a cron entry, a management
+command, RQ, a Lambda on a timer. Nothing here imports a queue.
 
-``process_dunning`` is the beat entry point for the grace/dunning state
-machine: it fans out one tick per subscription currently GRACE or RESTRICTED to
-``DunningService.process_subscription`` — the single dispatch point that also
-backs the webhook handlers in ``payments/views.py`` — so the transitions this
-task can drive and the transitions the webhooks can drive are the same set,
-defined once (``payments.services.billing_state_machine``).
+There are two shapes. A *sweep* (``process_dunning``, ``meter_event_occurrences``,
+``close_billing_periods``, ``check_approaching_limits``) finds the subscriptions
+that need work and hands each one to a *per-subscription job*. The sweeps do not
+decide how that hand-off happens: they call a ``dispatch`` callable, which
+defaults to running the job inline.
 
-``check_approaching_limits`` is the beat entry point for the proactive
-usage-warning half of "an organization can see where it stands, and is warned
-before it is blocked" — it fans out one tick per subscription (excluding
-``RESTRICTED``/``CANCELLED``, see ``UsageWarningService.check_subscription``)
-to ``UsageWarningService.check_subscription``, which is where "approaching a
-limit" is actually defined.
+Wiring it to Celery is about fifteen lines in the project:
+
+    # myproject/billing_tasks.py
+    from celery import shared_task
+    from billing import jobs
+
+    @shared_task
+    def process_dunning_for_subscription(subscription_id):
+        jobs.process_dunning_for_subscription(subscription_id)
+
+    @shared_task
+    def process_dunning():
+        jobs.process_dunning(
+            dispatch=lambda job, *args: process_dunning_for_subscription.delay(*args)
+        )
+
+The default inline dispatcher is correct for a cron-driven project and for
+tests; it is the wrong choice for a large installation, where one slow
+subscription would hold up the whole sweep. Configure a queueing dispatcher
+through ``VINTA_BILLING['JOB_DISPATCHER']``, or pass one per call.
+
+Every per-subscription job is idempotent, because at-least-once delivery is the
+only guarantee a queue gives: the same arguments produce the same rows, and a
+redelivery writes nothing new.
 """
+
+from __future__ import annotations
 
 import datetime
 import logging
+from collections.abc import Callable
+from typing import Any
 
 from django.utils import timezone
 
 from billing.constants import BillingState
 from billing.models import Subscription
+from billing.services.container import (
+    get_cycle_close_service,
+    get_dunning_service,
+    get_metering_service,
+    get_usage_warning_service,
+)
 from billing.services.cycle_close_service import CycleCloseService
 from billing.services.dunning_service import DunningService
 from billing.services.metering_service import MeteringService
 from billing.services.usage_warning_service import UsageWarningService
 
 
-try:
-    from celery import shared_task
-except ImportError:  # pragma: no cover - exercised only without the extra
+#: ``(job, *args) -> None``. Called once per subscription a sweep finds.
+Dispatch = Callable[..., Any]
 
-    def shared_task(*args, **kwargs):  # type: ignore[misc]
-        """No-op stand-in used when Celery is not installed.
 
-        The task bodies below are ordinary functions and stay callable -- a
-        project driving them from cron, a management command or a different
-        queue does not need Celery on the path. Only the ``.delay`` /
-        ``.apply_async`` surface is missing, which is exactly what such a
-        project is not using.
-        """
-        if len(args) == 1 and not kwargs and callable(args[0]):
-            return args[0]
+def run_inline(job: Dispatch, *args: Any) -> None:
+    """The default dispatcher: call the job straight away, in this process.
 
-        def decorator(func):
-            return func
+    Correct for cron-driven projects and for tests. Wrong for a large
+    installation -- one slow subscription holds up every subscription behind it,
+    and a crash mid-sweep loses the rest of the run. Configure
+    ``JOB_DISPATCHER`` to hand each job to a queue instead.
+    """
+    job(*args)
 
-        return decorator
+
+def get_dispatcher() -> Dispatch:
+    """The configured dispatcher, or :func:`run_inline`."""
+    from billing.conf import get_object_from_setting
+
+    dispatcher = get_object_from_setting("JOB_DISPATCHER")
+    if dispatcher is None:
+        return run_inline
+    if isinstance(dispatcher, type):
+        return dispatcher()
+    return dispatcher
 
 
 logger = logging.getLogger(__name__)
 
 
 #: How far back each sweep re-reads. Deliberately **wider than the beat interval**
-#: (see ``CELERYBEAT_SCHEDULE``'s ``meter_event_occurrences`` entry, every 15
-#: minutes), so consecutive runs overlap heavily: at six hours, up to 23
+#: (a sweep every 15 minutes is the shape this was sized against), so
+#: consecutive runs overlap heavily: at six hours, up to 23
 #: consecutive missed runs — a worker outage, a redeploy, a broker incident — are
 #: made up for by the next successful run with no operator action and no backfill
 #: command. Re-reading an already-metered stretch costs one expansion query and
@@ -80,40 +112,44 @@ logger = logging.getLogger(__name__)
 METERING_SWEEP_WINDOW = datetime.timedelta(hours=6)
 
 
-@shared_task
-def meter_event_occurrences() -> None:
+def meter_event_occurrences(dispatch: Dispatch | None = None) -> None:
     """Beat entry point: fan out a metering sweep for every subscription.
 
     The window is computed **once here** and passed explicitly to each
     per-subscription task, rather than being recomputed inside them. A task that
     derived its own window from ``timezone.now()`` would sweep a different stretch
-    on every ``CELERY_TASK_ACKS_LATE`` redelivery, so a retry would not be a repeat
+    on every at-least-once delivery redelivery, so a retry would not be a repeat
     of the same work — which is exactly the property that makes redelivery safe.
     """
+
+    dispatch = dispatch or get_dispatcher()
     window_end = timezone.now()
     window_start = window_end - METERING_SWEEP_WINDOW
     for subscription_id in MeteringService.subscriptions_to_sweep():
-        meter_subscription_event_occurrences.delay(
-            subscription_id, window_start.isoformat(), window_end.isoformat()
+        dispatch(
+            meter_subscription_event_occurrences,
+            subscription_id,
+            window_start.isoformat(),
+            window_end.isoformat(),
         )
 
 
-@shared_task
 def meter_subscription_event_occurrences(
     subscription_id: int,
     window_start: str,
     window_end: str,
-    metering_service: "MeteringService | None" = None,
+    metering_service: MeteringService | None = None,
 ) -> None:
     """Meter one subscription's pooled subtree over an explicit window.
 
-    Idempotent, as ``CELERY_TASK_ACKS_LATE`` requires: the same arguments produce
+    Idempotent, as at-least-once delivery requires: the same arguments produce
     the same rows, and re-running inserts nothing.
 
     A subscription deleted between fan-out and execution is logged and skipped
     rather than raising — a raising task is redelivered and fails identically
     forever, turning a benign race into a permanent stream of alerts.
     """
+    metering_service = metering_service or get_metering_service()
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(
@@ -137,8 +173,7 @@ def meter_subscription_event_occurrences(
     )
 
 
-@shared_task
-def process_dunning() -> None:
+def process_dunning(dispatch: Dispatch | None = None) -> None:
     """Beat entry point: fan out one dunning tick per subscription currently
     GRACE or RESTRICTED.
 
@@ -148,25 +183,26 @@ def process_dunning() -> None:
     webhook), the next run of this query no longer includes it, which is what
     stops the ladder from retrying an already-resolved subscription.
     """
+
+    dispatch = dispatch or get_dispatcher()
     subscription_ids = list(
         Subscription.objects.filter(
             billing_state__in=(BillingState.GRACE, BillingState.RESTRICTED)
         ).values_list("pk", flat=True)
     )
     for subscription_id in subscription_ids:
-        process_dunning_for_subscription.delay(subscription_id)
+        dispatch(process_dunning_for_subscription, subscription_id)
 
 
-@shared_task
 def process_dunning_for_subscription(
     subscription_id: int,
-    dunning_service: "DunningService | None" = None,
+    dunning_service: DunningService | None = None,
 ) -> None:
     """One dunning tick for one subscription, dispatched through
     ``DunningService.process_subscription`` -- never a direct
-    ``billing_state`` write here (see ``payments.services.billing_state_machine``).
+    ``billing_state`` write here (see ``billing.services.billing_state_machine``).
 
-    Idempotent under ``CELERY_TASK_ACKS_LATE`` redelivery:
+    Idempotent under at-least-once delivery redelivery:
     ``DunningService``'s own retry-bucket gate (``Subscription.last_dunning_attempt_at``)
     and the retry charge's bucket-derived ``idempotency_key`` -- both views of
     one ``retry_attempt_ordinal`` -- are what make a redelivered tick harmless,
@@ -181,15 +217,16 @@ def process_dunning_for_subscription(
     best-effort ``except Exception`` guard ``close_subscription_billing_period``
     (below) already carries, for the same reason: a provider fault the
     adapter layer does not translate into a typed, expected outcome (a
-    genuine Stripe integration/transport error, or -- Billing API Contract
-    Hardening, Phase 5 BLOCKER -- a translated error type this call site does
-    not yet know to catch) must not be allowed to raise out of this task. An
+    genuine Stripe integration/transport error, or a translated error type this
+    call site does not yet know to catch) must not be allowed to raise out of
+    this job. An
     uncaught raise here is not a one-off failure -- per this task's own
     docstring above, it is redelivered and fails identically forever, so one
     subscription's provider fault would silently stop that subscription's
     entire ladder (no further retry, no reminder, no final-warning email)
     while looking, from the outside, like nothing is wrong.
     """
+    dunning_service = dunning_service or get_dunning_service()
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(
@@ -208,8 +245,7 @@ def process_dunning_for_subscription(
         )
 
 
-@shared_task
-def close_billing_periods() -> None:
+def close_billing_periods(dispatch: Dispatch | None = None) -> None:
     """Beat entry point: fan out one cycle-close per subscription whose current
     billing period has ended.
 
@@ -220,21 +256,22 @@ def close_billing_periods() -> None:
     best-effort-across-subscriptions approach. Each close is idempotent (the rolled
     ``current_period_start`` is the durable marker; the overage charge carries a
     ``(subscription, period_start)`` idempotency key), so a
-    ``CELERY_TASK_ACKS_LATE`` redelivery is harmless.
+    at-least-once delivery redelivery is harmless.
 
     Only billing-root subscriptions with an elapsed period are selected
     (``CycleCloseService.subscriptions_to_close`` reuses
     ``MeteringService.subscriptions_to_sweep`` so "which subscription owns this
     usage" has a single definition).
     """
+
+    dispatch = dispatch or get_dispatcher()
     for subscription_id in CycleCloseService.subscriptions_to_close():
-        close_subscription_billing_period.delay(subscription_id)
+        dispatch(close_subscription_billing_period, subscription_id)
 
 
-@shared_task
 def close_subscription_billing_period(
     subscription_id: int,
-    cycle_close_service: "CycleCloseService | None" = None,
+    cycle_close_service: CycleCloseService | None = None,
 ) -> None:
     """Close every elapsed period for one subscription, dispatched through
     ``CycleCloseService.close_subscription`` — the single place a period is
@@ -249,6 +286,7 @@ def close_subscription_billing_period(
     period does not double-charge), and one poison subscription never spins the
     task or blocks the rest of the sweep.
     """
+    cycle_close_service = cycle_close_service or get_cycle_close_service()
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(
@@ -272,8 +310,7 @@ def close_subscription_billing_period(
     )
 
 
-@shared_task
-def check_approaching_limits() -> None:
+def check_approaching_limits(dispatch: Dispatch | None = None) -> None:
     """Beat entry point: fan out one approaching-limit check per subscription
     that could still be warned before being blocked.
 
@@ -284,25 +321,26 @@ def check_approaching_limits() -> None:
     are all in scope -- a free-tier organization approaching its seat limit
     needs the same proactive warning as a paid one.
     """
+
+    dispatch = dispatch or get_dispatcher()
     subscription_ids = list(
         Subscription.objects.exclude(
             billing_state__in=(BillingState.RESTRICTED, BillingState.CANCELLED)
         ).values_list("pk", flat=True)
     )
     for subscription_id in subscription_ids:
-        check_approaching_limits_for_subscription.delay(subscription_id)
+        dispatch(check_approaching_limits_for_subscription, subscription_id)
 
 
-@shared_task
 def check_approaching_limits_for_subscription(
     subscription_id: int,
-    usage_warning_service: "UsageWarningService | None" = None,
+    usage_warning_service: UsageWarningService | None = None,
 ) -> None:
     """One approaching-limit sweep for one subscription, dispatched through
     ``UsageWarningService.check_subscription`` -- the single place "approaching
     a limit" is defined (see that method's docstring).
 
-    Idempotent under ``CELERY_TASK_ACKS_LATE`` redelivery and safe to re-run on
+    Idempotent under at-least-once delivery redelivery and safe to re-run on
     every beat tick: ``LimitWarningNotification``'s unique constraint, not
     anything here, is what keeps a still-crossed threshold from re-notifying
     every tick within the same billing cycle.
@@ -313,6 +351,7 @@ def check_approaching_limits_for_subscription(
     reasoning as ``meter_subscription_event_occurrences``/
     ``process_dunning_for_subscription``, above).
     """
+    usage_warning_service = usage_warning_service or get_usage_warning_service()
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(

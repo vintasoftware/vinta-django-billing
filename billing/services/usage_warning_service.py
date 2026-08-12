@@ -1,6 +1,6 @@
 """Proactive approaching-limit / limit-reached warnings.
 
-``GET /billing/usage/`` (``payments/billing_views.py``) is the *pull* side of
+``GET /billing/usage/`` (``billing/billing_views.py``) is the *pull* side of
 "an organization can see where it stands"; this is the *push* side -- an
 organization is warned before it is blocked rather than by being blocked.
 
@@ -46,7 +46,7 @@ class UsageWarningService:
     """Stateless; built by ``billing.services.container``.
 
     ``check_subscription`` is the beat task's
-    (``payments.tasks.check_approaching_limits_for_subscription``) single entry
+    (``billing.jobs.check_approaching_limits_for_subscription``) single entry
     point -- mirrors ``DunningService.process_subscription``'s shape of "one
     beat tick's worth of work for one subscription".
     """
@@ -65,7 +65,7 @@ class UsageWarningService:
         )
 
     def check_subscription(self, subscription: Subscription) -> None:
-        """Check every ``LimitedResource`` on ``subscription``'s organization
+        """Check every registered resource on ``subscription``'s organization
         against its effective limit and send an approaching-limit or
         limit-reached in-app notification -- at most once per resource per
         level per billing cycle (see ``LimitWarningNotification``).
@@ -84,9 +84,9 @@ class UsageWarningService:
 
         Best-effort per resource: a failure checking or notifying about one
         resource is logged and does not stop the remaining resources on this
-        subscription from being checked. Because the beat entry point fans out
-        one Celery task per subscription
-        (``payments.tasks.check_approaching_limits``), a failure here already
+        subscription from being checked. Because the sweep fans out
+        one job per subscription
+        (``billing.jobs.check_approaching_limits``), a failure here already
         cannot affect any *other* subscription's sweep.
         """
         if subscription.billing_state in (BillingState.RESTRICTED, BillingState.CANCELLED):
@@ -190,11 +190,11 @@ class UsageWarningService:
         }
         if level == LimitWarningLevel.APPROACHING:
             title = "You're approaching a plan limit"
-            body_template = "payments/in_app/approaching_limit.body.txt"
+            body_template = "billing/in_app/approaching_limit.body.txt"
             context_name = "approaching_limit_context"
         else:
             title = "You've reached a plan limit"
-            body_template = "payments/in_app/limit_reached.body.txt"
+            body_template = "billing/in_app/limit_reached.body.txt"
             context_name = "limit_reached_context"
 
         for user_id in self._recipient_user_ids(subscription):

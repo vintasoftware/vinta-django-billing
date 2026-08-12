@@ -20,6 +20,7 @@ from django.db.models import QuerySet, Sum
 from django.utils import timezone
 from django_virtual_models.generic_views import GenericVirtualModelViewMixin
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from organizations.conf import get_organization_model
 from organizations.models import Organization
 from rest_framework import mixins, serializers, status
 from rest_framework.decorators import action
@@ -78,8 +79,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: The shared contract body every ``BillingError`` renders through
-#: ``common.exception_handlers.vinta_exception_handler`` (``payments.exceptions
-#: .BillingError.as_error_body``) -- documented once here and reused across every
+#: ``billing.exception_handling.billing_exception_handler``
+#: (``BillingError.as_error_body``) -- documented once here and reused across every
 #: ``extend_schema`` response that surfaces a billing error, rather than each
 #: action inlining the same two fields.
 BILLING_ERROR_BODY_SERIALIZER = inline_serializer(
@@ -127,7 +128,7 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
     ``usage_breakdown_for_root`` -- pre-resolved entry points onto the
     identical ``get_effective_limit`` / ``get_current_usage`` implementation
     ``check_limit`` / ``check_postpaid_allowance`` count against, and that
-    ``payments.services.usage_warning_service.UsageWarningService`` (the
+    ``billing.services.usage_warning_service.UsageWarningService`` (the
     "push" half -- proactive approaching-limit notifications) also reads its
     ceiling from -- so this endpoint, the enforcement checks, and the beat
     warning can never disagree about a number.
@@ -166,8 +167,8 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
         # `get_effective_limit`/`get_current_usage` per resource, each of which
         # independently re-walked the `parent` chain and re-ran the subtree BFS:
         # sixteen root resolutions and eight subtree walks for eight resources.
-        # Now it is one of each, regardless of how many `LimitedResource` members
-        # exist. Not a docstring -- this is an implementation note for the next
+        # Now it is one of each, regardless of how many resources are
+        # registered. Not a docstring -- this is an implementation note for the next
         # reader of this method, not customer-facing API documentation, and
         # drf-spectacular would otherwise pull it into the schema in place of the
         # class docstring above.
@@ -187,7 +188,9 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
         # whole response.
         pooled_organization_ids = self.entitlement_service.get_pooled_organization_ids(root)
         organization_names = dict(
-            Organization.objects.filter(pk__in=pooled_organization_ids).values_list("pk", "name")
+            get_organization_model()
+            .objects.filter(pk__in=pooled_organization_ids)
+            .values_list("pk", "name")
         )
 
         plan: dict[str, str] | None = None
@@ -216,8 +219,8 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
             # a period boundary between the two reads can still see
             # `estimated_overage_total` and the `event_occurrences` row disagree by
             # one cycle. Closing that requires a way to inject a period override
-            # into the counter signature, which Phase 1's `UsageContext` does not
-            # support -- out of scope here.
+            # into the counter signature, which `UsageContext` does not support --
+            # out of scope here.
             period_start, period_end = resolve_billing_period(subscription, timezone.now())
             billing_period = {"start": period_start, "end": period_end}
             estimated_overage_total = (
@@ -393,7 +396,9 @@ class BillingPeriodViewSet(
             for organization_id in resource.by_organization
         }
         organization_names = dict(
-            Organization.objects.filter(pk__in=organization_ids).values_list("pk", "name")
+            get_organization_model()
+            .objects.filter(pk__in=organization_ids)
+            .values_list("pk", "name")
         )
         context = self.get_serializer_context()
         context["organization_names"] = organization_names
@@ -492,7 +497,9 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
         # `TypeError`.
         organization_ids = {occurrence.organization_id for occurrence in occurrences}
         self._organization_names = dict(
-            Organization.objects.filter(pk__in=organization_ids).values_list("pk", "name")
+            get_organization_model()
+            .objects.filter(pk__in=organization_ids)
+            .values_list("pk", "name")
         )
         self._event_map = self._resolve_events(occurrences)
 
@@ -617,8 +624,8 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
                     '(`code: "unconfirmed_plan_change"`, `UnconfirmedPlanChangeError`), or '
                     "the provider this organization resolves to is not configured in this "
                     'deployment (`code: "payment_provider_not_configured"`, '
-                    "`PaymentProviderNotConfiguredError`). Both are mapped centrally in "
-                    "`common.exception_handlers.vinta_exception_handler`."
+                    "`PaymentProviderNotConfiguredError`). Both are mapped centrally by "
+                    "`billing.exception_handling.billing_exception_handler`."
                 ),
             ),
         },
@@ -635,8 +642,8 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
             raise NotFound(f"No active billing plan with slug {data['plan_slug']!r}.")
 
         # `PaymentTokenRequiredError` (400) and `UnconfirmedPlanChangeError` (409)
-        # are rendered centrally by `common.exception_handlers.vinta_exception_handler`
-        # -- no local try/except needed here.
+        # are rendered centrally by `billing.exception_handling` -- no local
+        # try/except needed here.
         self.subscription_service.request_plan_change(
             subscription,
             plan,
@@ -729,11 +736,9 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
 
         # `RetryPaymentNotApplicableError`, `SubscriptionNotAttachedError`,
         # `NoOutstandingBalanceError`, and `CollectionNotSupportedError` (all
-        # 409), and `ChargeDeclinedError` (402 -- Billing API Contract
-        # Hardening, Phase 5: the provider actually attempted the charge and
-        # declined it) are rendered centrally by
-        # `common.exception_handlers.vinta_exception_handler` -- no local
-        # try/except needed here.
+        # 409), and `ChargeDeclinedError` (402 -- the provider actually attempted
+        # the charge and declined it) are rendered centrally by
+        # `billing.exception_handling` -- no local try/except needed here.
         self.subscription_service.retry_payment(
             subscription,
             payment_token=data["payment_token"],
@@ -752,7 +757,7 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
 
     ``SubscriptionAddOnSerializer`` is a plain ``ModelSerializer`` -- no
     nested relation heavy enough to warrant a virtual model (see
-    ``payments/virtual_models.py``) -- so this does not mix in
+    ``billing/virtual_models.py``) -- so this does not mix in
     ``GenericVirtualModelViewMixin``, unlike ``SubscriptionViewSet``.
     """
 
@@ -835,8 +840,7 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
         data = request_serializer.validated_data
 
         # `AddOnNotPurchasableError` (400) is rendered centrally by
-        # `common.exception_handlers.vinta_exception_handler` -- no local
-        # try/except needed here.
+        # `billing.exception_handling` -- no local try/except needed here.
         add_on = self.subscription_service.purchase_add_on(
             subscription,
             data["resource_key"],

@@ -15,4 +15,13 @@ application, generalised to run against any project built on
 - Stripe and MercadoPago payment and subscription adapters.
 - Open registries for limited resources and entitlements, replacing the closed
   enums the code was extracted with.
-- Pluggable billing-root hierarchy, notifier, and billing-manager predicate.
+- Pluggable billing-root hierarchy, notifier, billing-manager predicate and job
+  dispatcher. No Celery dependency and no notification-transport dependency: how
+  a sweep is scheduled and how a message is delivered are the project's.
+- Every organization relation resolves through `ORGANIZATION_MODEL`, exercised
+  by a dedicated test environment (`tox -e swapped`) that runs the suite against
+  a project-defined organization model.
+- Provider credentials and the default provider live in `VINTA_BILLING`, and the
+  adapter registries hand back adapters built from them.
+- `billing.exception_handling.billing_exception_handler` renders the typed
+  errors as HTTP responses.

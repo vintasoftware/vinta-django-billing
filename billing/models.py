@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, ClassVar
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q, UniqueConstraint
+from organizations.conf import organization_model_string
 
 from billing.base_models import BaseModel
 from billing.constants import (
@@ -94,7 +95,7 @@ class BillingPlan(BaseModel):
         return self.name
 
     def get_missing_limited_resource_keys(self) -> list[str]:
-        """``LimitedResource`` members this plan carries no ``PlanLimit`` row for.
+        """Registered resources this plan carries no ``PlanLimit`` row for.
 
         A plan is *complete* when this is empty. Completeness is an invariant, not
         a preference: an absent ``PlanLimit`` row (or a stale
@@ -144,7 +145,7 @@ class PlanLimit(BaseModel):
     """A single resource ceiling on a ``BillingPlan``.
 
     ``limit_value=NULL`` means no ceiling (unlimited) — never treat NULL as zero.
-    ``kind`` mirrors ``LimitedResource``'s own prepaid/postpaid split so an
+    ``kind`` mirrors the resource registry's own prepaid/postpaid split so an
     effective-limit resolution does not have to cross-reference the choices class.
     """
 
@@ -187,7 +188,7 @@ class PlanEntitlement(BaseModel):
 
 class BillingProfile(BaseModel):
     organization = models.OneToOneField(
-        "organizations.Organization",
+        organization_model_string(),
         primary_key=True,
         on_delete=models.CASCADE,
         related_name="billing_profile",
@@ -208,7 +209,7 @@ class BillingProfile(BaseModel):
     #: The payment provider this organization is pinned to, written once by
     #: ``SubscriptionService.record_payment_method`` when the organization's
     #: first payment instrument is confirmed. Null means "never paid" and
-    #: resolves to ``settings.DEFAULT_PAYMENT_PROVIDER``. Once set, every new
+    #: resolves to ``VINTA_BILLING['DEFAULT_PROVIDER']``. Once set, every new
     #: charge and subscription for this organization goes through this
     #: provider -- the instrument on file lives there and nowhere else.
     #: Repointing is a staff action (``SubscriptionService.set_payment_provider``),
@@ -236,7 +237,7 @@ class Subscription(BaseModel):
     """
 
     organization = models.OneToOneField(
-        "organizations.Organization", on_delete=models.CASCADE, related_name="subscription"
+        organization_model_string(), on_delete=models.CASCADE, related_name="subscription"
     )
     plan = models.ForeignKey(BillingPlan, on_delete=models.PROTECT, related_name="subscriptions")
     status = models.CharField(
@@ -253,8 +254,8 @@ class Subscription(BaseModel):
     grace_period_ends_at = models.DateTimeField(null=True, blank=True, db_index=True)
     # The last time `DunningService`'s beat task (`process_dunning`) retried the
     # charge / sent that day's rung of the dunning ladder for this subscription.
-    # This is the per-attempt idempotency check that keeps a Celery task
-    # redelivery (`CELERY_TASK_ACKS_LATE`) or an accidental double beat-tick from
+    # This is the per-attempt idempotency check that keeps an at-least-once job
+    # redelivery or an accidental double beat-tick from
     # double-charging the provider for the same logical attempt or double-sending
     # that attempt's notification. Provider-side idempotency (the retry charge's
     # `idempotency_key`) is what makes the charge itself safe either way; this is
@@ -326,7 +327,7 @@ class PaymentMethod(BaseModel):
     """
 
     organization = models.ForeignKey(
-        "organizations.Organization", on_delete=models.CASCADE, related_name="payment_methods"
+        organization_model_string(), on_delete=models.CASCADE, related_name="payment_methods"
     )
     provider = models.CharField(max_length=50, choices=PaymentProviders)
     external_id = models.CharField(max_length=255)
@@ -353,7 +354,7 @@ class SubscriptionPlanLimit(BaseModel):
     cannot silently lower limits for every subscriber at once.
 
     ``is_overridden=True`` marks a row an admin edited by hand in Django admin (see
-    ``payments/admin.py``'s ``SubscriptionPlanLimitInline``) — this is the support
+    ``billing/admin.py``'s ``SubscriptionPlanLimitInline``) — this is the support
     lever for a stuck organization, and it is why there is no support-facing
     enforcement bypass elsewhere. A plan change re-copies every non-overridden row
     from the new plan's ``PlanLimit`` set and leaves ``is_overridden=True`` rows
@@ -415,7 +416,7 @@ class SubscriptionAddOn(BaseModel):
     unlimited.
 
     ``purchase_idempotency_key`` is unique so a retried purchase (a double-clicked
-    button, a Celery task re-delivered under ``CELERY_TASK_ACKS_LATE``) neither
+    button, a job re-delivered under at-least-once delivery) neither
     grants capacity twice nor charges twice: ``SubscriptionService.purchase_add_on``
     ``get_or_create``s on this field before doing anything else, so the same key
     posted twice always resolves to the same row and the provider is only ever
@@ -571,7 +572,7 @@ class MeteredOccurrence(BaseModel):
     Occurrences of a recurring series are *computed* in Postgres, never stored
     (``calculate_recurring_events`` and friends), so there is no row to bill
     against. This table is that row — written by ``MeteringService`` from a
-    Celery sweep of elapsed time.
+    scheduled sweep of elapsed time.
 
     **The unique constraint is the correctness mechanism, not the code path.**
     ``(organization, event_id, occurrence_start)`` plus
@@ -598,7 +599,7 @@ class MeteredOccurrence(BaseModel):
     (``calculate_recurring_events`` emits a modified exception as the moved row's
     own ``me.start_time``). Re-timing an occurrence therefore mints a new identity
     and bills it again — a known, deferred defect, characterised in
-    ``payments/tests/test_metering_reconciliation.py`` and reported by
+    the reconciliation tests and reported by
     ``MeteringService.reconcile_period`` as ``orphaned`` drift.
 
     ``is_within_allowance`` and ``unit_price`` are stamped **at meter time** against
@@ -613,7 +614,7 @@ class MeteredOccurrence(BaseModel):
     """
 
     organization = models.ForeignKey(
-        "organizations.Organization",
+        organization_model_string(),
         on_delete=models.CASCADE,
         related_name="metered_occurrences",
     )
@@ -666,7 +667,7 @@ class LimitWarningNotification(BaseModel):
     notification that never went out.
 
     ``billing_period_start`` (``current_billing_period_start`` --
-    ``payments.services.subscription_service``, the same function the
+    ``billing.services.subscription_service``, the same function the
     ``event_occurrences`` usage counter and the meter both anchor on) is the
     "cycle" the debounce resets on: once a cycle rolls over, usage sitting
     above the threshold across the boundary is allowed to warn again, rather
@@ -730,7 +731,7 @@ class BillingPeriodSummary(BaseModel):
         Subscription, on_delete=models.CASCADE, related_name="period_summaries"
     )
     organization = models.ForeignKey(
-        "organizations.Organization",
+        organization_model_string(),
         on_delete=models.CASCADE,
         related_name="billing_period_summaries",
     )
@@ -793,7 +794,7 @@ class BillingPeriodResourceUsage(BaseModel):
 
     ``total`` is nullable and ``null`` means **not recorded**, never zero — the
     state of every prepaid resource for a period that closed before this feature
-    shipped, and of any ``LimitedResource`` member added after a period closed.
+    shipped, and of any registered resource added after a period closed.
     Rendering "not recorded" as 0 would tell a customer they used none of
     something we simply never counted.
 
@@ -808,7 +809,7 @@ class BillingPeriodResourceUsage(BaseModel):
     reader must ``int()`` a key before comparing it to an ``organization_id``.
 
     ``limit_value`` is read at **close time** for **all eight**
-    ``LimitedResource`` members, including ``event_occurrences`` — there is no
+    registered resources, including ``event_occurrences`` — there is no
     stamped source for a period's *allowance*: ``MeteredOccurrence`` records
     ``is_within_allowance`` and ``unit_price`` per row, not the ceiling it was
     measured against, and stamping a ceiling would need a new column that is

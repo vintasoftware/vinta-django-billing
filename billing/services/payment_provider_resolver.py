@@ -1,27 +1,24 @@
 """Resolves which payment provider governs an organization's *future* charges.
 
-A sibling of ``payments.services.payment_service`` rather than a method on
+A sibling of ``billing.services.payment_service`` rather than a method on
 ``PaymentService`` itself: ``PaymentService`` is generic over the adapter types
-(``PaymentAdapter``/``SubscriptionAdapter``/``SubscriptionPlanFactory``) and its
-constructor is exactly what Phase 4 of the payment-provider-selection plan rewires
-(dropping the singular ``payment_gateway``/``subscription_gateway`` injections). This
-resolver has zero dependency on any adapter -- it only reads
-``settings.DEFAULT_PAYMENT_PROVIDER`` and ``BillingProfile.payment_provider`` -- so keeping
-it out of ``PaymentService`` means Phase 3 (this module's only consumer today) does not
-touch, and cannot destabilize, the class Phase 4 is about to refactor.
+(``PaymentAdapter``/``SubscriptionAdapter``/``SubscriptionPlanFactory``), while this
+resolver has zero dependency on any adapter -- it only reads the configured default
+provider and ``BillingProfile.payment_provider``. Keeping it separate means the read
+path can resolve a provider without importing the adapter stack at all.
 
-Single place both the provider-credentials endpoints (Phase 3,
-``payments.views.PaymentProviderViewSet``) and the charge-routing refactor (Phase 4,
-``PaymentService.create_payment``/``create_subscription``) call to resolve an
+Single place both the provider-credentials endpoints
+(``billing.views.PaymentProviderViewSet``) and charge routing
+(``PaymentService.create_payment``/``create_subscription``) call to resolve an
 organization's provider -- so the pin -> default resolution rule cannot drift between the
 read path and the write path.
 """
 
 import logging
 
-from django.conf import settings
 from organizations.models import Organization
 
+from billing.conf import get_setting
 from billing.models import BillingProfile
 
 
@@ -31,14 +28,14 @@ logger = logging.getLogger(__name__)
 class PaymentProviderResolver:
     """Resolves the payment provider governing an organization's next charge.
 
-    Stateless -- reads ``settings.DEFAULT_PAYMENT_PROVIDER`` and the organization's own
+    Stateless -- reads ``VINTA_BILLING['DEFAULT_PROVIDER']`` and the organization's own
     ``BillingProfile.payment_provider`` pin. No adapter or secret credential is reachable
     from this class.
     """
 
     def resolve_for_organization(self, organization: Organization) -> str:
         """The provider governing ``organization``'s next charge: its pin when non-empty,
-        ``settings.DEFAULT_PAYMENT_PROVIDER`` otherwise.
+        ``VINTA_BILLING['DEFAULT_PROVIDER']`` otherwise.
 
         An organization with no ``BillingProfile`` at all resolves to the default, exactly
         like one whose profile exists but carries an empty pin -- see
@@ -54,4 +51,4 @@ class PaymentProviderResolver:
 
     def resolve_default(self) -> str:
         """The system-wide default provider."""
-        return settings.DEFAULT_PAYMENT_PROVIDER
+        return str(get_setting("DEFAULT_PROVIDER"))

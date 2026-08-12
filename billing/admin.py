@@ -75,7 +75,7 @@ class PlanLimitInline(admin.TabularInline):
     fields = ("resource_key", "limit_value", "kind", "overage_unit_price")
 
     def get_extra(self, request: HttpRequest, obj: BillingPlan | None = None, **kwargs: Any) -> int:
-        """One blank row per missing `LimitedResource` on an already-saved plan, so
+        """One blank row per missing registered resource on an already-saved plan, so
         an incomplete plan's gaps are visible and fillable in one pass instead of
         N manual "Add another" clicks (`extra = 0` above)."""
         if obj is None or obj.pk is None:
@@ -386,8 +386,7 @@ class ProviderWebhookEventAdmin(admin.ModelAdmin):
 
 class BillingPeriodResourceUsageInline(admin.TabularInline):
     """Read-only view of a statement's per-resource rows, alongside the statement
-    itself — this app has no other surface where these are visible at all
-    (see `BillingPeriodSummary`'s Phase 0 scaffolding note)."""
+    itself — this app has no other surface where these are visible at all."""
 
     model = BillingPeriodResourceUsage
     extra = 0

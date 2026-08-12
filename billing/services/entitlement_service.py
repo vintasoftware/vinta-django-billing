@@ -11,7 +11,7 @@ easy to break by accident:
    ``Subscription``; its usage counts against its root's ceiling together with
    every other organization in the subtree. The subtree stops at any nested
    billing root, which pays for its own subtree (see
-   ``payments.services.subscription_service.is_billing_root`` — the single
+   ``billing.services.subscription_service.is_billing_root`` — the single
    definition of that predicate, deliberately not restated here).
 3. **Counting and checking must be inseparable under concurrency.**
    ``check_limit(..., lock=True)`` takes ``SELECT ... FOR UPDATE`` on the *root*
@@ -236,7 +236,7 @@ class EntitlementService:
         Direct callers of this entry point resolve their own inputs to avoid
         redundant queries -- e.g. ``BillingUsageViewSet.retrieve_usage``, which
         batches ``plan_limit_by_resource``/``add_on_quantity_by_resource`` once for
-        the whole ``LimitedResource`` loop specifically to avoid a
+        the whole resource loop specifically to avoid a
         ``SubscriptionPlanLimit`` lookup and a ``Sum`` aggregate per resource.
         Calling ``effective_limit_for_subscription`` from that loop would throw
         that batching away by re-running both queries per resource anyway.
@@ -344,7 +344,7 @@ class EntitlementService:
             caller already resolved it (via ``get_pooled_organization_ids``) and
             wants to reuse it across several resources instead of paying for the
             subtree BFS again on every call -- the case ``CycleCloseService`` hits
-            once per ``LimitedResource`` member while holding the subscription
+            once per registered resource while holding the subscription
             row's lock. Resolved fresh when omitted, exactly as every other caller
             of this method already gets.
         """
@@ -450,15 +450,15 @@ class EntitlementService:
         automatic from that alone; nothing about the cascade needs reimplementing
         anywhere else.
 
-        This is the **one** semantic definition of "restricted" both halves of
-        the restriction behavior consult: the write block (every explicit
-        ``check_not_restricted`` call site on an update/delete path, which routes
-        through here) and every
-        calendar-sync-pause site (``calendar_integration.tasks.calendar_sync_tasks``,
-        the ``request_*`` methods on ``CalendarSyncService``, and
-        ``CalendarWebhookService``'s webhook-triggered sync). Two *independently
-        derived* answers to "is this org restricted" is exactly the recurring
-        two-predicates defect; the definition here is the only one.
+        This is the **one** semantic definition of "restricted", and every
+        consumer of the notion must route through it: the write block (every
+        explicit ``check_not_restricted`` call site on an update/delete path) and
+        whatever else a project pauses while an organization is restricted -- a
+        background sync, an outbound integration, a scheduled export. Two
+        *independently derived* answers to "is this org restricted" is exactly the
+        recurring two-predicates defect; the definition here is the only one, and
+        ``billing.signals.billing_restriction_lifted`` is how a project learns it
+        has changed.
 
         Two hot-path guards -- ``check_limit`` and ``check_postpaid_allowance``
         below -- do **not** call this method; they inline the identical
@@ -532,11 +532,11 @@ class EntitlementService:
             rather than the resource table to keep contention off hot paths.
 
             Requires an open transaction. ``ATOMIC_REQUESTS = True`` satisfies this
-            for anything called from a request; Celery tasks and management
+            for anything called from a request; background jobs and management
             commands must open their own ``transaction.atomic`` block.
 
             Correctness depends on the connection running at **READ COMMITTED**
-            (PostgreSQL's default, and this project's). The second transaction
+            (PostgreSQL's default). The second transaction
             blocks on the locked row and, on acquiring it, re-reads the resource
             tables and sees the first one's committed insert. Under REPEATABLE READ
             it would instead see its original snapshot — the same pre-write count
@@ -652,7 +652,7 @@ class EntitlementService:
         """Would creating ``delta`` more ``event_occurrences`` need a payment method
         this organization does not have?
 
-        The only postpaid ``LimitedResource`` member, so unlike ``check_limit`` this
+        The only postpaid registered resource, so unlike ``check_limit`` this
         never takes a ``resource_key`` — there is only one to ask about.
 
         Unlike a prepaid ceiling, the allowance is not a hard cap. An organization

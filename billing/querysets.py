@@ -23,8 +23,8 @@ class MeteredOccurrenceQuerySet(QuerySet):
     **The single definition of "an occurrence that belongs to this billing
     period".** Three callers need that rule and they must not each write their
     own: the meter (deciding what a sweep has already recorded and how much of
-    the allowance is left), the usage counter behind
-    ``LimitedResource.EVENT_OCCURRENCES``, and ``reconcile_period``. Two
+    the allowance is left), the usage counter behind the metered resource, and
+    ``reconcile_period``. Two
     hand-written filters that are supposed to agree is a recurring failure mode,
     and here it would show up as silent revenue drift rather than as an exception.
     """

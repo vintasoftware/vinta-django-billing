@@ -78,17 +78,18 @@ class StripePaymentAdapter(BasePaymentAdapter):
     provider = PaymentProviders.STRIPE
     #: Stripe's `Stripe-Signature` header signs `{timestamp}.{raw_body}` — the
     #: entire body — unlike MercadoPago's narrower manifest. See
-    #: `payments.services.stripe_signature.verify_stripe_event`.
+    #: `billing.services.stripe_signature.verify_stripe_event`.
     verifies_full_body = True
 
-    def __init__(self, api_key: str, webhook_secret: str = ""):
+    def __init__(self, api_key: str = "", webhook_secret: str = ""):
         self.api_key = api_key
         self.webhook_secret = webhook_secret
 
     @property
     def is_configured(self) -> bool:
-        """See ``BasePaymentAdapter.is_configured``. ``STRIPE_SECRET_KEY`` is the
-        credential every outbound Stripe call is made with (``api_key=``)."""
+        """See ``BasePaymentAdapter.is_configured``. The ``stripe`` provider
+        entry's ``API_KEY`` is the credential every outbound Stripe call is made
+        with (``api_key=``)."""
         return bool(self.api_key)
 
     def process(self, payment: Payment, payment_token: str, idempotency_key: str = "") -> str:

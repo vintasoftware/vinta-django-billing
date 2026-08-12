@@ -47,11 +47,6 @@ dependencies = [
 # charges through one provider does not install the other.
 stripe = ["stripe>=11.0"]
 mercadopago = ["mercadopago>=3.2,<4"]
-# `billing.tasks` degrades to plain callables when Celery is absent.
-celery = ["celery>=5.4"]
-# Ships the vintasend-backed notifier. Without it the default notifier logs
-# and drops, and any project can register its own.
-vintasend = ["vintasend>=1.2"]
 # OpenAPI schema annotations on the shipped viewsets.
 openapi = ["drf-spectacular>=0.29"]
 
@@ -82,7 +77,6 @@ dev = [
     # optional integrations are actually exercised by the test suite.
     "stripe>=11.0",
     "mercadopago>=2.3",
-    "celery>=5.4",
     "drf-spectacular>=0.28",
 ]
 
@@ -172,7 +166,6 @@ strict_equality = true
 module = [
     "model_utils.*",
     "mercadopago.*",
-    "vintasend.*",
     "django_filters.*",
     "django_virtual_models.*",
     "stripe.*",
@@ -190,7 +183,6 @@ ignore_missing_imports = true
 # add to it: a new module belongs outside this list.
 module = [
     "billing.billing_views",
-    "billing.notification_contexts",
     "billing.services.dunning_service",
     "billing.services.entitlement_service",
     "billing.services.payment_provider_resolver",
@@ -198,7 +190,7 @@ module = [
     "billing.services.provider_credentials",
     "billing.services.subscription_service",
     "billing.services.usage_warning_service",
-    "billing.tasks",
+    "billing.jobs",
 ]
 ignore_errors = true
 

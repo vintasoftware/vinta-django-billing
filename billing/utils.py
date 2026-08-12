@@ -14,7 +14,7 @@ def get_request_organization(request: HttpRequest | Any) -> Model | None:
     Reads, in order: whatever the tenant-scoped view mixin already resolved onto
     the request, then ``vinta-django-orgs``' middleware attribute, then the
     context variable its middleware and ``organization_context`` set. The last
-    of those is what makes this work off the request path too -- in a Celery
+    of those is what makes this work off the request path too -- in a background
     task wrapped in ``organization_context``, for instance.
     """
     organization = getattr(request, "organization", None)

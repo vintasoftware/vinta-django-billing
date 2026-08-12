@@ -21,7 +21,7 @@ makes the second and later asks free.
 **Scope is opt-in and explicit.** The cache only exists inside an
 ``entitlement_request_cache()`` block; outside one, ``has_entitlement_cached`` is a plain
 pass-through to the service. That is the point: a process-lifetime or thread-local cache
-would go stale across Celery tasks and management commands, where a plan change made
+would go stale across background jobs and management commands, where a plan change made
 mid-process must be visible immediately. A request is short enough that an entitlement
 cannot meaningfully change inside it — and if it did, the request already read the old
 value once.

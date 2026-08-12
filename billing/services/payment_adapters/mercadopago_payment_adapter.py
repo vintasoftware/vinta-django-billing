@@ -3,10 +3,10 @@ from collections.abc import Mapping
 
 import mercadopago
 import mercadopago.config
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
 
+from billing.conf import get_site_domain
 from billing.constants import PaymentProviders, PaymentStatuses, RefundStatuses
 from billing.exceptions import ProviderWebhookEventIdMissingError
 from billing.services.dataclasses import Refund, RefundResult
@@ -75,10 +75,10 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
     provider = PaymentProviders.MERCADOPAGO
     #: MercadoPago's `x-signature` HMAC covers only `data.id` + `x-request-id` +
     #: `ts` — never the request body as a whole. See
-    #: `payments.services.mercadopago_signature.verify_mercadopago_signature`.
+    #: `billing.services.mercadopago_signature.verify_mercadopago_signature`.
     verifies_full_body = False
 
-    def __init__(self, access_token: str, webhook_secret: str = ""):
+    def __init__(self, access_token: str = "", webhook_secret: str = ""):
         # Retained (not only handed to the SDK) so `is_configured` can answer off
         # the credential itself -- `mercadopago.SDK` accepts an empty token
         # happily and only fails much later, mid-charge, with a 401.
@@ -88,8 +88,9 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
 
     @property
     def is_configured(self) -> bool:
-        """See ``BasePaymentAdapter.is_configured``. ``MERCADOPAGO_ACCESS_TOKEN``
-        is the credential every outbound MercadoPago call authenticates with."""
+        """See ``BasePaymentAdapter.is_configured``. The ``mercadopago`` provider
+        entry's ``ACCESS_TOKEN`` is the credential every outbound MercadoPago call
+        authenticates with."""
         return bool(self.access_token)
 
     def process(self, payment: Payment, payment_token: str, idempotency_key: str = "") -> str:
@@ -104,10 +105,12 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
             kwargs={"provider": PaymentProviders.MERCADOPAGO, "pk": payment.id},
         )
 
-        site_domain = getattr(settings, "SITE_DOMAIN", None)
+        site_domain = get_site_domain()
         if not site_domain:
             raise ImproperlyConfigured(
-                "MercadoPagoAdapter requires SITE_DOMAIN to be set in settings.py"
+                "MercadoPagoPaymentAdapter builds an absolute notification_url, so "
+                "VINTA_BILLING['SITE_DOMAIN'] (or a top-level SITE_DOMAIN setting) "
+                "must be set."
             )
 
         payment_data = {

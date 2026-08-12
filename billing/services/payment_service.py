@@ -40,10 +40,13 @@ from billing.services.dataclasses import (
     Refund,
     Subscription,
 )
+from billing.services.payment_adapters import get_payment_provider_registry
 from billing.services.payment_adapters.base import BasePaymentAdapter
 from billing.services.payment_provider_resolver import PaymentProviderResolver
+from billing.services.subscription_adapters import get_subscription_provider_registry
 from billing.services.subscription_adapters.base import BaseSubscriptionAdapter
 from billing.services.subscription_plan_factory.base import BaseSubscriptionPlanFactory
+from billing.services.subscription_plan_factory.billing_plan_factory import BillingPlanFactory
 
 
 logger = logging.getLogger(__name__)
@@ -64,19 +67,13 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         payment_provider_registry: dict[str, PaymentAdapter] | None = None,
         subscription_provider_registry: dict[str, SubscriptionAdapter] | None = None,
     ):
-        """Collaborators default to the registries this package ships.
+        """Collaborators default to the ones this package ships.
 
         Every argument stays optional so a project running its own container can
         build the service with its own adapters, and a test can pass doubles,
-        without either having to go through settings.
+        without either having to go through settings. Passing one always wins
+        over the default.
         """
-        from billing.services.payment_adapters import get_payment_provider_registry
-        from billing.services.payment_provider_resolver import PaymentProviderResolver
-        from billing.services.subscription_adapters import get_subscription_provider_registry
-        from billing.services.subscription_plan_factory.billing_plan_factory import (
-            BillingPlanFactory,
-        )
-
         if subscription_plan_factory is None:
             subscription_plan_factory = BillingPlanFactory()
         if payment_provider_resolver is None:
@@ -106,7 +103,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
     #   confirmations / `record_payment_method` / add-on activation / dunning
     #   resolution all silently stop. So it resolves through the registry alone
     #   and the only error it can raise is `UnknownPaymentProviderError`, which
-    #   `payments.views.PaymentsViewSet` already renders as a 404.
+    #   `billing.views.PaymentsViewSet` already renders as a 404.
     # * The **outbound** path (charges, refunds, status polls, subscription
     #   operations) is about to authenticate a real API call with the provider's
     #   secret. An empty credential there is a deployment error worth failing
@@ -163,13 +160,13 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         it (the conformance suite enforces the override).
 
         Explicitly **not** derived from
-        ``payments.services.provider_credentials.resolve_public_credentials``. That
+        ``billing.services.provider_credentials.resolve_public_credentials``. That
         module reads the *browser-safe publishable* key, which is never sent on an
         outbound call -- gating charges on it both refuses a provider whose secret
         key works and green-lights one whose secret key is empty. It also
         deliberately collapses "unknown slug" and "unconfigured" into a single
-        error for its own read-only purpose (Phase 3 tracking decision #3), a
-        collapse that must not reach adapter resolution, where the
+        error for its own read-only purpose, a collapse that must not reach adapter
+        resolution, where the
         Unknown-vs-NotConfigured distinction is what tells "bad data in the pin
         column" apart from "this environment has no credentials for that provider".
 
@@ -768,14 +765,14 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         Thin wrapper over `BaseSubscriptionAdapter.pay_outstanding_invoice`,
         exactly like `update_subscription_payment_token`/`change_subscription_plan`
         above -- see that base method's docstring for the full contract and why
-        it is not `change_subscription_plan` (Billing API Contract Hardening,
-        Phase 4). Existing row: resolves from `subscription`'s own stored
+        it is not `change_subscription_plan`. Existing row: resolves from
+        `subscription`'s own stored
         provider (Rule A) -- a subscription with live provider-side state must
         be driven at the provider holding it, never the organization's current
         pin.
 
-        `payment_token` is optional (Billing API Contract Hardening, Phase 5)
-        -- this method now has two callers with two different meanings:
+        `payment_token` is optional -- this method has two callers with two
+        different meanings:
 
         - `SubscriptionService.retry_payment` (the user-facing endpoint) calls
           this *after* `update_subscription_payment_token`, with the token it

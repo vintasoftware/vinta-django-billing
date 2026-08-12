@@ -258,7 +258,7 @@ def test_create_subscription_forwards_idempotency_key_header(
 @override_settings(SITE_DOMAIN=None)
 def test_create_subscription_missing_site_domain(adapter, mock_subscription):
     """Test create subscription raises error when SITE_DOMAIN is not configured."""
-    with pytest.raises(ImproperlyConfigured, match="MercadoPagoAdapter requires SITE_DOMAIN"):
+    with pytest.raises(ImproperlyConfigured, match="SITE_DOMAIN"):
         adapter.create_subscription(mock_subscription, "test-token")
 
 
@@ -280,7 +280,7 @@ def test_cancel_subscription_success(adapter, mock_subscription):
 @override_settings(SITE_DOMAIN=None)
 def test_cancel_subscription_missing_site_domain(adapter, mock_subscription):
     """Test cancel subscription raises error when SITE_DOMAIN is not configured."""
-    with pytest.raises(ImproperlyConfigured, match="MercadoPagoAdapter requires SITE_DOMAIN"):
+    with pytest.raises(ImproperlyConfigured, match="SITE_DOMAIN"):
         adapter.cancel_subscription(mock_subscription)
 
 
@@ -319,7 +319,7 @@ def test_change_subscription_plan_forwards_idempotency_key_header(
 def test_change_subscription_plan_missing_site_domain(
     adapter, mock_subscription, mock_created_plan
 ):
-    with pytest.raises(ImproperlyConfigured, match="MercadoPagoAdapter requires SITE_DOMAIN"):
+    with pytest.raises(ImproperlyConfigured, match="SITE_DOMAIN"):
         adapter.change_subscription_plan(mock_subscription, mock_created_plan)
 
 
@@ -342,7 +342,7 @@ def test_update_subscription_payment_token_success(adapter, mock_subscription):
 @override_settings(SITE_DOMAIN=None)
 def test_update_subscription_payment_token_missing_site_domain(adapter, mock_subscription):
     """Test update payment token raises error when SITE_DOMAIN is not configured."""
-    with pytest.raises(ImproperlyConfigured, match="MercadoPagoAdapter requires SITE_DOMAIN"):
+    with pytest.raises(ImproperlyConfigured, match="SITE_DOMAIN"):
         adapter.update_subscription_payment_token(mock_subscription, "new-token")
 
 

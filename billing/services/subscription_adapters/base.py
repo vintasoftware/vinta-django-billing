@@ -11,6 +11,7 @@ from billing.services.dataclasses import (
     Subscription,
     SubscriptionPayment,
 )
+from billing.services.payment_adapters.base import select_init_kwargs
 
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,19 @@ class BaseSubscriptionAdapter:
     class Meta:
         abstract = True
 
+    @classmethod
+    def from_config(cls, config: Mapping[str, object]) -> "BaseSubscriptionAdapter":
+        """See ``BasePaymentAdapter.from_config`` — same contract, same rule."""
+        return cls(**select_init_kwargs(cls, config))
+
     @property
     @abstractmethod
     def is_configured(self) -> bool:
         """See ``BasePaymentAdapter.is_configured`` — same contract, same
-        reasoning, same outbound credential (``MERCADOPAGO_ACCESS_TOKEN`` /
-        ``STRIPE_SECRET_KEY``). Declared independently of the payment adapter's
-        rather than assumed to match, exactly like ``verifies_full_body``.
+        reasoning, same outbound credential (the provider entry's
+        ``ACCESS_TOKEN`` / ``API_KEY``). Declared independently of the payment
+        adapter's rather than assumed to match, exactly like
+        ``verifies_full_body``.
         """
         raise NotImplementedError
 
@@ -117,10 +124,10 @@ class BaseSubscriptionAdapter:
 
         **Not the same operation as ``change_subscription_plan``.** That method
         moves a subscriber onto a (possibly unchanged) plan and only charges a
-        proration as a *side effect* of the move -- it was Phase 3's mistaken
+        proration as a *side effect* of the move -- it was once a mistaken
         stand-in for this method, and driving it against ``retry_payment``'s own
-        plan/price is exactly what produced the Billing API Contract Hardening
-        plan's Phase 4 probe evidence: a real Stripe past-due renewal invoice
+        plan/price is exactly what produced this probe evidence: a real Stripe
+        past-due renewal invoice
         left `open` after "retry", $0.00 collected, because a fresh
         same-amount Price made the proration net to zero. This method instead
         targets the actual unpaid balance sitting at the provider -- the one
@@ -128,7 +135,7 @@ class BaseSubscriptionAdapter:
         charge exactly that, with no plan/price/proration math involved at all.
 
         **``payment_token`` is optional -- exactly two callers, exactly two
-        meanings (Billing API Contract Hardening, Phase 5):**
+        meanings:**
 
         - **Set** (``SubscriptionService.retry_payment``, the user-facing
           grace-recovery endpoint): "attach this new instrument, then collect

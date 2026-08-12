@@ -4,12 +4,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from dateutil.relativedelta import relativedelta
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from organizations.models import Organization
 
+from billing.conf import get_setting
 from billing.constants import BillingInterval, BillingState, PaymentProviders
 from billing.exceptions import (
     AddOnNotPurchasableError,
@@ -44,7 +44,7 @@ from billing.signals import payment_provider_repointed
 
 
 if TYPE_CHECKING:
-    from users.models import User
+    from django.contrib.auth.models import AbstractBaseUser
 
     from billing.services.payment_provider_resolver import PaymentProviderResolver
     from billing.services.payment_service import PaymentService
@@ -53,16 +53,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: Ceiling on how many whole intervals ``resolve_billing_period`` will step before
+#: giving up. 1200 months is a century of monthly cycles — far past any real
+#: subscription, and small enough that a corrupt period pair fails fast instead of
+#: spinning.
+MAX_BILLING_PERIOD_STEPS = 1200
+
+
 def is_billing_root(organization: Organization) -> bool:
     """True when ``organization`` holds its own ``Subscription`` rather than
     pooling against an ancestor's.
 
     The single predicate for "is a billing root", used everywhere that decision
     is made: here, by ``resolve_billing_root``'s cycle-guarded walk;
-    ``SubscriptionService.create_subscription_for_organization``; the
-    ``payments.0009`` backfill migration (as the ``Q``-object form,
-    ``billing_root_filter``); and the "no plan-less state" acceptance query. Keep
-    all of those in sync with this definition if it ever changes.
+    ``SubscriptionService.create_subscription_for_organization``; and any
+    backfill or acceptance query that needs the set of billing roots (as the
+    ``Q``-object form, ``billing_root_filter``). Keep all of those in sync with
+    this definition if it ever changes.
 
     An organization is its own billing root if it has no parent (top of its
     tree), **or** it can itself invite/create organizations — a nested reseller
@@ -85,12 +92,11 @@ def resolve_billing_root(organization: Organization) -> Organization:
 
     Every billing root (see ``is_billing_root``) holds its own ``Subscription``. A
     reseller child pools against the nearest ancestor that is itself a billing
-    root — the reseller root that pays for the whole subtree. Modeled on the
-    cycle-guarded walk in ``Organization.get_branding_root`` for the same reason:
-    ``parent`` is user-mutable data.
+    root — the reseller root that pays for the whole subtree. The walk is
+    cycle-guarded because ``parent`` is user-mutable data.
 
-    Unlike ``get_branding_root`` (which falls back to ``None`` — "no reseller, use
-    vinta defaults"), this walk always returns an organization if one is found:
+    Unlike a walk that may legitimately find nothing, this one always returns an
+    organization:
     a parent-less organization is always a billing root, so a chain that never
     hits a cycle is guaranteed to terminate at one. If the walk revisits an
     organization it already passed through, the ``parent`` chain is a cycle and
@@ -111,13 +117,6 @@ def resolve_billing_root(organization: Organization) -> Organization:
     # and returns above, so the walk only continues while org.parent is set (and
     # therefore non-None). Kept as a defensive fallback rather than an assert.
     return organization
-
-
-#: Ceiling on how many whole intervals ``resolve_billing_period`` will step before
-#: giving up. 1200 months is a century of monthly cycles — far past any real
-#: subscription, and small enough that a corrupt period pair fails fast instead of
-#: spinning.
-MAX_BILLING_PERIOD_STEPS = 1200
 
 
 def billing_interval_step(billing_interval: str) -> relativedelta:
@@ -163,7 +162,7 @@ def resolve_billing_period(
 
     **The single definition of "which cycle does this belong to".** The meter
     stamps ``MeteredOccurrence.billing_period_start`` from it, the usage counter
-    behind ``LimitedResource.EVENT_OCCURRENCES`` reads rows back by it, and
+    behind the metered resource reads rows back by it, and
     ``reconcile_period`` recomputes a closed cycle's bounds with it. Three
     hand-written date comparisons that are supposed to agree is precisely how a
     charge lands on the wrong invoice.
@@ -263,10 +262,10 @@ def current_billing_period_start(subscription: Subscription) -> datetime.datetim
 
 
 def assert_plan_is_complete(plan: BillingPlan) -> None:
-    """Refuse to place a subscription on a plan that omits a ``LimitedResource``.
+    """Refuse to place a subscription on a plan that omits a registered resource.
 
     The invariant — every plan carries a ``PlanLimit`` row for every
-    ``LimitedResource`` member — used to be enforced only by a test over *seed
+    registered resource — used to be enforced only by a test over *seed
     data*, which cannot see a plan an admin authors at runtime. This is that
     invariant in code, on the two paths that put a subscription on a plan
     (``create_subscription_for_organization`` and ``change_plan``).
@@ -330,7 +329,7 @@ class SubscriptionService:
         into both instead (see ``PaymentsViewSet``).
 
         ``payment_provider_resolver`` is the single home of the pin -> default
-        provider rule (see ``payments.services.payment_provider_resolver``).
+        provider rule (see ``billing.services.payment_provider_resolver``).
         ``create_subscription_for_organization`` stamps its result onto the new
         ``Subscription.payment_provider`` -- that column is the sole input to
         every later existing-row provider resolution for the subscription (Rule A),
@@ -342,7 +341,7 @@ class SubscriptionService:
         resolves ``Provide["payment_service"]`` / ``Provide["audit_service"]`` /
         ``Provide["payment_provider_resolver"]``
         from the wired container automatically once Django has started
-        (``payments`` is in ``INTERNAL_INSTALLED_APPS``, which
+        (``billing`` is in ``INTERNAL_INSTALLED_APPS``, which
         ``DICoreConfig.ready()`` wires), the same pattern ``CalendarService.__init__``
         uses.
         """
@@ -405,7 +404,7 @@ class SubscriptionService:
         now = timezone.now()
         period_end = self._period_end(now, BillingInterval.MONTHLY)
         # Rule B (new row): resolve from the organization -- its
-        # `BillingProfile.payment_provider` pin when set, `DEFAULT_PAYMENT_PROVIDER`
+        # `BillingProfile.payment_provider` pin when set, `DEFAULT_PROVIDER`
         # otherwise -- through the one resolver that owns that rule.
         #
         # This column is *not* a placeholder even though the subscription created
@@ -470,8 +469,8 @@ class SubscriptionService:
         so a mid-way failure cannot leave the subscription on the new plan with
         half-synced limits/entitlements.
 
-        Raises ``IncompleteBillingPlanError`` when ``plan`` omits a
-        ``LimitedResource``, *before* anything is written — see
+        Raises ``IncompleteBillingPlanError`` when ``plan`` omits a registered
+        resource, *before* anything is written — see
         ``assert_plan_is_complete``. A downgrade onto an incomplete plan has no
         correct outcome, so it is refused rather than resolved arbitrarily.
         """
@@ -620,7 +619,7 @@ class SubscriptionService:
         # row every *first* upgrade runs against, just below. Re-resolving here
         # (pin -> default, via the same `PaymentProviderResolver` Rule B
         # already uses) and restamping is what makes a staff repoint via
-        # `set_payment_provider`, or a `DEFAULT_PAYMENT_PROVIDER` change, reach
+        # `set_payment_provider`, or a `DEFAULT_PROVIDER` change, reach
         # a subscription that was stamped before any `BillingProfile` pin
         # existed -- `create_subscription_for_organization` runs from the
         # `Organization` post-save signal, before a `BillingProfile` can exist.
@@ -686,25 +685,22 @@ class SubscriptionService:
         """Ask the provider to collect the outstanding balance behind
         ``subscription``'s failed charge -- the automatic dunning ladder's own
         retry (``DunningService._retry_charge_and_notify``, driven by
-        ``payments/tasks.py::process_dunning``).
+        ``billing/jobs.py::process_dunning``).
 
-        **Drives ``pay_outstanding_invoice``, not ``change_subscription_plan``**
-        (Billing API Contract Hardening, Phase 5). Before this phase this
-        method reused ``_initiate_upgrade``'s ``_ensure_provider_plan`` +
-        ``change_subscription_plan`` pair -- exactly the operation Phase 4's
-        live Stripe probe proved collects **$0.00** against a real past-due
-        invoice (a same-amount price move prorates to zero; see
+        **Drives ``pay_outstanding_invoice``, not ``change_subscription_plan``.**
+        An earlier version reused ``_initiate_upgrade``'s ``_ensure_provider_plan``
+        + ``change_subscription_plan`` pair -- exactly the operation a live
+        Stripe probe proved collects **$0.00** against a real past-due invoice
+        (a same-amount price move prorates to zero; see
         ``BaseSubscriptionAdapter.pay_outstanding_invoice``'s docstring for the
-        numbers). Phase 4 fixed the user-facing ``retry_payment`` endpoint but
-        deliberately left this method alone pending its own decision -- this
-        phase is that decision. ``payment_token`` is passed as ``""``: the
+        numbers). ``payment_token`` is passed as ``""``: the
         ladder is re-driving whatever instrument is *already on file*, it has
         no new token to attach (see ``BaseSubscriptionAdapter
         .pay_outstanding_invoice``'s docstring for the two-callers contract).
 
         ``idempotency_key`` reaches the provider's own idempotency header (see
-        ``BaseSubscriptionAdapter.pay_outstanding_invoice``), so a Celery task
-        redelivery of the same logical dunning attempt (``CELERY_TASK_ACKS_LATE``)
+        ``BaseSubscriptionAdapter.pay_outstanding_invoice``), so a job
+        redelivery of the same logical dunning attempt (at-least-once delivery)
         cannot double-charge.
 
         Writes nothing about the outcome locally -- success or a further failure
@@ -718,7 +714,7 @@ class SubscriptionService:
         the same condition -- that method is a synchronous user request that
         must not report success having silently done nothing; this one is a
         background beat tick nobody is waiting on, and raising out of it would
-        poison the Celery task for a legitimate "nothing attached yet" case.
+        poison the job for a legitimate "nothing attached yet" case.
 
         **MercadoPago fallback, explicitly temporary, and pinned to
         MercadoPago.** MercadoPago's adapter raises ``CollectionNotSupportedError``
@@ -736,7 +732,7 @@ class SubscriptionService:
         ``_ensure_provider_plan`` ran first and minted an orphan provider-side
         plan object before ``change_subscription_plan`` hit the same missing
         profile -- a strictly better failure order, not a regression, since
-        that error is not caught here and propagates (now to the Celery
+        that error is not caught here and propagates (now to the job
         task's own best-effort guard). The fallback exists rather than
         breaking every MercadoPago dunning tick on a guess about a primitive
         nobody has verified. Retire it once
@@ -775,15 +771,14 @@ class SubscriptionService:
         separate decision and deliberately out of scope here.
 
         **Nor must a declined (or unattemptable) charge.** ``ChargeDeclinedError``
-        (Billing API Contract Hardening, Phase 5 live-probe BLOCKER) means the
-        provider either attempted the charge and the card on file was
+        means the provider either attempted the charge and the card on file was
         declined, or refused to attempt it at all (e.g. no default payment
         method on file) -- see that exception's own docstring for the full
         translation. Either is the *common* dunning-tick outcome, since a
         dead or missing card is why the subscription is in dunning at all.
-        Left uncaught, this reached the Celery task
-        (``payments.tasks.process_dunning_for_subscription``) unhandled: per
-        that task's own docstring, a raising task "is redelivered and fails
+        Left uncaught, this reached the job
+        (``billing.jobs.process_dunning_for_subscription``) unhandled: per
+        that job's own docstring, a raising job "is redelivered and fails
         identically forever, turning a benign race into a permanent stream of
         alerts" -- exactly what a still-dead card would do on every
         subsequent tick. Logged and swallowed here, same as the two outcomes
@@ -875,8 +870,8 @@ class SubscriptionService:
 
         This is **not** ``retry_failed_charge`` (nor, transitively, the
         ``_ensure_provider_plan`` + ``change_subscription_plan`` pair
-        ``retry_failed_charge`` drives) -- it was, until Billing API Contract
-        Hardening Phase 4, and that was a defect, not a design choice.
+        ``retry_failed_charge`` drives) -- it once was, and that was a defect, not
+        a design choice.
         ``change_subscription_plan`` moves a subscriber onto a plan and only
         charges a *proration* as a side effect of that move; it was never a
         "collect the missed payment" primitive, and a Stripe test-mode probe
@@ -897,8 +892,8 @@ class SubscriptionService:
         invoice sat untouched, and that $0.00 invoice's ``invoice.paid`` event
         was itself in ``RELEVANT_SUBSCRIPTION_PAYMENT_EVENT_TYPES``, so it would
         have reached ``resolve_payment_success`` and reported a false recovery
-        had the zero-amount guard (``PaymentsViewSet
-        ._apply_subscription_payment_side_effects``) not also shipped in Phase 4.
+        were it not for the zero-amount guard in ``PaymentsViewSet
+        ._apply_subscription_payment_side_effects``.
         **Do not restore the call to ``retry_failed_charge``/
         ``change_subscription_plan`` here** -- that is what silently collected
         nothing while reporting success.
@@ -1010,8 +1005,8 @@ class SubscriptionService:
             namespaced_idempotency_key = retry_payment_idempotency_key(
                 subscription.pk, idempotency_key
             )
-            # Billing API Contract Hardening, Phase 4: `pay_outstanding_invoice`,
-            # never `retry_failed_charge`/`change_subscription_plan` -- see this
+            # `pay_outstanding_invoice`, never
+            # `retry_failed_charge`/`change_subscription_plan` -- see this
             # method's docstring for the probe evidence of why that collected
             # $0.00 against a real past-due invoice.
             payment_service.pay_outstanding_invoice(
@@ -1033,7 +1028,7 @@ class SubscriptionService:
         **Also drives ``billing_state`` into GRACE** (fixes a dead edge where a
         downgrade left the state ACTIVE/FREE): before this, ``grace_period_ends_at``
         was stamped here but ``billing_state`` stayed ACTIVE/FREE, so
-        ``process_dunning``'s GRACE/RESTRICTED sweep (``payments/tasks.py``) never
+        ``process_dunning``'s GRACE/RESTRICTED sweep (``billing/jobs.py``) never
         looked at this row and the stamped deadline never expired -- a downgrade
         that left an organization over its new limits could sit indefinitely with
         a "grace window" nothing was ever going to close. Routing this write
@@ -1063,7 +1058,7 @@ class SubscriptionService:
             subscription.pending_plan_effective_at = subscription.current_period_end
             grace_days = plan.grace_period_days
             if grace_days is None:
-                grace_days = settings.BILLING_DEFAULT_GRACE_PERIOD_DAYS
+                grace_days = get_setting("GRACE_PERIOD_DAYS")
             subscription.grace_period_ends_at = timezone.now() + datetime.timedelta(days=grace_days)
             subscription.save(
                 update_fields=[
@@ -1396,7 +1391,7 @@ class SubscriptionService:
         return payment_method
 
     def set_payment_provider(
-        self, organization: Organization, provider: str, actor: "User | None" = None
+        self, organization: Organization, provider: str, actor: "AbstractBaseUser | None" = None
     ) -> BillingProfile:
         """Staff repoint lever: pin ``organization``'s ``BillingProfile`` to
         ``provider``, overwriting whatever it was pinned to before (including a
@@ -1405,7 +1400,7 @@ class SubscriptionService:
         Unlike ``record_payment_method``'s write-once pin, this always writes --
         it is the explicit escape hatch for moving an organization's *future*
         charges onto a different provider. Callers are Django admin (see
-        ``payments.admin.BillingProfileAdmin``) or an operator running this by
+        ``billing.admin.BillingProfileAdmin``) or an operator running this by
         hand; there is no end-user-facing API surface for it (see the plan's
         **Pin mutability** guiding decision).
 
@@ -1439,7 +1434,7 @@ class SubscriptionService:
         is a legitimate staff action -- the ordering "flip the pin, then add the
         key" is normal, the pin only governs *future* charges, and refusing it
         here would surface as an uncaught 500 in the Django admin (see
-        ``payments.admin.BillingProfileAdmin.save_model``, which catches nothing).
+        ``billing.admin.BillingProfileAdmin.save_model``, which catches nothing).
         The credential is asserted later, at the charge call sites that actually
         need it.
 
@@ -1529,15 +1524,15 @@ class SubscriptionService:
         """Drop ``SubscriptionPlanLimit`` rows the new plan no longer accounts for.
 
         By the time this runs, ``assert_plan_is_complete`` has already established
-        that ``plan_resource_keys`` covers every ``LimitedResource`` member, so
+        that ``plan_resource_keys`` covers every registered resource, so
         every row left here is a **retired key** — a resource that left the enum.
         Nothing can ever consult one again, so deleting is the only sensible
         outcome, and deleting cannot raise anybody's ceiling: an absent row reads
         as unlimited in ``EntitlementService``, but no code path asks about a key
-        that is not a ``LimitedResource`` member.
+        that is not a registered resource.
 
         That guard is what makes this safe. Without it, deleting a row for a key
-        that *is* a ``LimitedResource`` member but is missing from the plan would
+        that *is* a registered resource but is missing from the plan would
         compose with the fail-open-on-absence rule into *downgrading to a plan that
         omits a resource grants that resource an infinite ceiling* — the exact
         inverse of a downgrade. Each half is correct alone; only together are they

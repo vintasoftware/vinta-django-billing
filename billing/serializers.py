@@ -279,9 +279,7 @@ class BillingPeriodResourceUsageSerializer(serializers.ModelSerializer):
     admin (see the plan's Non-goals).
     """
 
-    resource_key = serializers.CharField(
-        help_text="The LimitedResource member this row reports on."
-    )
+    resource_key = serializers.CharField(help_text="The registered resource this row reports on.")
     kind = serializers.CharField(
         allow_null=True,
         help_text=(
@@ -294,7 +292,7 @@ class BillingPeriodResourceUsageSerializer(serializers.ModelSerializer):
         help_text=(
             "This resource's usage as counted at close, summed across the pooled "
             "subtree. null means the count was **not recorded** -- a period that "
-            "closed before this feature shipped, or a LimitedResource member added "
+            "closed before this feature shipped, or a registered resource added "
             "after this period closed -- and must never be displayed as 0. A "
             "recorded usage of zero serializes as the integer 0, distinct from null."
         ),
@@ -440,7 +438,7 @@ class BillingPeriodSummaryDetailSerializer(BillingPeriodSummarySerializer):
         many=True,
         read_only=True,
         help_text=(
-            "Every LimitedResource member recorded for this period. Prefetched, "
+            "Every registered resource recorded for this period. Prefetched, "
             "so retrieving one statement is a bounded number of queries "
             "regardless of how many resources exist."
         ),
@@ -557,7 +555,7 @@ class PaymentProviderSerializer(serializers.Serializer):
     ``null``, so a client never receives keys for a provider it did not resolve to.
 
     Plain ``serializers.Serializer`` -- nothing here is DB-backed. Serializes a
-    ``payments.services.provider_credentials.PublicProviderCredentials`` instance, not a
+    ``billing.services.provider_credentials.PublicProviderCredentials`` instance, not a
     model, hence the explicit ``to_representation`` rather than attribute-matching nested
     serializers (the dataclass's flat ``stripe_publishable_key``/``mercadopago_public_key``
     fields don't line up 1:1 with this serializer's nested ``stripe``/``mercadopago``

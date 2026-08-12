@@ -212,7 +212,7 @@ def test_process_without_idempotency_key_falls_back_to_payment_id(
 @override_settings(SITE_DOMAIN=None)
 def test_process_missing_site_domain(adapter, mock_payment):
     """Test process raises error when SITE_DOMAIN is not configured."""
-    with pytest.raises(ImproperlyConfigured, match="MercadoPagoAdapter requires SITE_DOMAIN"):
+    with pytest.raises(ImproperlyConfigured, match="SITE_DOMAIN"):
         adapter.process(mock_payment, "test-token")
 
 

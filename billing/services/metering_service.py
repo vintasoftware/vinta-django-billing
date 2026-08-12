@@ -20,13 +20,12 @@ Four properties carry that weight, in order of importance:
    only ever expands ``[window_start, window_end)`` and only keeps occurrences
    whose ``start_time`` falls inside it. Nothing is charged at series-creation
    time.
-3. **Identity comes from the expansion, not from a second enumeration.**
-   ``CalendarEventQuerySet.occurrence_bearing_masters_in_range`` is the one
-   definition of which rows can yield an occurrence; a recurrence exception is
-   reached only through its master (which returns the exception row itself, with
-   its own pk), and a bulk-modification continuation is reached only as a master
-   in its own right. Neither is enumerated twice, and neither needs a special
-   case here.
+3. **Identity comes from the source, not from a second enumeration.**
+   The project's :class:`~billing.metering.OccurrenceSource` is the one
+   definition of which occurrences exist in a window. The meter never re-derives
+   them from anything else: a second opinion about what happened would
+   eventually disagree with the first, and the two would disagree about a
+   customer's bill.
 
    Identity is ``(series root pk, occurrence start time)``. The series root half
    is durable — splits are normalised back to the original master. The start-time
@@ -50,7 +49,7 @@ from collections.abc import Iterable, Sequence
 from decimal import Decimal
 
 from django.db import transaction
-from organizations.models import Organization
+from organizations.conf import get_organization_model
 
 from billing.metering import get_occurrence_source
 from billing.models import MeteredOccurrence, Subscription
@@ -402,9 +401,9 @@ class MeteringService:
 
         This is a gap, not an oversight, and recomputing prices here would be worse
         than not doing it. Allowance position is consumed in insertion order (see
-        ``_record``), which is a function of *when the sweeps ran*, not of the
-        calendar's current state — so a recompute has no reproducible expected value
-        to compare against and would report false drift on correctly-priced rows.
+        ``_record``), which is a function of *when the sweeps ran*, not of what the
+        source reports now — so a recompute has no reproducible expected value to
+        compare against and would report false drift on correctly-priced rows.
         Making prices reconcilable requires first making allowance ranking
         deterministic (chronological), which is the same change mid-period plan
         changes force. This waits for cycle close, the first point anything reads
@@ -470,7 +469,7 @@ class MeteringService:
                 # Through a subquery on Organization rather than a `organization__`
                 # -prefixed copy of the predicate, so `billing_root_filter` stays the
                 # single definition of "is a billing root" (see `is_billing_root`).
-                organization__in=Organization.objects.filter(billing_root_filter())
+                organization__in=get_organization_model().objects.filter(billing_root_filter())
             ).values_list("pk", flat=True)
         )
         excluded = all_ids - root_ids

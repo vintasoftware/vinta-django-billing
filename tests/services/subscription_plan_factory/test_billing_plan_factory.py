@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 from model_bakery import baker
-from organizations.models import Organization
+from organizations.conf import get_organization_model
 
 from billing.constants import BillingInterval, PaymentProviders
 from billing.models import BillingPlan, Subscription
@@ -14,7 +14,7 @@ from billing.services.subscription_plan_factory.billing_plan_factory import Bill
 # opts out of conftest's autouse `provision_default_subscription`.
 @pytest.fixture
 def organization():
-    return baker.make(Organization)
+    return baker.make(get_organization_model())
 
 
 @pytest.fixture

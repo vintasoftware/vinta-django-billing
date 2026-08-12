@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 from abc import abstractmethod
@@ -13,6 +14,21 @@ from billing.services.dataclasses import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def select_init_kwargs(adapter_class: type, config: Mapping[str, object]) -> dict[str, object]:
+    """Lower-cased ``config`` keys the class's ``__init__`` actually accepts.
+
+    Shared by both adapter families' ``from_config``. A constructor declaring
+    ``**kwargs`` opts out of the filtering and receives everything.
+    """
+    # Signature of the class, not of ``__init__`` on an instance: mypy rejects
+    # the latter (a subclass could carry an incompatible one), and this is the
+    # constructor's signature either way, minus ``self``.
+    parameters = inspect.signature(adapter_class).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return {key.lower(): value for key, value in config.items()}
+    return {key.lower(): value for key, value in config.items() if key.lower() in parameters}
 
 
 class BasePaymentAdapter:
@@ -33,16 +49,37 @@ class BasePaymentAdapter:
     class Meta:
         abstract = True
 
+    @classmethod
+    def from_config(cls, config: Mapping[str, object]) -> "BasePaymentAdapter":
+        """Build this adapter from its ``VINTA_BILLING['PROVIDERS']`` entry.
+
+        Keys are lower-cased into constructor keyword arguments, so an adapter
+        declares the credentials it needs in its own ``__init__`` signature and
+        the settings dictionary follows it -- ``{'API_KEY': ...}`` reaches
+        ``__init__(api_key=...)``. Every credential argument must have a default,
+        because a deployment that does not charge through a provider still gets
+        that provider built (unconfigured) so its inbound webhook route resolves.
+
+        Keys the constructor does not accept are ignored rather than raising: one
+        provider entry holds everything a deployment configures for that
+        provider, including the browser-safe key
+        :mod:`billing.services.provider_credentials` reads and never hands to an
+        adapter.
+
+        Override when a provider needs something the mapping cannot express.
+        """
+        return cls(**select_init_kwargs(cls, config))
+
     @property
     @abstractmethod
     def is_configured(self) -> bool:
         """Whether this deployment holds the **outbound** credential this adapter
-        authenticates its provider API calls with (``MERCADOPAGO_ACCESS_TOKEN`` /
-        ``STRIPE_SECRET_KEY``) — the only thing that decides whether
+        authenticates its provider API calls with (the ``PROVIDERS`` entry's
+        ``ACCESS_TOKEN`` / ``API_KEY``) — the only thing that decides whether
         ``process``/``refund``/``check_status`` can actually reach the provider.
 
         Deliberately **not** derived from the browser-safe publishable/public key
-        (``payments.services.provider_credentials``): that key is what a *frontend*
+        (``billing.services.provider_credentials``): that key is what a *frontend*
         needs to build a payment form, it is never sent on an outbound call from
         this process, and a deployment can legitimately hold one without the other.
         Gating "can this provider be charged?" on it would both refuse a provider
@@ -51,7 +88,7 @@ class BasePaymentAdapter:
         Lives here, next to the credential it describes, rather than in a central
         provider->setting table, so a new adapter cannot be registered without
         answering the question — the conformance suite
-        (``payments/tests/services/test_provider_registry.py``) asserts every
+        (the provider-registry tests) asserts every
         registered adapter overrides this rather than inheriting the base.
 
         Read by ``PaymentService.get_configured_payment_adapter`` — see that

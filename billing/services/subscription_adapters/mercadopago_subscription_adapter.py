@@ -4,10 +4,10 @@ from types import MappingProxyType
 
 import mercadopago
 import mercadopago.config
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
 
+from billing.conf import get_site_domain
 from billing.constants import BillingInterval, PaymentProviders, PaymentStatuses
 from billing.exceptions import (
     CollectionNotSupportedError,
@@ -66,10 +66,10 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
     provider = PaymentProviders.MERCADOPAGO
     #: MercadoPago's `x-signature` HMAC covers only `data.id` + `x-request-id` +
     #: `ts` — never the request body as a whole. See
-    #: `payments.services.mercadopago_signature.verify_mercadopago_signature`.
+    #: `billing.services.mercadopago_signature.verify_mercadopago_signature`.
     verifies_full_body = False
 
-    def __init__(self, access_token: str, webhook_secret: str = ""):
+    def __init__(self, access_token: str = "", webhook_secret: str = ""):
         # See `MercadoPagoPaymentAdapter.__init__` -- retained so `is_configured`
         # can answer off the credential rather than off the SDK object.
         self.access_token = access_token
@@ -78,8 +78,9 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
 
     @property
     def is_configured(self) -> bool:
-        """See ``BaseSubscriptionAdapter.is_configured``. ``MERCADOPAGO_ACCESS_TOKEN``
-        is the credential every outbound MercadoPago call authenticates with."""
+        """See ``BaseSubscriptionAdapter.is_configured``. The ``mercadopago``
+        provider entry's ``ACCESS_TOKEN`` is the credential every outbound
+        MercadoPago call authenticates with."""
         return bool(self.access_token)
 
     def create_subscription_plan(self, plan: Plan) -> str:
@@ -149,10 +150,12 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
             kwargs={"provider": PaymentProviders.MERCADOPAGO, "pk": subscription.id},
         )
 
-        site_domain = getattr(settings, "SITE_DOMAIN", None)
+        site_domain = get_site_domain()
         if not site_domain:
             raise ImproperlyConfigured(
-                "MercadoPagoAdapter requires SITE_DOMAIN to be set in settings.py"
+                "MercadoPagoSubscriptionAdapter builds absolute back/notification "
+                "URLs, so VINTA_BILLING['SITE_DOMAIN'] (or a top-level SITE_DOMAIN "
+                "setting) must be set."
             )
         data = {
             "payer_email": subscription.billing_profile.email,
@@ -185,10 +188,12 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
         return request_options
 
     def cancel_subscription(self, subscription: Subscription) -> None:
-        site_domain = getattr(settings, "SITE_DOMAIN", None)
+        site_domain = get_site_domain()
         if not site_domain:
             raise ImproperlyConfigured(
-                "MercadoPagoAdapter requires SITE_DOMAIN to be set in settings.py"
+                "MercadoPagoSubscriptionAdapter builds absolute back/notification "
+                "URLs, so VINTA_BILLING['SITE_DOMAIN'] (or a top-level SITE_DOMAIN "
+                "setting) must be set."
             )
         self.sdk.preapproval().update(
             subscription.external_id,
@@ -212,10 +217,12 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
         `idempotency_key`, when set, is forwarded so a retried drive re-points at
         most once.
         """
-        site_domain = getattr(settings, "SITE_DOMAIN", None)
+        site_domain = get_site_domain()
         if not site_domain:
             raise ImproperlyConfigured(
-                "MercadoPagoAdapter requires SITE_DOMAIN to be set in settings.py"
+                "MercadoPagoSubscriptionAdapter builds absolute back/notification "
+                "URLs, so VINTA_BILLING['SITE_DOMAIN'] (or a top-level SITE_DOMAIN "
+                "setting) must be set."
             )
         data = {
             "preapproval_plan_id": new_plan.external_id,
@@ -232,10 +239,12 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
     def update_subscription_payment_token(
         self, subscription: Subscription, payment_token: str
     ) -> None:
-        site_domain = getattr(settings, "SITE_DOMAIN", None)
+        site_domain = get_site_domain()
         if not site_domain:
             raise ImproperlyConfigured(
-                "MercadoPagoAdapter requires SITE_DOMAIN to be set in settings.py"
+                "MercadoPagoSubscriptionAdapter builds absolute back/notification "
+                "URLs, so VINTA_BILLING['SITE_DOMAIN'] (or a top-level SITE_DOMAIN "
+                "setting) must be set."
             )
         self.sdk.preapproval().update(
             subscription.external_id,
@@ -260,10 +269,11 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
         already make), which lets MercadoPago resume charging *on its own
         schedule* rather than collecting the specific missed amount right now.
 
-        That is very likely the same defect this phase exists to fix on
-        Stripe -- re-authorizing does not obviously charge the missed period,
-        so it may just as easily reactivate the subscription while collecting
-        nothing, the exact false-recovery shape the Phase 4 probe caught. But
+        That is very likely the same defect ``pay_outstanding_invoice`` exists
+        to avoid on Stripe -- re-authorizing does not obviously charge the
+        missed period, so it may just as easily reactivate the subscription
+        while collecting nothing, the exact false-recovery shape the Stripe
+        probe caught. But
         it is **unverified**: no MercadoPago test credentials were available to
         run an equivalent probe (real sandbox account + a genuine renewal
         failure via a declined test card + inspecting whether the reauthorized

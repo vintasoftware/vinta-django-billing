@@ -4,7 +4,7 @@ Read-only: recomputes what a subscription's cycle *should* have metered from the
 calendar and compares it against the ``MeteredOccurrence`` rows actually recorded,
 reporting drift both ways. It never writes and never charges — it is the
 after-the-fact audit half of cycle close, run on demand rather than on the beat
-schedule (``payments.tasks.close_billing_periods``).
+schedule (``billing.jobs.close_billing_periods``).
 
 The reconciliation it runs is the same ``MeteringService.reconcile_period`` cycle
 close runs; this command just lets finance point it at any past period by

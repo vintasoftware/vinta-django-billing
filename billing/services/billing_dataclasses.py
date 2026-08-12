@@ -1,6 +1,6 @@
 """Plain-data return types for the billing/entitlement services.
 
-Kept separate from ``payments/services/dataclasses.py`` (which models the
+Kept separate from ``billing/services/dataclasses.py`` (which models the
 *payment gateway* wire shapes) because these describe this app's own
 limits/entitlements domain and are consumed by non-payments callers — the
 organization, calendar, webhooks, and public-API services that ask "may I create

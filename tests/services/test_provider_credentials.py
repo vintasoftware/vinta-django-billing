@@ -1,10 +1,10 @@
-"""Unit tests for ``payments.services.provider_credentials`` and
-``payments.services.payment_provider_resolver``.
+"""Unit tests for ``billing.services.provider_credentials`` and
+``billing.services.payment_provider_resolver``.
 """
 
 import pytest
 from model_bakery import baker
-from organizations.models import Organization
+from organizations.conf import get_organization_model
 
 from billing.constants import PaymentProviders
 from billing.exceptions import PaymentProviderNotConfiguredError
@@ -21,8 +21,13 @@ pytestmark = pytest.mark.django_db
 
 class TestResolvePublicCredentials:
     def test_stripe_returns_only_the_stripe_block(self, settings):
-        settings.STRIPE_PUBLISHABLE_KEY = "pk_test_stripe"
-        settings.MERCADOPAGO_PUBLIC_KEY = "pub_test_mercadopago"
+        settings.VINTA_BILLING = {
+            **settings.VINTA_BILLING,
+            "PROVIDERS": {
+                "stripe": {"PUBLISHABLE_KEY": "pk_test_stripe"},
+                "mercadopago": {"PUBLIC_KEY": "pub_test_mercadopago"},
+            },
+        }
 
         credentials = resolve_public_credentials(PaymentProviders.STRIPE)
 
@@ -33,8 +38,13 @@ class TestResolvePublicCredentials:
         )
 
     def test_mercadopago_returns_only_the_mercadopago_block(self, settings):
-        settings.STRIPE_PUBLISHABLE_KEY = "pk_test_stripe"
-        settings.MERCADOPAGO_PUBLIC_KEY = "pub_test_mercadopago"
+        settings.VINTA_BILLING = {
+            **settings.VINTA_BILLING,
+            "PROVIDERS": {
+                "stripe": {"PUBLISHABLE_KEY": "pk_test_stripe"},
+                "mercadopago": {"PUBLIC_KEY": "pub_test_mercadopago"},
+            },
+        }
 
         credentials = resolve_public_credentials(PaymentProviders.MERCADOPAGO)
 
@@ -45,14 +55,22 @@ class TestResolvePublicCredentials:
         )
 
     def test_raises_when_the_matching_key_is_empty(self, settings):
-        settings.STRIPE_PUBLISHABLE_KEY = ""
+        settings.VINTA_BILLING = {
+            **settings.VINTA_BILLING,
+            "PROVIDERS": {"stripe": {"PUBLISHABLE_KEY": ""}},
+        }
 
         with pytest.raises(PaymentProviderNotConfiguredError):
             resolve_public_credentials(PaymentProviders.STRIPE)
 
     def test_raises_for_an_unknown_provider_slug(self, settings):
-        settings.STRIPE_PUBLISHABLE_KEY = "pk_test_stripe"
-        settings.MERCADOPAGO_PUBLIC_KEY = "pub_test_mercadopago"
+        settings.VINTA_BILLING = {
+            **settings.VINTA_BILLING,
+            "PROVIDERS": {
+                "stripe": {"PUBLISHABLE_KEY": "pk_test_stripe"},
+                "mercadopago": {"PUBLIC_KEY": "pub_test_mercadopago"},
+            },
+        }
 
         with pytest.raises(PaymentProviderNotConfiguredError):
             resolve_public_credentials("not-a-real-provider")
@@ -60,7 +78,7 @@ class TestResolvePublicCredentials:
 
 class TestPaymentProviderResolver:
     def test_resolve_for_organization_returns_the_pin_when_set(self):
-        organization = baker.make(Organization)
+        organization = baker.make(get_organization_model())
         billing_address = baker.make("billing.BillingAddress")
         baker.make(
             BillingProfile,
@@ -77,8 +95,11 @@ class TestPaymentProviderResolver:
         assert resolver.resolve_for_organization(organization) == PaymentProviders.MERCADOPAGO
 
     def test_resolve_for_organization_returns_the_default_when_unpinned(self, settings):
-        settings.DEFAULT_PAYMENT_PROVIDER = PaymentProviders.STRIPE
-        organization = baker.make(Organization)
+        settings.VINTA_BILLING = {
+            **settings.VINTA_BILLING,
+            "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
+        }
+        organization = baker.make(get_organization_model())
         billing_address = baker.make("billing.BillingAddress")
         baker.make(
             BillingProfile,
@@ -95,15 +116,21 @@ class TestPaymentProviderResolver:
         assert resolver.resolve_for_organization(organization) == PaymentProviders.STRIPE
 
     def test_resolve_for_organization_returns_the_default_with_no_billing_profile(self, settings):
-        settings.DEFAULT_PAYMENT_PROVIDER = PaymentProviders.STRIPE
-        organization = baker.make(Organization)
+        settings.VINTA_BILLING = {
+            **settings.VINTA_BILLING,
+            "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
+        }
+        organization = baker.make(get_organization_model())
 
         resolver = PaymentProviderResolver()
 
         assert resolver.resolve_for_organization(organization) == PaymentProviders.STRIPE
 
-    def test_resolve_default_reads_settings(self, settings):
-        settings.DEFAULT_PAYMENT_PROVIDER = PaymentProviders.MERCADOPAGO
+    def test_resolve_default_reads_the_settings_namespace(self, settings):
+        settings.VINTA_BILLING = {
+            **settings.VINTA_BILLING,
+            "DEFAULT_PROVIDER": PaymentProviders.MERCADOPAGO,
+        }
 
         resolver = PaymentProviderResolver()
 

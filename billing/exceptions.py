@@ -20,22 +20,22 @@ def _registry_label(registry, key: str) -> str:
 
 
 class BillingError(Exception):
-    """Root of everything the ``payments`` app raises.
+    """Root of everything the ``billing`` app raises.
 
-    Deliberately **not** a ``ValueError``. Large parts of the codebase wrap service
-    calls in ``except ValueError as e: raise GraphQLError(str(e))`` (e.g.
-    ``public_api/mutations.py``) or the REST equivalent, which flattens an
-    exception down to its message. Any payments error that must survive that
-    journey with its structured fields intact — ``OverLimitError`` above all —
-    hangs off this class and *only* this class.
+    Deliberately **not** a ``ValueError``. Projects routinely wrap service calls
+    in ``except ValueError as e: raise SomeApiError(str(e))`` or the REST
+    equivalent, which flattens an exception down to its message. Any billing error
+    that must survive that journey with its structured fields intact —
+    ``OverLimitError`` above all — hangs off this class and *only* this class.
 
-    ``PaymentError`` keeps the ``ValueError`` lineage for backwards compatibility
-    with those existing handlers; new structured errors should not.
+    ``PaymentError`` keeps the ``ValueError`` lineage, because a project catching
+    payment failures that way is a reasonable thing to have written; new
+    structured errors should not.
     """
 
     #: Stable, machine-readable discriminator in the rendered error body.
     #: Snake_case, never reworded once shipped -- clients branch on it.
-    #: Subclasses rendered by ``vinta_exception_handler`` must override it.
+    #: Subclasses rendered by ``billing.exception_handling`` must override it.
     code: str = "billing_error"
 
     def as_error_body(self) -> dict:
@@ -46,8 +46,9 @@ class BillingError(Exception):
 class PaymentError(BillingError, ValueError):
     """Payment-gateway and billing-data errors.
 
-    Still a ``ValueError`` because callers across the codebase have caught it that
-    way since before this tree existed; narrowing that is out of scope here.
+    A ``ValueError`` as well as a ``BillingError`` -- see ``BillingError`` for why
+    that lineage is kept here and deliberately not extended to the structured
+    errors.
     """
 
 
@@ -138,8 +139,9 @@ class BillingRootCycleError(PaymentError):
 
 
 class MissingSeedBillingPlanError(PaymentError):
-    """Raised when a ``BillingPlan`` slug a migration/backfill depends on (e.g. the
-    ``unlimited`` plan seeded by ``payments.0007``) is missing at runtime.
+    """Raised when a ``BillingPlan`` slug a migration, backfill or free-fallback
+    path depends on (e.g. the project's ``unlimited`` or free plan) is missing at
+    runtime.
 
     A missing seeded plan means a corrupted or out-of-order deploy — this must
     fail loudly rather than silently leave every organization plan-less with no
@@ -156,11 +158,10 @@ class MissingSeedBillingPlanError(PaymentError):
 
 class IncompleteBillingPlanError(BillingError):
     """Raised when a ``BillingPlan`` a subscription is being placed on carries no
-    ``PlanLimit`` row for some ``LimitedResource`` member.
+    ``PlanLimit`` row for some registered resource.
 
     The catalog never expresses "this plan does not include X" by omission — it
-    expresses it with an explicit row (``limit_value=0``), exactly as the seeded
-    ``free`` plan does for ``public_api_system_users``. Omission is therefore a
+    expresses it with an explicit row (``limit_value=0``). Omission is therefore a
     catalog *authoring* error, and there is no safe way to interpret it at
     runtime: an absent (or stale ``limit_value=None``) row reads as **unlimited**
     in ``EntitlementService``, so letting the plan change through would hand the
@@ -183,7 +184,7 @@ class IncompleteBillingPlanError(BillingError):
         super().__init__(
             f"BillingPlan {plan_slug!r} carries no PlanLimit row for "
             f"{missing_resource_keys}. Every plan must carry a row for every "
-            "LimitedResource member — 'not included' is limit_value=0, never omission, "
+            "registered resource — 'not included' is limit_value=0, never omission, "
             "because an omitted row reads as unlimited."
         )
         self.plan_slug = plan_slug
@@ -238,17 +239,16 @@ class OverLimitError(BillingError):
     would take the organization past its effective ceiling.
 
     Inherits ``BillingError`` rather than ``PaymentError`` precisely because
-    ``PaymentError`` is a ``ValueError``: ``public_api/mutations.py`` and
-    ``calendar_integration/views.py`` both wrap service calls in
-    ``except ValueError as e: raise ...(str(e))``, which would downgrade this to a
-    message-only error and drop ``code`` / ``resource`` / ``current_usage`` /
-    ``limit`` / ``remedy``. Several of those wrapped call sites guard resources
-    that are ``LimitedResource`` members (``webhook_subscriptions`` among them), so
-    the byte-identical-across-surfaces contract below depends on this base class.
+    ``PaymentError`` is a ``ValueError``, and a project that wraps service calls in
+    ``except ValueError as e: raise ...(str(e))`` -- a common shape in GraphQL
+    resolvers and hand-rolled view error handling -- would thereby downgrade this
+    to a message-only error and drop ``code`` / ``resource`` / ``current_usage`` /
+    ``limit`` / ``remedy``. Enforcement runs at the create call site of a limited
+    resource, so those wrappers are exactly where this error surfaces.
 
     Carries the four fields of the shared over-limit error contract so
-    every surface — DRF (via ``common.exception_handlers.vinta_exception_handler``)
-    and the public GraphQL API — renders a byte-identical body:
+    every surface a project renders it on — DRF, GraphQL, anything else — can
+    produce a byte-identical body:
 
     .. code-block:: json
 
@@ -342,14 +342,14 @@ class OverLimitError(BillingError):
         """Build the error for a write attempted while the caller's billing root is
         ``RESTRICTED`` -- an expired grace window with no resolution.
 
-        Not a ``LimitedResource`` at all, so there is no unit to count:
+        Not a registered resource at all, so there is no unit to count:
         ``current_usage``/``limit`` are both ``0``, the same "0 of an allowance of
         0" convention ``from_missing_entitlement`` uses for boolean gates.
         ``remedy`` is always ``resolve_billing`` -- the only way out of
         ``RESTRICTED`` is paying (or the org's usage dropping back under free
         limits, which the dunning sweep resolves on its own, not anything the
         caller can do from here). ``resource_key`` is a sentinel, not a
-        ``LimitedResource`` member -- ``build_detail`` falls back to the raw key
+        registered resource -- ``build_detail`` falls back to the raw key
         for anything it does not recognize.
         """
         return cls(
@@ -364,15 +364,15 @@ class OverLimitError(BillingError):
 
     @classmethod
     def from_missing_entitlement(cls, entitlement_key: str) -> "OverLimitError":
-        """Build the error for a denied boolean feature gate (``Entitlement``, not
-        ``LimitedResource``).
+        """Build the error for a denied boolean feature gate (an entitlement, not
+        a metered or counted resource).
 
         An entitlement has no usage count or ceiling to report -- it is granted or
         it is not -- so ``current_usage``/``limit`` are both ``0`` (0 of an
         allowance of 0) rather than ``None``: the shared contract's ``current_usage``
         and ``limit`` fields are typed as ``int`` on every surface that renders this
-        error, and every existing renderer (``vinta_exception_handler``,
-        ``raise_over_limit_graphql_error``) reads them unconditionally.
+        error, and every renderer -- ``billing.exception_handling`` and whatever
+        a project adds for its own surfaces -- reads them unconditionally.
 
         ``remedy`` is always ``upgrade_plan`` -- unlike a pre-paid ceiling, an
         entitlement cannot be lifted by purchasing more of the same resource; only a
@@ -451,7 +451,7 @@ class UnconfirmedPlanChangeError(PaymentError):
 
 
 class IllegalBillingStateTransitionError(BillingError):
-    """Raised by ``payments.services.billing_state_machine.transition_billing_state``
+    """Raised by ``billing.services.billing_state_machine.transition_billing_state``
     when the requested ``(from_state, to_state)`` pair is not an allowed edge in
     the billing state machine's transition table.
 
@@ -526,8 +526,8 @@ class NoOutstandingBalanceError(PaymentError):
     collect, even though ``SubscriptionService.retry_payment`` only reaches
     this call for a subscription that is GRACE or RESTRICTED.
 
-    Billing API Contract Hardening, Phase 4: this is the error that makes the
-    "collect the balance" primitive fail loudly instead of silently -- see
+    This is the error that makes the "collect the balance" primitive fail loudly
+    instead of silently -- see
     ``BaseSubscriptionAdapter.pay_outstanding_invoice``'s docstring for the
     probe evidence of what used to happen instead (a $0.00 proration invoice
     quietly flipping the subscription back to ACTIVE with the real balance
@@ -551,12 +551,11 @@ class CollectionNotSupportedError(PaymentAdapterError):
     ``MercadoPagoSubscriptionAdapter.pay_outstanding_invoice``'s docstring for
     why it refuses loudly rather than driving an unverified reauthorization).
 
-    Distinct from the plain ``PaymentAdapterError`` this replaced: that class
-    carries the base ``BillingError``/``ValueError`` lineage but had no
-    ``common.exception_handlers.vinta_exception_handler`` branch, so it reached
+    Distinct from the plain ``PaymentAdapterError`` it specializes: that class
+    carries the base ``BillingError``/``ValueError`` lineage but has no dedicated
+    branch in ``billing.exception_handling``, so on its own it would reach
     ``SubscriptionViewSet.retry_payment`` callers as an *unhandled* 500 rather
-    than a typed response (Billing API Contract Hardening, Phase 4 reviewer
-    finding SHOULD-FIX 7). This subclass exists so the handler can special-case
+    than a typed response. This subclass exists so the handler can special-case
     it without also changing how every other ``PaymentAdapterError`` renders.
     """
 
@@ -581,17 +580,16 @@ class ChargeDeclinedError(PaymentError):
     translation and why only these two -- never every ``stripe.StripeError``
     subclass -- are caught there).
 
-    Billing API Contract Hardening, Phase 5 live-probe BLOCKER: a Stripe
-    test-mode probe of the exact call ``retry_failed_charge`` makes, against a
-    card still dead (the *common* dunning-tick outcome -- a dead card is why a
-    payer is in dunning at all), raised an uncaught ``stripe.CardError`` before
-    this class existed. A Tier 4 reviewer then proved a second, related gap
-    with a runnable probe: a customer with no default payment method at all
+    A Stripe test-mode probe of the exact call ``retry_failed_charge`` makes,
+    against a card still dead (the *common* dunning-tick outcome -- a dead card is
+    why a payer is in dunning at all), raised an uncaught ``stripe.CardError``
+    before this class existed. A second runnable probe then found a related gap:
+    a customer with no default payment method at all
     (also a canonical dunning population) raises ``stripe.InvalidRequestError``
     instead, which the original ``CardError``-only translation did not catch.
     Either, left uncaught, would have reached the
-    ``process_dunning_for_subscription`` Celery task unhandled -- and per that
-    task's own docstring, a raising task "is redelivered and fails identically
+    ``process_dunning_for_subscription`` job unhandled -- and per that
+    job's own docstring, a raising job "is redelivered and fails identically
     forever, turning a benign race into a permanent stream of alerts".
     ``SubscriptionService.retry_failed_charge`` catches this and treats it as
     an expected, non-fatal tick outcome (see its docstring) -- not because the
@@ -614,9 +612,8 @@ class ChargeDeclinedError(PaymentError):
     ``SubscriptionService.retry_payment`` (``POST
     /billing/subscription/retry-payment/``) drives the same
     ``pay_outstanding_invoice`` call, so a payer submitting a card the provider
-    declines got an unhandled 500 before this class and its
-    ``common.exception_handlers.vinta_exception_handler`` branch existed,
-    instead of a clean typed response.
+    declines would get an unhandled 500 without this class and its
+    ``billing.exception_handling`` branch, instead of a clean typed response.
     """
 
     code = "charge_declined"

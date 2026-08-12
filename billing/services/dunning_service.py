@@ -6,8 +6,8 @@ escalating notification, expiring into RESTRICTED, and recovering to ACTIVE or
 FREE -- on top of the single validator in ``billing_state_machine.py``.
 
 **Every caller that drives one of these transitions goes through this
-service** (the webhook handlers in ``payments/views.py``, the beat task in
-``payments/tasks.py``) rather than writing ``Subscription.billing_state``
+service** (the webhook handlers in ``billing/views.py``, the beat task in
+``billing/jobs.py``) rather than writing ``Subscription.billing_state``
 directly -- see ``billing_state_machine.LEGAL_BILLING_STATE_TRANSITIONS`` for
 why that matters: the set of transitions the diagram permits and the set the
 code can actually perform must be the same set, defined once.
@@ -31,10 +31,10 @@ import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
-from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from billing.conf import get_setting
 from billing.constants import BillingState, PaymentStatuses
 from billing.models import BillingPlan, Subscription
 from billing.notifications import NotificationTypes, Notifier
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 #: day, so the second charge reached the provider with the first attempt's key
 #: and was silently deduplicated -- a genuine collection attempt dropped. Two
 #: attempts in different buckets now always get distinct keys; a
-#: ``CELERY_TASK_ACKS_LATE`` redelivery of the *same* attempt (same bucket)
+#: at-least-once delivery redelivery of the *same* attempt (same bucket)
 #: reuses one. A little under 24h so the ladder retries roughly daily.
 MIN_DUNNING_RETRY_INTERVAL = datetime.timedelta(hours=20)
 
@@ -95,11 +95,11 @@ FAILED_SUBSCRIPTION_PAYMENT_STATUSES: frozenset[str] = frozenset(
 )
 
 #: Slug of the catalog's free-tier ``BillingPlan``, seeded by
-#: ``payments.migrations.0007_seed_billing_plans``. Mirrors that migration's own
+#: the seed-data migration. Mirrors that migration's own
 #: ``FREE_PLAN_SLUG`` constant (kept as a separate literal rather than imported --
 #: importing a slug constant out of a migration module ties this service to that
 #: module's continued existence, same reasoning as every other seeded-slug
-#: reference in this codebase, e.g. ``payments.migrations.0009``'s own
+#: reference in this codebase, e.g. the seed-data migration's own
 #: ``UNLIMITED_PLAN_SLUG``).
 FREE_PLAN_SLUG = "free"
 
@@ -110,13 +110,12 @@ def grace_period_days(subscription: Subscription) -> int:
 
     Module-level (not a ``DunningService`` method): ``retry_attempt_ordinal``,
     itself a module-level function so it stays directly importable without a
-    ``DunningService`` instance (``payments/tests/services/test_grace_recovery
-    .py`` calls it to prove the two idempotency-key namespaces never collide),
+    ``DunningService`` instance,
     calls this as a plain function rather than through ``self``.
     """
     grace_days = subscription.plan.grace_period_days
     if grace_days is None:
-        grace_days = settings.BILLING_DEFAULT_GRACE_PERIOD_DAYS
+        grace_days = get_setting("GRACE_PERIOD_DAYS")
     return grace_days
 
 
@@ -132,7 +131,7 @@ def retry_attempt_ordinal(subscription: Subscription, at: datetime.datetime) -> 
     idempotency key both read (see ``DunningService._retry_charge_and_notify``).
 
     Module-level, and kept importable without a ``DunningService`` instance,
-    because ``payments/tests/services/test_grace_recovery.py`` calls this
+    because the grace-recovery tests calls this
     directly (never re-derives a bucket number) to prove
     ``SubscriptionService.retry_payment``'s own idempotency-key namespace
     (``retry-payment-{pk}-{client_key}``) can never collide with any bucket
@@ -153,7 +152,7 @@ def dunning_retry_idempotency_key(subscription_pk: int, attempt_ordinal: int) ->
     for one dunning-ladder retry attempt: ``dunning-retry-{pk}-{ordinal}``.
 
     Named and module-level so this format has exactly one definition. In
-    particular, ``payments/tests/services/test_grace_recovery.py`` calls this
+    particular, the grace-recovery tests calls this
     directly (never re-derives the string) to prove ``retry_payment``'s own
     ``retry-payment-{pk}-{client_key}`` namespace (see
     ``SubscriptionService.retry_payment_idempotency_key``) can never collide
@@ -188,8 +187,8 @@ def is_downgrade_grace(subscription: Subscription) -> bool:
     organization with a downgrade already scheduled whose *currently active*
     (still higher, pre-boundary) plan then also fails a renewal charge reads
     as a downgrade-grace here too, and the genuinely failed charge does not
-    get retried by the dunning ladder (nor, since Phase 3, by
-    ``retry_payment`` -- see its docstring). Disambiguating the two reasons
+    get retried by the dunning ladder (nor by ``retry_payment`` -- see its
+    docstring). Disambiguating the two reasons
     unambiguously would need a dedicated reason field on ``Subscription`` -- a
     larger schema change than the dead-edge gap this function exists to close
     warrants. The compound case is rare (a renewal charge landing inside a
@@ -204,13 +203,10 @@ def is_downgrade_grace(subscription: Subscription) -> bool:
 class DunningService:
     """Stateless; built by ``billing.services.container``.
 
-    Unlike ``SubscriptionService``/``EntitlementService``, this does not use
-    ``@inject``-resolved defaults -- ``di_core.containers.AppContainer`` always
-    constructs it with explicit ``subscription_service``/``entitlement_service``/
-    ``notification_service`` arguments (mirroring
-    ``ExternalEventChangeRequestService``'s registration), and every test builds
-    it explicitly too, so there is no bare ``DunningService()`` call site that
-    needs automatic resolution from the wired container.
+    Every collaborator is optional and self-defaulting, so ``DunningService()``
+    builds a working instance from the configured seams while a caller that
+    already holds a subscription service, entitlement service or notifier --
+    the container, or a test -- passes them in and gets exactly those.
     """
 
     def __init__(
@@ -308,22 +304,19 @@ class DunningService:
         ``EntitlementService.is_billing_root_restricted``), so leaving ``GRACE``
         has nothing to reconcile.
 
-        Fanned out per pooled organization (``EntitlementService
-        .get_pooled_organization_ids``) -- the exact set every usage counter and
-        the sync-pause guard itself resolve against -- not per calendar directly;
-        each fanned-out task (``resync_organization_calendars_task``) resolves
-        its own organization's calendars. Deferred import: ``calendar_integration
-        .tasks`` is not imported at module level, mirroring the same
-        avoid-a-module-level-cross-app-import convention
-        ``CalendarSyncService.request_calendar_sync`` already uses for its own
-        Celery task import.
+        Nothing is resynced here: this package has no idea what a restriction
+        paused. It sends :data:`billing.signals.billing_restriction_lifted` with
+        the pooled organization ids (``EntitlementService
+        .get_pooled_organization_ids`` -- the exact set every usage counter and
+        the restriction guard itself resolve against), and a project's receiver
+        decides what that means for it.
 
         Called from inside the caller's ``transaction.atomic()`` block, wrapped
         in ``transaction.on_commit`` here so the fan-out cannot race the
         transaction that actually moved ``billing_state`` off RESTRICTED --
-        queuing before commit would let a worker pick up the resync and find the
-        subscription still (as far as an uncommitted read is concerned)
-        RESTRICTED.
+        signalling before commit would let a receiver's worker pick the work up
+        and find the subscription still (as far as an uncommitted read is
+        concerned) RESTRICTED.
         """
         organization_ids = self.entitlement_service.get_pooled_organization_ids(
             subscription.organization
@@ -348,7 +341,7 @@ class DunningService:
         """One ``process_dunning`` beat tick for one subscription.
 
         The single dispatch point the beat task calls through -- see module
-        docstring. Re-reads nothing: the caller (``payments.tasks.
+        docstring. Re-reads nothing: the caller (``billing.jobs.
         process_dunning_for_subscription``) already fetched ``subscription``
         fresh from the fan-out.
         """
@@ -367,8 +360,8 @@ class DunningService:
         ``MIN_DUNNING_RETRY_INTERVAL`` -- only the charge-retry-and-notify step
         is throttled to roughly once a day. Getting this ordering backwards
         (throttling the *whole* method, expiry check included) is exactly the
-        defect the beat schedule's own comment (``celerybeat_schedule.py``)
-        warns against: an hourly beat exists specifically so a subscription
+        defect the project's own beat/cron schedule must avoid: an hourly beat
+        exists specifically so a subscription
         whose ``grace_period_ends_at`` elapses moves out of GRACE within the
         hour, not up to ``MIN_DUNNING_RETRY_INTERVAL`` late because the most
         recent retry happened to land close to the deadline.
@@ -423,7 +416,7 @@ class DunningService:
 
         ``idempotency_key`` is derived from ``(subscription, attempt_ordinal)``
         -- the retry bucket ``now`` falls in (``retry_attempt_ordinal``). It is
-        stable across a ``CELERY_TASK_ACKS_LATE`` redelivery of the same logical
+        stable across a redelivery of the same logical
         attempt (a redelivery lands in the same bucket, so the provider itself
         refuses a second charge for it, through the provider's own idempotency
         key) and distinct from the previous and next bucket's attempt, so a
@@ -546,7 +539,7 @@ class DunningService:
 
     def check_free_fallback(self, subscription: Subscription) -> bool:
         """GRACE|RESTRICTED -> FREE once current usage fits under the catalog's
-        ``free`` plan's ceilings on every ``LimitedResource``.
+        ``free`` plan's ceilings on every registered resource.
 
         Returns ``True`` when the fallback happened. Deliberately leaves
         ``Subscription.plan`` untouched -- this is a gate on ``billing_state``
@@ -641,7 +634,7 @@ class DunningService:
                 user_id=user_id,
                 notification_type=NotificationTypes.IN_APP.value,
                 title="Your payment could not be processed",
-                body_template="payments/in_app/entered_grace.body.txt",
+                body_template="billing/in_app/entered_grace.body.txt",
                 context_name="dunning_entered_grace_context",
                 context_kwargs=context_kwargs,
             )
@@ -649,11 +642,11 @@ class DunningService:
                 user_id=user_id,
                 notification_type=NotificationTypes.EMAIL.value,
                 title="Your payment could not be processed",
-                body_template="payments/emails/dunning_payment_failed.body.html",
+                body_template="billing/emails/dunning_payment_failed.body.html",
                 context_name="dunning_entered_grace_context",
                 context_kwargs=context_kwargs,
-                subject_template="payments/emails/dunning_payment_failed.subject.txt",
-                preheader_template="payments/emails/dunning_payment_failed.pre_header.txt",
+                subject_template="billing/emails/dunning_payment_failed.subject.txt",
+                preheader_template="billing/emails/dunning_payment_failed.pre_header.txt",
             )
 
     def _notify_reminder(self, subscription: Subscription, urgency: str) -> None:
@@ -670,11 +663,11 @@ class DunningService:
                 user_id=user_id,
                 notification_type=NotificationTypes.EMAIL.value,
                 title="We're still unable to process your payment",
-                body_template="payments/emails/dunning_reminder.body.html",
+                body_template="billing/emails/dunning_reminder.body.html",
                 context_name="dunning_reminder_context",
                 context_kwargs=context_kwargs,
-                subject_template="payments/emails/dunning_reminder.subject.txt",
-                preheader_template="payments/emails/dunning_reminder.pre_header.txt",
+                subject_template="billing/emails/dunning_reminder.subject.txt",
+                preheader_template="billing/emails/dunning_reminder.pre_header.txt",
             )
 
     def _notify_restricted(self, subscription: Subscription) -> None:
@@ -687,11 +680,11 @@ class DunningService:
                 user_id=user_id,
                 notification_type=NotificationTypes.EMAIL.value,
                 title="Your account has been restricted",
-                body_template="payments/emails/dunning_restricted.body.html",
+                body_template="billing/emails/dunning_restricted.body.html",
                 context_name="dunning_restricted_context",
                 context_kwargs=context_kwargs,
-                subject_template="payments/emails/dunning_restricted.subject.txt",
-                preheader_template="payments/emails/dunning_restricted.pre_header.txt",
+                subject_template="billing/emails/dunning_restricted.subject.txt",
+                preheader_template="billing/emails/dunning_restricted.pre_header.txt",
             )
 
     @staticmethod

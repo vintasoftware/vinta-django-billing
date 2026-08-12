@@ -267,13 +267,13 @@ class PaymentsViewSet(ViewSet):
           the latter's own (idempotent) ``billing_state`` write is a same-state
           no-op by the time it runs -- the two never disagree about which write
           actually happened.
-        - **Approved, but $0 collected** (Billing API Contract Hardening,
-          Phase 4's zero-amount guard): neither ``resolve_payment_success``,
+        - **Approved, but $0 collected** (the zero-amount guard): neither
+          ``resolve_payment_success``,
           ``confirm_plan_change``, nor ``record_payment_method`` runs. This is
           **defense in depth against a provider that does emit** a $0
           approved subscription-payment update (e.g. two offsetting proration
           line items netting to zero) -- not a claim that Stripe itself
-          currently routes one here: as of BLOCKER 1's fix, a genuinely $0
+          currently routes one here: a genuinely $0
           Stripe invoice has no PaymentIntent, so `receive_payment_update`
           resolves to `None` before this method is ever called for it. The
           guard stays regardless, because a $0 approved status is not proof
@@ -458,9 +458,9 @@ class BillingProfileViewSet(
 
 class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
     """``GET /billing/payment-provider/`` -- the active organization's payment provider
-    (its pin when set, ``settings.DEFAULT_PAYMENT_PROVIDER`` otherwise -- resolved through
-    ``PaymentProviderResolver``, the one place both this endpoint and Phase 4's charge
-    routing implement that rule) plus that provider's browser-safe public credentials.
+    (its pin when set, ``VINTA_BILLING['DEFAULT_PROVIDER']`` otherwise -- resolved through
+    ``PaymentProviderResolver``, the one place both this endpoint and charge routing
+    implement that rule) plus that provider's browser-safe public credentials.
 
     Split from the unauthenticated system-default endpoint (see
     ``DefaultPaymentProviderView`` below): the two have different auth, throttle, and
@@ -469,7 +469,7 @@ class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
     ``_action_for_current_request``) so ``authentication_classes = ()`` applied to only
     one action.
 
-    Mounted directly via ``path()`` in ``payments/routes.py``'s ``extra_patterns``
+    Mounted directly via ``path()`` in ``billing/routing.py``'s ``extra_patterns``
     (``PaymentProviderViewSet.as_view({"get": "retrieve_provider"})``), bypassing the
     shared DRF router, so the bare ``/billing/payment-provider/`` path does not depend on
     the router's static list-route -- which always binds ``GET`` to an action literally

@@ -7,19 +7,8 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
 from billing.metering import Occurrence, get_occurrence_source
-from billing.notifications import NotificationTypes, VintaSendNotifier, get_notifier
+from billing.notifications import LoggingNotifier, NotificationTypes, get_notifier
 from billing.urls_helpers import absolute_url, namespaced
-
-
-class RecordingService:
-    """Stands in for a vintasend ``NotificationService``."""
-
-    def __init__(self):
-        self.calls = []
-
-    def create_notification(self, **kwargs):
-        self.calls.append(kwargs)
-        return "created"
 
 
 class RecordingNotifier:
@@ -40,67 +29,35 @@ class StubSource:
         return {external_id: {"title": "n%d" % external_id} for external_id in external_ids}
 
 
-class TestVintaSendNotifier:
-    def test_passes_the_required_arguments_through(self):
-        service = RecordingService()
-
-        VintaSendNotifier(service).create_notification(
+class TestLoggingNotifierDefault:
+    def test_it_accepts_the_full_call_shape_without_raising(self, caplog):
+        """The default has to swallow everything the services send it: a failed
+        delivery must never roll back the billing transition behind it."""
+        LoggingNotifier().create_notification(
             user_id=7,
             notification_type=NotificationTypes.EMAIL,
             title="t",
             body_template="b",
-            context_name="c",
-            context_kwargs={"k": 1},
-        )
-
-        assert service.calls == [
-            {
-                "user_id": 7,
-                "notification_type": "EMAIL",
-                "title": "t",
-                "body_template": "b",
-                "context_name": "c",
-                "context_kwargs": {"k": 1},
-            }
-        ]
-
-    def test_omits_optional_arguments_that_were_not_given(self):
-        """vintasend's signature has moved between versions; sending only what
-        the caller actually set keeps the adapter working across them."""
-        service = RecordingService()
-
-        VintaSendNotifier(service).create_notification(
-            user_id=1,
-            notification_type=NotificationTypes.IN_APP,
-            title="t",
-            body_template="b",
-            context_name="c",
-            context_kwargs={},
-        )
-
-        assert "subject_template" not in service.calls[0]
-        assert "send_after" not in service.calls[0]
-
-    def test_forwards_the_optional_arguments_when_given(self):
-        service = RecordingService()
-        when = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
-
-        VintaSendNotifier(service).create_notification(
-            user_id=1,
-            notification_type=NotificationTypes.EMAIL,
-            title="t",
-            body_template="b",
-            context_name="c",
-            context_kwargs={},
+            context_name="dunning_entered_grace_context",
+            context_kwargs={"organization_name": "Acme"},
             subject_template="s",
             preheader_template="p",
-            send_after=when,
+            send_after=None,
         )
 
-        call = service.calls[0]
-        assert call["subject_template"] == "s"
-        assert call["preheader_template"] == "p"
-        assert call["send_after"] == when
+    def test_no_transport_adapter_ships_with_the_package(self):
+        """`Notifier` is the whole notification surface. Shipping an adapter for
+        one transport would couple this package's releases to that transport's
+        API, and the adapter is a dozen lines in the project either way.
+        """
+        import billing.notifications as notifications
+
+        adapters = [
+            name
+            for name in dir(notifications)
+            if name.endswith("Notifier") and name not in {"Notifier", "LoggingNotifier"}
+        ]
+        assert adapters == []
 
 
 class TestGetNotifier:

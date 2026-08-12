@@ -49,7 +49,7 @@ LEGAL_BILLING_STATE_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
         # organization over its new (lower) limits
         # (SubscriptionService._schedule_downgrade). Both stamp
         # grace_period_ends_at and drive billing_state through this same
-        # transition, so process_dunning's GRACE/RESTRICTED sweep (payments/tasks.py)
+        # transition, so process_dunning's GRACE/RESTRICTED sweep (billing/jobs.py)
         # sees either kind of grace episode identically; DunningService
         # distinguishes them internally (see dunning_service.is_downgrade_grace)
         # only to decide whether there is a charge to retry, never to change which
@@ -94,7 +94,7 @@ def transition_billing_state(
     write happens, so a caller that stamps additional bookkeeping (e.g.
     ``grace_period_ends_at``) alongside the transition knows not to re-stamp it.
     This is what makes entering GRACE twice, or a dunning retry firing twice
-    under ``CELERY_TASK_ACKS_LATE`` redelivery, safe rather than a double-send.
+    under at-least-once delivery redelivery, safe rather than a double-send.
 
     :raises IllegalBillingStateTransitionError: ``to_state`` is reachable from
         ``subscription``'s current state only through an edge that is not on the

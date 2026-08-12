@@ -35,7 +35,7 @@ pip install vinta-django-billing            # or: uv add vinta-django-billing
 pip install "vinta-django-billing[stripe]"  # provider SDKs are extras
 ```
 
-Extras: `stripe`, `mercadopago`, `celery`, `vintasend`, `openapi`.
+Extras: `stripe`, `mercadopago`, `openapi`.
 
 ```python
 INSTALLED_APPS = [
@@ -98,7 +98,7 @@ and `count_by_organization` preserves that.
 > `SingleOrganizationModelMixin`, count through `Model.original_manager`, never
 > `Model.objects`. Usage pools across a whole billing subtree, so a counter is
 > asked about several organizations at once and must not be narrowed to whichever
-> one is bound to the current context. In a Celery beat run nothing is bound at
+> one is bound to the current context. In a background sweep nothing is bound at
 > all, and the scoped manager reports zero for everybody — every ceiling silently
 > reads as empty.
 
@@ -141,13 +141,47 @@ VINTA_BILLING = {
     # Who may see and change billing. Default: any member of the organization.
     "BILLING_MANAGER_PREDICATE": "myproject.billing.is_billing_owner",
     # Where dunning and warning messages go. Default: log and drop.
-    "NOTIFIER": "billing.notifications.VintaSendNotifier",
+    "NOTIFIER": "myproject.billing.Notifier",
     # What the meter bills. Default: the single registered postpaid resource.
     "OCCURRENCE_SOURCE": "myproject.billing.EventOccurrenceSource",
     "METERED_RESOURCE_KEY": "events",
-    "PROVIDERS": {"stripe": {"API_KEY": ..., "WEBHOOK_SECRET": ...}},
+    # How a sweep hands each per-subscription job over. Default: run it inline.
+    "JOB_DISPATCHER": "myproject.billing.enqueue",
+    # Per-provider credentials. A provider absent here stays registered -- its
+    # inbound webhook route keeps resolving -- but every outbound call site
+    # refuses it rather than authenticating with an empty credential.
+    "PROVIDERS": {
+        "stripe": {
+            "API_KEY": env("STRIPE_SECRET_KEY"),
+            "WEBHOOK_SECRET": env("STRIPE_WEBHOOK_SECRET"),
+            "PUBLISHABLE_KEY": env("STRIPE_PUBLISHABLE_KEY"),
+        },
+    },
+    "DEFAULT_PROVIDER": "stripe",
+    # Absolute base the provider callback URLs are built against.
+    "SITE_DOMAIN": "api.example.com",
 }
 ```
+
+The full list of keys, each with the default it falls back to, is in
+[`billing/conf.py`](billing/conf.py). An unknown key raises rather than being
+ignored, so a typo cannot silently leave you on a default.
+
+### Rendering errors
+
+The services raise typed errors carrying a machine-readable `code`. Point DRF at
+the shipped handler to render them, or call it from your own:
+
+```python
+REST_FRAMEWORK = {
+    "EXCEPTION_HANDLER": "billing.exception_handling.billing_exception_handler",
+}
+```
+
+Over-limit and declined-charge errors render as `402`, subscription-state
+conflicts as `409`, and a provider this deployment holds no credential for as
+`503` — see [`billing/exception_handling.py`](billing/exception_handling.py) for
+the table.
 
 ### Organization hierarchies
 
@@ -196,8 +230,15 @@ urlpatterns = [
 uv sync --all-extras
 uv run pytest
 uv run tox              # the full matrix: py3.11–3.14 x Django 5.2/6.0/6.1
+uv run tox -e swapped   # the suite against a swapped ORGANIZATION_MODEL
 uv run pre-commit install
 ```
+
+`tox -e swapped` runs everything again with `ORGANIZATION_MODEL` pointed at a
+project-defined model instead of the one `vinta-django-orgs` ships. Under the
+default settings those are the same class, so a foreign key hardcoded to
+`organizations.Organization` passes the whole suite and only breaks in a project
+that actually swapped the model — this is what catches it.
 
 ## License
 
