@@ -41,3 +41,23 @@ class SeatInvitation(SingleOrganizationModelMixin):
 
     def __str__(self) -> str:
         return self.email
+
+
+class Company(models.Model):
+    """An organization-like model with a parent chain.
+
+    Not an organization -- ``vinta-django-orgs``' model has no parent, which is
+    the whole reason :class:`billing.hierarchy.ParentFieldHierarchy` exists.
+    This stands in for the organization model of a project that *does* nest, so
+    the subtree walk is exercised against real queries rather than fakes.
+    """
+
+    name = models.CharField(max_length=100)
+    parent = models.ForeignKey(
+        "self", null=True, blank=True, related_name="children", on_delete=models.CASCADE
+    )
+    #: Marks a child that pays for its own subtree -- a reseller under a reseller.
+    is_own_root = models.BooleanField(default=False)
+
+    def __str__(self) -> str:
+        return self.name
