@@ -9,12 +9,12 @@ from django.db.models import Q
 from django.utils import timezone
 from organizations.models import Organization
 
+from billing import hierarchy
 from billing.conf import get_setting
 from billing.constants import BillingInterval, BillingState, PaymentProviders
 from billing.exceptions import (
     AddOnNotPurchasableError,
     BillingPeriodResolutionError,
-    BillingRootCycleError,
     ChargeDeclinedError,
     CollectionNotSupportedError,
     IllegalBillingStateTransitionError,
@@ -64,59 +64,28 @@ def is_billing_root(organization: Organization) -> bool:
     """True when ``organization`` holds its own ``Subscription`` rather than
     pooling against an ancestor's.
 
-    The single predicate for "is a billing root", used everywhere that decision
-    is made: here, by ``resolve_billing_root``'s cycle-guarded walk;
-    ``SubscriptionService.create_subscription_for_organization``; and any
-    backfill or acceptance query that needs the set of billing roots (as the
-    ``Q``-object form, ``billing_root_filter``). Keep all of those in sync with
-    this definition if it ever changes.
-
-    An organization is its own billing root if it has no parent (top of its
-    tree), **or** it can itself invite/create organizations — a nested reseller
-    (``can_invite_organizations=True`` with a ``parent`` set) is its own billing
-    root, not a child pooling against a grandparent's subscription.
+    Delegates to the configured hierarchy strategy. Re-exported here because this
+    module is where the predicate historically lived and several callers import
+    it from this path; :mod:`billing.hierarchy` is the definition.
     """
-    return organization.parent_id is None or organization.can_invite_organizations
+    return hierarchy.is_billing_root(organization)
 
 
 def billing_root_filter() -> Q:
-    """``Q``-object equivalent of ``is_billing_root``, for queryset filtering where
-    per-instance iteration is infeasible (bulk backfill migration, acceptance
-    query). Keep in sync with ``is_billing_root``.
-    """
-    return Q(parent__isnull=True) | Q(can_invite_organizations=True)
+    """``Q``-object equivalent of :func:`is_billing_root`, for queryset filtering
+    where per-instance iteration is infeasible (a bulk backfill, an acceptance
+    query)."""
+    return hierarchy.get_hierarchy().billing_root_q()
 
 
 def resolve_billing_root(organization: Organization) -> Organization:
-    """Resolve the organization whose ``Subscription`` pays for ``organization``.
+    """The organization whose ``Subscription`` pays for ``organization``.
 
-    Every billing root (see ``is_billing_root``) holds its own ``Subscription``. A
-    reseller child pools against the nearest ancestor that is itself a billing
-    root — the reseller root that pays for the whole subtree. The walk is
-    cycle-guarded because ``parent`` is user-mutable data.
-
-    Unlike a walk that may legitimately find nothing, this one always returns an
-    organization:
-    a parent-less organization is always a billing root, so a chain that never
-    hits a cycle is guaranteed to terminate at one. If the walk revisits an
-    organization it already passed through, the ``parent`` chain is a cycle and
-    ``BillingRootCycleError`` is raised — returning an arbitrary node from a
-    cycle would silently leave every organization on it without a resolvable
-    billing root.
+    Delegates to the configured hierarchy strategy, which owns the walk and its
+    cycle guard. Under the default flat hierarchy every organization is its own
+    billing root, so this returns its argument.
     """
-    seen: set[int] = set()
-    org: Organization | None = organization
-    while org is not None:
-        if org.pk in seen:
-            raise BillingRootCycleError(organization.pk, seen)
-        seen.add(org.pk)
-        if is_billing_root(org):
-            return org
-        org = org.parent
-    # Unreachable: a parent-less organization always satisfies is_billing_root
-    # and returns above, so the walk only continues while org.parent is set (and
-    # therefore non-None). Kept as a defensive fallback rather than an assert.
-    return organization
+    return hierarchy.resolve_billing_root(organization)  # type: ignore[return-value]
 
 
 def billing_interval_step(billing_interval: str) -> relativedelta:
@@ -321,50 +290,43 @@ class SubscriptionService:
     ) -> None:
         """``payment_service`` drives the provider round-trips the plan-change
         and add-on purchase flows need (creating/updating the provider-side plan,
-        attaching or moving a subscription onto it). Injected via DI, like every
-        other cross-service dependency in this codebase (``OrganizationService``'s
-        constructor is the model for this) — deliberately **not** the other
-        direction: ``PaymentService`` does not depend on ``SubscriptionService``,
-        which would make the two circular. The webhook views orchestrate calling
-        into both instead (see ``PaymentsViewSet``).
+        attaching or moving a subscription onto it). Deliberately one-directional:
+        ``PaymentService`` does not depend on ``SubscriptionService``, which would
+        make the two circular. The webhook views orchestrate calling into both
+        instead.
 
         ``payment_provider_resolver`` is the single home of the pin -> default
-        provider rule (see ``billing.services.payment_provider_resolver``).
+        provider rule (see :mod:`billing.services.payment_provider_resolver`).
         ``create_subscription_for_organization`` stamps its result onto the new
-        ``Subscription.payment_provider`` -- that column is the sole input to
-        every later existing-row provider resolution for the subscription (Rule A),
-        so hardcoding it here would make the organization's pin inert on the whole
-        subscription path.
+        ``Subscription.payment_provider``, and that column is the sole input to
+        every later provider resolution for the subscription -- so hardcoding it
+        here would make the organization's own pin inert.
 
-        All three default to ``None`` so every existing bare ``SubscriptionService()``
-        call across the codebase and test suite keeps working — ``@inject``
-        resolves ``Provide["payment_service"]`` / ``Provide["audit_service"]`` /
-        ``Provide["payment_provider_resolver"]``
-        from the wired container automatically once Django has started
-        (``billing`` is in ``INTERNAL_INSTALLED_APPS``, which
-        ``DICoreConfig.ready()`` wires), the same pattern ``CalendarService.__init__``
-        uses.
+        Both default to the ones this package ships, resolved lazily so a bare
+        ``SubscriptionService()`` works. Passing either still wins, which is what
+        a project running its own container, and every test with a double, relies
+        on.
         """
+        from billing.services.payment_provider_resolver import PaymentProviderResolver
+
         self.payment_service = payment_service
-        self.payment_provider_resolver = payment_provider_resolver
+        self.payment_provider_resolver = payment_provider_resolver or PaymentProviderResolver()
 
     def _require_payment_service(self) -> "PaymentService":
+        """The payment service, built on first use.
+
+        Resolved here rather than in ``__init__`` so constructing a
+        ``SubscriptionService`` does not build the provider adapter registries --
+        most of what this class does (provisioning, limit sync, add-on
+        bookkeeping) never touches a provider at all.
+        """
         if self.payment_service is None:
-            raise RuntimeError(
-                "SubscriptionService.payment_service is not set -- construct via "
-                "the DI container (or pass payment_service=...) before driving "
-                "the provider."
-            )
+            from billing.services.container import get_payment_service
+
+            self.payment_service = get_payment_service()
         return self.payment_service
 
     def _require_payment_provider_resolver(self) -> "PaymentProviderResolver":
-        if self.payment_provider_resolver is None:
-            raise RuntimeError(
-                "SubscriptionService.payment_provider_resolver is not set -- "
-                "construct via the DI container (or pass "
-                "payment_provider_resolver=...) before resolving an "
-                "organization's payment provider."
-            )
         return self.payment_provider_resolver
 
     def create_subscription_for_organization(

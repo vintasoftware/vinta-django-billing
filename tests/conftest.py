@@ -144,3 +144,34 @@ def entitlement_service():
     from billing.services.container import get_entitlement_service
 
     return get_entitlement_service()
+
+
+@pytest.fixture
+def billing_address(db):
+    from billing.models import BillingAddress
+
+    return BillingAddress.objects.create(
+        street_name="Main Street",
+        street_number="1",
+        city="Springfield",
+        state="SP",
+        country="BR",
+        zip_code="00000-000",
+    )
+
+
+@pytest.fixture
+def billing_profile(db, organization, billing_address):
+    """The payer record every charge hangs off."""
+    from billing.constants import DocumentTypes
+    from billing.models import BillingProfile
+
+    return BillingProfile.objects.create(
+        organization=organization,
+        contact_first_name="Ada",
+        contact_last_name="Lovelace",
+        contact_email="billing@example.com",
+        document_type=DocumentTypes.OTHER,
+        document_number="1",
+        billing_address=billing_address,
+    )

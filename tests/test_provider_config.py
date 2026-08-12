@@ -181,8 +181,13 @@ class TestSiteDomain:
 
 
 class TestDefaultProvider:
-    def test_it_defaults_to_stripe(self):
-        assert get_setting("DEFAULT_PROVIDER") == PaymentProviders.STRIPE
+    def test_it_defaults_to_no_provider_rather_than_guessing_one(self):
+        """A library must not pick which payment processor a project charges
+        through, so the default is empty and the caller handles that."""
+        from billing.services.payment_provider_resolver import PaymentProviderResolver
+
+        assert get_setting("DEFAULT_PROVIDER") == ""
+        assert PaymentProviderResolver().resolve_default() == ""
 
     @override_settings(VINTA_BILLING={"DEFAULT_PROVIDER": "mercadopago"})
     def test_a_project_can_point_it_elsewhere(self):

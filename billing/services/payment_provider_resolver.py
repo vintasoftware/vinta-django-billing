@@ -50,5 +50,10 @@ class PaymentProviderResolver:
         return billing_profile.payment_provider or self.resolve_default()
 
     def resolve_default(self) -> str:
-        """The system-wide default provider."""
-        return str(get_setting("DEFAULT_PROVIDER"))
+        """The system-wide default provider, or ``""`` when none is configured.
+
+        Empty rather than an exception: an unconfigured project resolves to "no
+        provider", which the caller handles, instead of raising from deep inside
+        subscription creation.
+        """
+        return str(get_setting("DEFAULT_PROVIDER") or "")

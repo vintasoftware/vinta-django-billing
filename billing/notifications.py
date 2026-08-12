@@ -30,18 +30,24 @@ configured one, so a test can pass a recorder without touching settings.
 from __future__ import annotations
 
 import logging
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 
 logger = logging.getLogger(__name__)
 
 
-class NotificationTypes:
+class NotificationTypes(StrEnum):
     """The delivery channels the shipped services ask for.
 
     A hint to the notifier about which channel the engine intends, not a
-    promise that the project supports it -- a notifier free to ignore the ones
-    it does not implement.
+    promise that the project supports it -- a notifier is free to ignore the
+    ones it does not implement.
+
+    A ``StrEnum`` rather than a plain class of string constants, for two
+    reasons: the services read ``NotificationTypes.EMAIL.value``, which a bare
+    ``str`` attribute does not support; and being a ``str`` subclass means a
+    notifier that expects a plain string still receives one.
     """
 
     EMAIL = "EMAIL"
