@@ -10,9 +10,9 @@ from decimal import Decimal
 import pytest
 from django.test import override_settings
 
-from billing.constants import BillingInterval, BillingState, LimitKind
-from billing.exceptions import IncompleteBillingPlanError, NoDefaultBillingPlanError
-from billing.models import (
+from vinta_billing.constants import BillingInterval, BillingState, LimitKind
+from vinta_billing.exceptions import IncompleteBillingPlanError, NoDefaultBillingPlanError
+from vinta_billing.models import (
     BillingPlan,
     PlanEntitlement,
     PlanLimit,
@@ -21,7 +21,7 @@ from billing.models import (
     SubscriptionEntitlement,
     SubscriptionPlanLimit,
 )
-from billing.services.container import get_subscription_service
+from vinta_billing.services.container import get_subscription_service
 
 
 pytestmark = pytest.mark.django_db

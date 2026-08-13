@@ -1,0 +1,16 @@
+from typing import Protocol
+
+from vinta_billing.models import Subscription
+from vinta_billing.services.dataclasses import CreatedPlan
+
+
+class BaseSubscriptionPlanFactory(Protocol):
+    """
+    Base class for creating subscription plans.
+    """
+
+    def make_plan_from_subscription(self, subscription: Subscription) -> CreatedPlan:
+        """
+        Create a subscription plan.
+        """
+        raise NotImplementedError("This method should be overridden by subclasses.")

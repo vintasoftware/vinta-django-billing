@@ -12,9 +12,9 @@ from decimal import Decimal
 import pytest
 from freezegun import freeze_time
 
-from billing.constants import BillingInterval, BillingState, LimitKind
-from billing.models import BillingPeriodSummary, MeteredOccurrence
-from billing.services.cycle_close_service import MAX_CLOSE_PERIODS_PER_RUN, CycleCloseService
+from vinta_billing.constants import BillingInterval, BillingState, LimitKind
+from vinta_billing.models import BillingPeriodSummary, MeteredOccurrence
+from vinta_billing.services.cycle_close_service import MAX_CLOSE_PERIODS_PER_RUN, CycleCloseService
 
 
 pytestmark = pytest.mark.django_db
@@ -36,7 +36,7 @@ class FakePaymentService:
         self.billing_profile = billing_profile
 
     def create_payment(self, **kwargs):
-        from billing.models import Payment
+        from vinta_billing.models import Payment
 
         self.charges.append(kwargs)
         return Payment.objects.create(

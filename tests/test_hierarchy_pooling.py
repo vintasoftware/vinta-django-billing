@@ -8,7 +8,7 @@ standing in for the organization model of a project whose organizations nest.
 
 import pytest
 
-from billing.hierarchy import FlatHierarchy, ParentFieldHierarchy
+from vinta_billing.hierarchy import FlatHierarchy, ParentFieldHierarchy
 from tests.testapp.models import Company
 
 

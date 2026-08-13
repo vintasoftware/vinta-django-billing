@@ -1,16 +1,16 @@
-"""Unit tests for ``billing.services.provider_credentials`` and
-``billing.services.payment_provider_resolver``.
+"""Unit tests for ``vinta_billing.services.provider_credentials`` and
+``vinta_billing.services.payment_provider_resolver``.
 """
 
 import pytest
 from model_bakery import baker
 from vinta_orgs.conf import get_organization_model
 
-from billing.constants import PaymentProviders
-from billing.exceptions import PaymentProviderNotConfiguredError
-from billing.models import BillingProfile
-from billing.services.payment_provider_resolver import PaymentProviderResolver
-from billing.services.provider_credentials import (
+from vinta_billing.constants import PaymentProviders
+from vinta_billing.exceptions import PaymentProviderNotConfiguredError
+from vinta_billing.models import BillingProfile
+from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
+from vinta_billing.services.provider_credentials import (
     PublicProviderCredentials,
     resolve_public_credentials,
 )
@@ -79,7 +79,7 @@ class TestResolvePublicCredentials:
 class TestPaymentProviderResolver:
     def test_resolve_for_organization_returns_the_pin_when_set(self):
         organization = baker.make(get_organization_model())
-        billing_address = baker.make("billing.BillingAddress")
+        billing_address = baker.make("vinta_billing.BillingAddress")
         baker.make(
             BillingProfile,
             organization=organization,
@@ -100,7 +100,7 @@ class TestPaymentProviderResolver:
             "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
         }
         organization = baker.make(get_organization_model())
-        billing_address = baker.make("billing.BillingAddress")
+        billing_address = baker.make("vinta_billing.BillingAddress")
         baker.make(
             BillingProfile,
             organization=organization,

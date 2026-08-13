@@ -5,9 +5,9 @@ import pytest
 from model_bakery import baker
 from vinta_orgs.conf import get_organization_model
 
-from billing.constants import BillingInterval, PaymentProviders
-from billing.models import BillingPlan, Subscription
-from billing.services.subscription_plan_factory.billing_plan_factory import BillingPlanFactory
+from vinta_billing.constants import BillingInterval, PaymentProviders
+from vinta_billing.models import BillingPlan, Subscription
+from vinta_billing.services.subscription_plan_factory.billing_plan_factory import BillingPlanFactory
 
 
 # This module builds its own Subscription rows (OneToOne with Organization), so it

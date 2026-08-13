@@ -12,9 +12,9 @@ import pytest
 from django.test import override_settings
 from freezegun import freeze_time
 
-from billing.constants import BillingState, LimitWarningLevel
-from billing.models import LimitWarningNotification
-from billing.services.usage_warning_service import (
+from vinta_billing.constants import BillingState, LimitWarningLevel
+from vinta_billing.models import LimitWarningNotification
+from vinta_billing.services.usage_warning_service import (
     UsageWarningService,
 )
 from tests.testapp.models import Widget
@@ -254,6 +254,6 @@ class TestDefaultNotifier:
     @override_settings(VINTA_BILLING={"METERED_RESOURCE_KEY": "event_occurrences"})
     def test_the_service_falls_back_to_the_configured_notifier(self):
         """Constructed bare, it must still have somewhere to send."""
-        from billing.notifications import LoggingNotifier
+        from vinta_billing.notifications import LoggingNotifier
 
         assert isinstance(UsageWarningService().notification_service, LoggingNotifier)

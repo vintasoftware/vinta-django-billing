@@ -13,19 +13,19 @@ down.
 import pytest
 from django.test import override_settings
 
-from billing.conf import get_provider_config, get_setting, get_site_domain
-from billing.constants import PaymentProviders
-from billing.services.payment_adapters import (
+from vinta_billing.conf import get_provider_config, get_setting, get_site_domain
+from vinta_billing.constants import PaymentProviders
+from vinta_billing.services.payment_adapters import (
     get_payment_adapter_classes,
     get_payment_provider_registry,
 )
-from billing.services.payment_adapters.base import BasePaymentAdapter, select_init_kwargs
-from billing.services.payment_service import PaymentService
-from billing.services.subscription_adapters import (
+from vinta_billing.services.payment_adapters.base import BasePaymentAdapter, select_init_kwargs
+from vinta_billing.services.payment_service import PaymentService
+from vinta_billing.services.subscription_adapters import (
     get_subscription_adapter_classes,
     get_subscription_provider_registry,
 )
-from billing.services.subscription_adapters.base import BaseSubscriptionAdapter
+from vinta_billing.services.subscription_adapters.base import BaseSubscriptionAdapter
 
 
 STRIPE_CONFIGURED = {
@@ -90,7 +90,7 @@ class TestProvidersSetting:
 
     @override_settings(VINTA_BILLING=STRIPE_CONFIGURED)
     def test_the_outbound_gate_refuses_the_unconfigured_provider(self):
-        from billing.exceptions import PaymentProviderNotConfiguredError
+        from vinta_billing.exceptions import PaymentProviderNotConfiguredError
 
         service = PaymentService()
 
@@ -184,13 +184,13 @@ class TestDefaultProvider:
     def test_it_defaults_to_no_provider_rather_than_guessing_one(self):
         """A library must not pick which payment processor a project charges
         through, so the default is empty and the caller handles that."""
-        from billing.services.payment_provider_resolver import PaymentProviderResolver
+        from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 
         assert get_setting("DEFAULT_PROVIDER") == ""
         assert PaymentProviderResolver().resolve_default() == ""
 
     @override_settings(VINTA_BILLING={"DEFAULT_PROVIDER": "mercadopago"})
     def test_a_project_can_point_it_elsewhere(self):
-        from billing.services.payment_provider_resolver import PaymentProviderResolver
+        from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 
         assert PaymentProviderResolver().resolve_default() == PaymentProviders.MERCADOPAGO

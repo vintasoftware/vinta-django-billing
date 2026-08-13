@@ -15,10 +15,10 @@ everybody: every ceiling would silently read as empty.
 from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
-from billing.constants import LimitKind, LimitRemedy
-from billing.counting import UsageContext, count_by_organization, merge_breakdowns
-from billing.registry import entitlements, resources
-from billing.services.entitlement_service import count_metered_occurrences
+from vinta_billing.constants import LimitKind, LimitRemedy
+from vinta_billing.counting import UsageContext, count_by_organization, merge_breakdowns
+from vinta_billing.registry import entitlements, resources
+from vinta_billing.services.entitlement_service import count_metered_occurrences
 
 
 #: Read by the seat counter out of ``UsageContext.extra``. Accepting an

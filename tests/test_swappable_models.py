@@ -17,7 +17,7 @@ from django.db import connection
 from model_bakery import baker
 from vinta_orgs.conf import get_organization_model
 
-from billing.models import (
+from vinta_billing.models import (
     BillingProfile,
     MeteredOccurrence,
     Subscription,
@@ -60,7 +60,7 @@ def test_the_stock_organization_model_really_is_swapped_out():
 
 @pytest.mark.parametrize(("model_name", "field_name"), ORGANIZATION_RELATIONS)
 def test_organization_relations_point_at_the_swapped_model(model_name, field_name):
-    model = apps.get_model("billing", model_name)
+    model = apps.get_model("vinta_billing", model_name)
     field = model._meta.get_field(field_name)
 
     assert field.related_model is get_organization_model()
@@ -81,7 +81,7 @@ def test_a_subscription_round_trips_against_the_swapped_model():
     landing.
     """
     tenant = baker.make(get_organization_model(), external_reference="acme-1")
-    plan = baker.make("billing.BillingPlan", slug="swap-test", is_active=True)
+    plan = baker.make("vinta_billing.BillingPlan", slug="swap-test", is_active=True)
     subscription = baker.make(Subscription, organization=tenant, plan=plan)
 
     reloaded = Subscription.objects.get(pk=subscription.pk)
@@ -112,7 +112,7 @@ def test_billing_profile_and_metered_occurrence_accept_the_swapped_model():
     """The two relations most likely to be missed: one on the write path from a
     view, one written by the meter from a background job."""
     tenant = baker.make(get_organization_model())
-    billing_address = baker.make("billing.BillingAddress")
+    billing_address = baker.make("vinta_billing.BillingAddress")
     profile = baker.make(
         BillingProfile,
         organization=tenant,
@@ -121,7 +121,7 @@ def test_billing_profile_and_metered_occurrence_accept_the_swapped_model():
         document_number="12345678900",
         billing_address=billing_address,
     )
-    plan = baker.make("billing.BillingPlan", slug="swap-test-2", is_active=True)
+    plan = baker.make("vinta_billing.BillingPlan", slug="swap-test-2", is_active=True)
     subscription = baker.make(Subscription, organization=tenant, plan=plan)
     occurrence = baker.make(
         MeteredOccurrence,

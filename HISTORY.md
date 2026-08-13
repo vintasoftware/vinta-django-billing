@@ -31,5 +31,5 @@ application, generalised to run against any project built on
   a project-defined organization model.
 - Provider credentials and the default provider live in `VINTA_BILLING`, and the
   adapter registries hand back adapters built from them.
-- `billing.exception_handling.billing_exception_handler` renders the typed
+- `vinta_billing.exception_handling.billing_exception_handler` renders the typed
   errors as HTTP responses.

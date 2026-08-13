@@ -8,7 +8,7 @@ this package never sees.
 
 import pytest
 
-from billing.models import PlanLimit, SubscriptionPlanLimit
+from vinta_billing.models import PlanLimit, SubscriptionPlanLimit
 from tests.testapp.billing_resources import EXCLUDE_INVITATION_ID
 from tests.testapp.models import Seat, SeatInvitation, Widget
 
@@ -164,7 +164,7 @@ class TestAddOns:
     def test_an_active_add_on_raises_the_ceiling(
         self, entitlement_service, organization, subscription
     ):
-        from billing.models import SubscriptionAddOn
+        from vinta_billing.models import SubscriptionAddOn
 
         SubscriptionAddOn.objects.create(
             subscription=subscription,
@@ -177,7 +177,7 @@ class TestAddOns:
         assert entitlement_service.get_effective_limit(organization, "widgets").limit_value == 5
 
     def test_an_inactive_add_on_does_not(self, entitlement_service, organization, subscription):
-        from billing.models import SubscriptionAddOn
+        from vinta_billing.models import SubscriptionAddOn
 
         SubscriptionAddOn.objects.create(
             subscription=subscription,

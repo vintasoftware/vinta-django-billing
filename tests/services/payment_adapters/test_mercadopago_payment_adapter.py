@@ -9,11 +9,11 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
-from billing.constants import PaymentProviders, PaymentStatuses, RefundStatuses
-from billing.exceptions import ProviderWebhookEventIdMissingError
-from billing.services.dataclasses import Refund, RefundResult
-from billing.services.payment_adapters.base import Payment, PaymentStatusUpdate
-from billing.services.payment_adapters.mercadopago_payment_adapter import (
+from vinta_billing.constants import PaymentProviders, PaymentStatuses, RefundStatuses
+from vinta_billing.exceptions import ProviderWebhookEventIdMissingError
+from vinta_billing.services.dataclasses import Refund, RefundResult
+from vinta_billing.services.payment_adapters.base import Payment, PaymentStatusUpdate
+from vinta_billing.services.payment_adapters.mercadopago_payment_adapter import (
     PAYMENT_STATUS_MAPPING,
     REFUND_STATUS_MAPPING,
     MercadoPagoPaymentAdapter,
@@ -101,7 +101,7 @@ def mock_refund(mock_payment):
 def adapter():
     """Create MercadoPagoAdapter instance with mocked SDK."""
     with patch(
-        "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.SDK"
+        "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.SDK"
     ) as mock_sdk:
         adapter = MercadoPagoPaymentAdapter("test-access-token", webhook_secret=WEBHOOK_SECRET)
         adapter.sdk = mock_sdk.return_value
@@ -111,16 +111,16 @@ def adapter():
 def test_init():
     """Test adapter initialization."""
     with patch(
-        "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.SDK"
+        "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.SDK"
     ) as mock_sdk:
         adapter = MercadoPagoPaymentAdapter("test-token")
         mock_sdk.assert_called_once_with("test-token")
         assert adapter.provider == PaymentProviders.MERCADOPAGO
 
 
-@patch("billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
 @patch(
-    "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
 )
 @override_settings(SITE_DOMAIN="example.com")
 def test_process_success(mock_request_options, mock_reverse, adapter, mock_payment):
@@ -168,9 +168,9 @@ def test_process_success(mock_request_options, mock_reverse, adapter, mock_payme
     adapter.sdk.payment().create.assert_called_once_with(expected_payment_data, mock_options)
 
 
-@patch("billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
 @patch(
-    "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
 )
 @override_settings(SITE_DOMAIN="example.com")
 def test_process_forwards_idempotency_key_as_header(
@@ -189,9 +189,9 @@ def test_process_forwards_idempotency_key_as_header(
     assert mock_options.custom_headers == {"x-idempotency-key": "idem-key-1"}
 
 
-@patch("billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
 @patch(
-    "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
 )
 @override_settings(SITE_DOMAIN="example.com")
 def test_process_without_idempotency_key_falls_back_to_payment_id(
@@ -217,7 +217,7 @@ def test_process_missing_site_domain(adapter, mock_payment):
 
 
 @patch(
-    "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
 )
 def test_refund_success(mock_request_options, adapter, mock_refund):
     """Test successful refund processing.
@@ -247,9 +247,9 @@ def test_refund_success(mock_request_options, adapter, mock_refund):
 
 
 @patch(
-    "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
 )
-@patch("billing.services.payment_adapters.mercadopago_payment_adapter.logger")
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.logger")
 def test_refund_unknown_status_logs_no_pii(mock_logger, mock_request_options, adapter, mock_refund):
     adapter.sdk.refund().create.return_value = {
         "response": {"id": "refund-456", "status": "some_new_mp_status"}
@@ -405,7 +405,7 @@ def test_check_refund_status_success(adapter, mock_refund):
     adapter.sdk.refund().list_all.assert_called_once_with("mp-payment-456")
 
 
-@patch("billing.services.payment_adapters.mercadopago_payment_adapter.logger")
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.logger")
 def test_check_refund_status_unknown(mock_logger, adapter, mock_refund):
     """Test refund status check with unknown status."""
     mock_refund.external_id = "refund-456"
@@ -450,13 +450,13 @@ def test_payment_methods_mapping_usage(adapter, mock_payment):
     mock_payment.payment_method = "visa"
 
     with patch.dict(
-        "billing.services.payment_adapters.mercadopago_payment_adapter.PAYMENT_METHODS_MAPPING",
+        "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.PAYMENT_METHODS_MAPPING",
         {"visa": "visa_card"},
     ):
         with override_settings(SITE_DOMAIN="example.com"):
-            with patch("billing.services.payment_adapters.mercadopago_payment_adapter.reverse"):
+            with patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse"):
                 with patch(
-                    "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+                    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
                 ):
                     adapter.sdk.payment().create.return_value = {"response": {"id": "test-id"}}
 
@@ -472,13 +472,13 @@ def test_document_types_mapping_usage(adapter, mock_payment):
     mock_payment.billing_profile.document_type = "CPF"
 
     with patch.dict(
-        "billing.services.payment_adapters.mercadopago_payment_adapter.DOCUMENT_TYPES_MAPPING",
+        "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.DOCUMENT_TYPES_MAPPING",
         {"CPF": "cpf_mapped"},
     ):
         with override_settings(SITE_DOMAIN="example.com"):
-            with patch("billing.services.payment_adapters.mercadopago_payment_adapter.reverse"):
+            with patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse"):
                 with patch(
-                    "billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+                    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
                 ):
                     adapter.sdk.payment().create.return_value = {"response": {"id": "test-id"}}
 
@@ -500,7 +500,7 @@ def test_check_status_maps_known_status(adapter):
     assert result.status == PaymentStatuses.APPROVED
 
 
-@patch("billing.services.payment_adapters.mercadopago_payment_adapter.logger")
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.logger")
 def test_check_status_maps_unknown_status_and_logs(mock_logger, adapter):
     """An unrecognized provider status maps to UNKNOWN instead of being written raw."""
     response = {

@@ -8,9 +8,9 @@ un-suspended) by accident.
 
 import pytest
 
-from billing.constants import BillingState
-from billing.exceptions import IllegalBillingStateTransitionError
-from billing.services.billing_state_machine import (
+from vinta_billing.constants import BillingState
+from vinta_billing.exceptions import IllegalBillingStateTransitionError
+from vinta_billing.services.billing_state_machine import (
     LEGAL_BILLING_STATE_TRANSITIONS,
     transition_billing_state,
 )

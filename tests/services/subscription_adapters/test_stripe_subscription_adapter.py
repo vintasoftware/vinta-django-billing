@@ -8,21 +8,21 @@ from unittest.mock import Mock, patch
 import pytest
 import stripe
 
-from billing.constants import BillingInterval, PaymentProviders, PaymentStatuses
-from billing.exceptions import (
+from vinta_billing.constants import BillingInterval, PaymentProviders, PaymentStatuses
+from vinta_billing.exceptions import (
     ChargeDeclinedError,
     NoOutstandingBalanceError,
     PaymentAdapterError,
     ProviderWebhookEventIdMissingError,
 )
-from billing.services.dataclasses import (
+from vinta_billing.services.dataclasses import (
     BillingAddress,
     BillingProfile,
     CreatedPlan,
     Plan,
     Subscription,
 )
-from billing.services.subscription_adapters.stripe_subscription_adapter import (
+from vinta_billing.services.subscription_adapters.stripe_subscription_adapter import (
     StripeSubscriptionAdapter,
 )
 
@@ -129,8 +129,8 @@ def test_init():
     assert adapter.verifies_full_body is True
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Product")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Product")
 def test_create_subscription_plan(mock_product, mock_price, adapter, mock_plan):
     """Stripe has no plan-creation call that doesn't also need a `Product` —
     unlike MercadoPago's single `plan().create()`, this always creates both."""
@@ -152,8 +152,8 @@ def test_create_subscription_plan(mock_product, mock_price, adapter, mock_plan):
     )
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Product")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Product")
 def test_create_subscription_plan_annual_interval(mock_product, mock_price, adapter, mock_plan):
     mock_plan.billing_interval = BillingInterval.ANNUAL
     mock_product.create.return_value = Mock(id="prod_456")
@@ -165,7 +165,7 @@ def test_create_subscription_plan_annual_interval(mock_product, mock_price, adap
     assert call_kwargs["recurring"] == {"interval": "year"}
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
 def test_update_subscription_plan_creates_new_price_and_archives_old_one(
     mock_price, adapter, mock_plan
 ):
@@ -187,7 +187,7 @@ def test_update_subscription_plan_creates_new_price_and_archives_old_one(
     )
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Price")
 def test_update_plan_returns_created_plan_with_new_external_id(mock_price, adapter):
     """Since Stripe prices can't be updated in place, `update_plan` must return a
     *new* external id, not the same one it was given — the base interface
@@ -215,8 +215,8 @@ def test_update_plan_returns_created_plan_with_new_external_id(mock_price, adapt
     assert result.name == created_plan.name
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
 def test_create_subscription_success(
     mock_customer, mock_subscription_resource, adapter, mock_subscription
 ):
@@ -240,8 +240,8 @@ def test_create_subscription_success(
     )
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
 def test_create_subscription_forwards_idempotency_key_to_subscription_create(
     mock_customer, mock_subscription_resource, adapter, mock_subscription
 ):
@@ -257,14 +257,14 @@ def test_create_subscription_forwards_idempotency_key_to_subscription_create(
     assert "idempotency_key" not in mock_customer.create.call_args.kwargs
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
 def test_cancel_subscription_success(mock_subscription_resource, adapter, mock_subscription):
     adapter.cancel_subscription(mock_subscription)
 
     mock_subscription_resource.cancel.assert_called_once_with("sub_456", api_key="sk_test_123")
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
 def test_change_subscription_plan_success(
     mock_subscription_resource, adapter, mock_subscription, mock_created_plan
 ):
@@ -283,7 +283,7 @@ def test_change_subscription_plan_success(
     )
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
 def test_change_subscription_plan_forwards_idempotency_key_to_modify(
     mock_subscription_resource, adapter, mock_subscription, mock_created_plan
 ):
@@ -307,9 +307,9 @@ def test_change_subscription_plan_without_external_id(
         adapter.change_subscription_plan(mock_subscription, mock_created_plan)
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentMethod")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentMethod")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
 def test_update_subscription_payment_token_success(
     mock_subscription_resource, mock_payment_method, mock_customer, adapter, mock_subscription
 ):
@@ -345,7 +345,7 @@ def test_update_subscription_payment_token_without_external_id(adapter, mock_sub
         adapter.update_subscription_payment_token(mock_subscription, "pm_new_token")
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_pays_the_open_invoice(mock_invoice, adapter, mock_subscription):
     """The money-moving line this phase exists to fix: locate the subscription's
     outstanding invoice and pay *that* -- not a proration on a freshly-minted
@@ -370,7 +370,7 @@ def test_pay_outstanding_invoice_pays_the_open_invoice(mock_invoice, adapter, mo
     )
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_pays_every_outstanding_invoice_oldest_first(
     mock_invoice, adapter, mock_subscription
 ):
@@ -403,7 +403,7 @@ def test_pay_outstanding_invoice_pays_every_outstanding_invoice_oldest_first(
         assert call.kwargs["payment_method"] == "pm_new_token"
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_namespaces_the_idempotency_key_per_invoice(
     mock_invoice, adapter, mock_subscription
 ):
@@ -429,7 +429,7 @@ def test_pay_outstanding_invoice_namespaces_the_idempotency_key_per_invoice(
     )
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_raises_when_no_open_invoice_exists(
     mock_invoice, adapter, mock_subscription
 ):
@@ -444,7 +444,7 @@ def test_pay_outstanding_invoice_raises_when_no_open_invoice_exists(
     mock_invoice.pay.assert_not_called()
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_collects_a_balance_left_uncollectible(
     mock_invoice, adapter, mock_subscription
 ):
@@ -471,9 +471,9 @@ def test_pay_outstanding_invoice_without_external_id(adapter, mock_subscription)
         adapter.pay_outstanding_invoice(mock_subscription, "pm_new_token")
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentMethod")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentMethod")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Customer")
 def test_pay_outstanding_invoice_with_empty_token_omits_payment_method(
     mock_customer, mock_payment_method, mock_invoice, adapter, mock_subscription
 ):
@@ -498,7 +498,7 @@ def test_pay_outstanding_invoice_with_empty_token_omits_payment_method(
     mock_customer.modify.assert_not_called()
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_with_empty_token_still_namespaces_idempotency_key(
     mock_invoice, adapter, mock_subscription
 ):
@@ -515,7 +515,7 @@ def test_pay_outstanding_invoice_with_empty_token_still_namespaces_idempotency_k
     assert "payment_method" not in mock_invoice.pay.call_args.kwargs
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_default_token_is_empty(mock_invoice, adapter, mock_subscription):
     """`payment_token` is optional -- calling with no token at all (the
     ladder's actual call shape, `pay_outstanding_invoice(subscription,
@@ -531,7 +531,7 @@ def test_pay_outstanding_invoice_default_token_is_empty(mock_invoice, adapter, m
     assert "payment_method" not in mock_invoice.pay.call_args.kwargs
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_translates_card_error_into_charge_declined(
     mock_invoice, adapter, mock_subscription
 ):
@@ -557,7 +557,7 @@ def test_pay_outstanding_invoice_translates_card_error_into_charge_declined(
     assert "Your card was declined." in exc_info.value.provider_message
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_does_not_swallow_non_charge_stripe_errors(
     mock_invoice, adapter, mock_subscription
 ):
@@ -577,7 +577,7 @@ def test_pay_outstanding_invoice_does_not_swallow_non_charge_stripe_errors(
         adapter.pay_outstanding_invoice(mock_subscription, "pm_new_token")
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_translates_invalid_request_error_into_charge_declined(
     mock_invoice, adapter, mock_subscription
 ):
@@ -607,7 +607,7 @@ def test_pay_outstanding_invoice_translates_invalid_request_error_into_charge_de
     assert exc_info.value.invoices_paid == 0
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_pay_outstanding_invoice_charge_declined_carries_the_partial_collection_count(
     mock_invoice, adapter, mock_subscription
 ):
@@ -697,7 +697,7 @@ def test_is_payment_update_false(adapter):
     assert adapter.is_payment_update({"type": "customer.subscription.updated"}) is False
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentIntent")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentIntent")
 def test_get_payment_payload(mock_payment_intent, adapter):
     mock_payment_intent.retrieve.return_value = Mock(to_dict=lambda: {"id": "pi_456"})
 
@@ -707,7 +707,7 @@ def test_get_payment_payload(mock_payment_intent, adapter):
     mock_payment_intent.retrieve.assert_called_once_with("pi_456", api_key="sk_test_123")
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
 def test_get_subscription_payload(mock_subscription_resource, adapter):
     """`latest_invoice.payment_intent` is not a valid expand path under the
     pinned `2026-06-24.dahlia` API version — `Invoice.payment_intent` was
@@ -868,8 +868,8 @@ def test_get_payment_external_id_from_subscription_payload_falls_back_to_most_re
     assert result == "pi_newer_failure"
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentIntent")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentIntent")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_receive_payment_update_invoice_event_resolves_off_the_events_own_invoice(
     mock_invoice, mock_payment_intent, adapter
 ):
@@ -953,7 +953,7 @@ def test_receive_payment_update_invoice_event_resolves_off_the_events_own_invoic
     assert status_update.status == PaymentStatuses.APPROVED
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice")
 def test_receive_payment_update_invoice_event_with_no_invoice_id_returns_none(
     mock_invoice, adapter
 ):
@@ -974,8 +974,8 @@ def test_receive_payment_update_invoice_event_with_no_invoice_id_returns_none(
     mock_invoice.retrieve.assert_not_called()
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentIntent")
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.PaymentIntent")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Subscription")
 def test_receive_payment_update_non_invoice_event_keeps_the_latest_invoice_lookup(
     mock_subscription_resource, mock_payment_intent, adapter
 ):
@@ -1079,7 +1079,7 @@ def test_create_status_update_from_payment_payload_maps_known_status(adapter):
     assert result.update_external_id == "pi_456"
 
 
-@patch("billing.services.subscription_adapters.stripe_subscription_adapter.logger")
+@patch("vinta_billing.services.subscription_adapters.stripe_subscription_adapter.logger")
 def test_create_status_update_from_payment_payload_maps_unknown_status(mock_logger, adapter):
     payment_payload = {"id": "pi_456", "status": "some_new_status"}
 

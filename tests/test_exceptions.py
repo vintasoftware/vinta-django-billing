@@ -15,7 +15,7 @@ Two things matter here:
    here would silently break both.
 """
 
-from billing.exceptions import (
+from vinta_billing.exceptions import (
     AddOnNotPurchasableError,
     BillingError,
     CollectionNotSupportedError,

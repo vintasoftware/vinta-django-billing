@@ -39,7 +39,7 @@ jobs:
 
       - run: uv build
 
-      # The version is dynamic (hatch reads billing/__init__.py), so the tag
+      # The version is dynamic (hatch reads vinta_billing/__init__.py), so the tag
       # and the package can disagree — pushing 0.2.0 without bumping the file
       # would upload an artifact labelled 0.1.0, and PyPI would either reject
       # it as a duplicate or, worse, accept it under the wrong version.
@@ -50,7 +50,7 @@ jobs:
           if [ ! -f "dist/vinta_django_billing-${TAG}.tar.gz" ]; then
             echo "::error::Tag ${TAG} does not match the built distributions:"
             ls -1 dist
-            echo "::error::Bump __version__ in billing/__init__.py to ${TAG}, or retag."
+            echo "::error::Bump __version__ in vinta_billing/__init__.py to ${TAG}, or retag."
             exit 1
           fi
           echo "Tag ${TAG} matches the built distributions."

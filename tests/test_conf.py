@@ -3,9 +3,9 @@
 import pytest
 from django.test import override_settings
 
-from billing.conf import get_object_from_setting, get_setting
-from billing.metering import NullOccurrenceSource, get_occurrence_source
-from billing.notifications import LoggingNotifier, get_notifier
+from vinta_billing.conf import get_object_from_setting, get_setting
+from vinta_billing.metering import NullOccurrenceSource, get_occurrence_source
+from vinta_billing.notifications import LoggingNotifier, get_notifier
 
 
 class TestGetSetting:

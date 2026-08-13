@@ -6,9 +6,9 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
-from billing.metering import Occurrence, get_occurrence_source
-from billing.notifications import LoggingNotifier, NotificationTypes, get_notifier
-from billing.urls_helpers import absolute_url, namespaced
+from vinta_billing.metering import Occurrence, get_occurrence_source
+from vinta_billing.notifications import LoggingNotifier, NotificationTypes, get_notifier
+from vinta_billing.urls_helpers import absolute_url, namespaced
 
 
 class RecordingNotifier:
@@ -50,7 +50,7 @@ class TestLoggingNotifierDefault:
         one transport would couple this package's releases to that transport's
         API, and the adapter is a dozen lines in the project either way.
         """
-        import billing.notifications as notifications
+        import vinta_billing.notifications as notifications
 
         adapters = [
             name
@@ -125,21 +125,21 @@ class TestRegistryBackedSerializerFields:
     the registry a project fills from ``AppConfig.ready()`` is still empty."""
 
     def test_accepts_a_registered_key(self):
-        from billing.fields import ResourceKeyField
+        from vinta_billing.fields import ResourceKeyField
 
         assert ResourceKeyField().to_internal_value("widgets") == "widgets"
 
     def test_rejects_an_unregistered_key(self):
         from rest_framework.exceptions import ValidationError
 
-        from billing.fields import ResourceKeyField
+        from vinta_billing.fields import ResourceKeyField
 
         with pytest.raises(ValidationError):
             ResourceKeyField().to_internal_value("never_registered")
 
     def test_choices_track_the_registry_rather_than_construction_time(self):
         """The whole point: the field was built before registration ran."""
-        from billing.fields import EntitlementKeyField, ResourceKeyField
+        from vinta_billing.fields import EntitlementKeyField, ResourceKeyField
 
         assert "widgets" in ResourceKeyField().choices
         assert "white_label" in EntitlementKeyField().choices
@@ -147,7 +147,7 @@ class TestRegistryBackedSerializerFields:
     def test_grouped_choices_are_flat(self):
         """DRF renders the browsable-API form from this; the registries have no
         notion of option groups."""
-        from billing.fields import ResourceKeyField
+        from vinta_billing.fields import ResourceKeyField
 
         field = ResourceKeyField()
 

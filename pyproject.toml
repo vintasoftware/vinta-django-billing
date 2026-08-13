@@ -86,17 +86,17 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "billing/__init__.py"
+path = "vinta_billing/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 # `py.typed` ships the annotations to consumers (PEP 561); without it a
 # project installing this one sees `Any` everywhere.
-packages = ["billing"]
-exclude = ["billing/tests"]
+packages = ["vinta_billing"]
+exclude = ["vinta_billing/tests"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "billing",
+    "vinta_billing",
     "CONTRIBUTING.md",
     "HISTORY.md",
     "LICENSE",
@@ -110,7 +110,7 @@ addopts = "--strict-markers"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["billing"]
+source = ["vinta_billing"]
 omit = ["*/migrations/*"]
 
 [tool.coverage.report]
@@ -153,13 +153,13 @@ ignore = [
 "tests/*" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["billing", "tests"]
+known-first-party = ["vinta_billing", "tests"]
 lines-after-imports = 2
 
 [tool.mypy]
 python_version = "3.11"
 plugins = ["mypy_django_plugin.main", "mypy_drf_plugin.main"]
-files = ["billing", "tests"]
+files = ["vinta_billing", "tests"]
 exclude = '(/migrations/)'
 check_untyped_defs = true
 warn_redundant_casts = true
@@ -187,15 +187,15 @@ ignore_missing_imports = true
 # Removing an entry here is the unit of work for paying the debt down. Do not
 # add to it: a new module belongs outside this list.
 module = [
-    "billing.billing_views",
-    "billing.services.dunning_service",
-    "billing.services.entitlement_service",
-    "billing.services.payment_provider_resolver",
-    "billing.services.payment_service",
-    "billing.services.provider_credentials",
-    "billing.services.subscription_service",
-    "billing.services.usage_warning_service",
-    "billing.jobs",
+    "vinta_billing.billing_views",
+    "vinta_billing.services.dunning_service",
+    "vinta_billing.services.entitlement_service",
+    "vinta_billing.services.payment_provider_resolver",
+    "vinta_billing.services.payment_service",
+    "vinta_billing.services.provider_credentials",
+    "vinta_billing.services.subscription_service",
+    "vinta_billing.services.usage_warning_service",
+    "vinta_billing.jobs",
 ]
 ignore_errors = true
 
@@ -215,4 +215,4 @@ commit = true
 tag = true
 
 [[tool.bumpversion.files]]
-filename = "billing/__init__.py"
+filename = "vinta_billing/__init__.py"
