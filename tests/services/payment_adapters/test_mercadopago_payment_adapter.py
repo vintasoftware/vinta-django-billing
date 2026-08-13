@@ -454,7 +454,9 @@ def test_payment_methods_mapping_usage(adapter, mock_payment):
         {"visa": "visa_card"},
     ):
         with override_settings(SITE_DOMAIN="example.com"):
-            with patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse"):
+            with patch(
+                "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse"
+            ):
                 with patch(
                     "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
                 ):
@@ -476,7 +478,9 @@ def test_document_types_mapping_usage(adapter, mock_payment):
         {"CPF": "cpf_mapped"},
     ):
         with override_settings(SITE_DOMAIN="example.com"):
-            with patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse"):
+            with patch(
+                "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse"
+            ):
                 with patch(
                     "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
                 ):

@@ -12,12 +12,12 @@ import pytest
 from django.test import override_settings
 from freezegun import freeze_time
 
+from tests.testapp.models import Widget
 from vinta_billing.constants import BillingState, LimitWarningLevel
 from vinta_billing.models import LimitWarningNotification
 from vinta_billing.services.usage_warning_service import (
     UsageWarningService,
 )
-from tests.testapp.models import Widget
 
 
 pytestmark = pytest.mark.django_db

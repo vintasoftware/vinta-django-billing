@@ -2,8 +2,8 @@
 
 import pytest
 
-from vinta_billing.counting import UsageContext, count_by_organization, merge_breakdowns
 from tests.testapp.models import Widget
+from vinta_billing.counting import UsageContext, count_by_organization, merge_breakdowns
 
 
 pytestmark = pytest.mark.django_db

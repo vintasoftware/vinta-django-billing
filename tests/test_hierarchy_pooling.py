@@ -8,8 +8,8 @@ standing in for the organization model of a project whose organizations nest.
 
 import pytest
 
-from vinta_billing.hierarchy import FlatHierarchy, ParentFieldHierarchy
 from tests.testapp.models import Company
+from vinta_billing.hierarchy import FlatHierarchy, ParentFieldHierarchy
 
 
 pytestmark = pytest.mark.django_db

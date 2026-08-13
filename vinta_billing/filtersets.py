@@ -1,7 +1,12 @@
 from django_filters import rest_framework as filters
 from rest_framework.exceptions import ValidationError
 
-from vinta_billing.models import BillingPeriodSummary, BillingPlan, MeteredOccurrence, SubscriptionAddOn
+from vinta_billing.models import (
+    BillingPeriodSummary,
+    BillingPlan,
+    MeteredOccurrence,
+    SubscriptionAddOn,
+)
 
 
 class BillingPlanFilterSet(filters.FilterSet):

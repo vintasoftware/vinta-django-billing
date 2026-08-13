@@ -13,6 +13,7 @@ import pytest
 from django.test import override_settings
 from freezegun import freeze_time
 
+from tests.testapp.models import Widget
 from vinta_billing.constants import BillingState, LimitKind
 from vinta_billing.models import BillingPlan, PlanLimit
 from vinta_billing.services.dunning_service import (
@@ -25,7 +26,6 @@ from vinta_billing.services.dunning_service import (
     retry_attempt_ordinal,
 )
 from vinta_billing.services.subscription_service import retry_payment_idempotency_key
-from tests.testapp.models import Widget
 
 
 pytestmark = pytest.mark.django_db

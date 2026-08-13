@@ -8,9 +8,9 @@ this package never sees.
 
 import pytest
 
-from vinta_billing.models import PlanLimit, SubscriptionPlanLimit
 from tests.testapp.billing_resources import EXCLUDE_INVITATION_ID
 from tests.testapp.models import Seat, SeatInvitation, Widget
+from vinta_billing.models import PlanLimit, SubscriptionPlanLimit
 
 
 pytestmark = pytest.mark.django_db

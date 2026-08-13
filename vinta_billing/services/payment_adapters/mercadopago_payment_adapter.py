@@ -11,7 +11,11 @@ from vinta_billing.constants import PaymentProviders, PaymentStatuses, RefundSta
 from vinta_billing.exceptions import ProviderWebhookEventIdMissingError
 from vinta_billing.services.dataclasses import Refund, RefundResult
 from vinta_billing.services.mercadopago_signature import verify_mercadopago_signature
-from vinta_billing.services.payment_adapters.base import BasePaymentAdapter, Payment, PaymentStatusUpdate
+from vinta_billing.services.payment_adapters.base import (
+    BasePaymentAdapter,
+    Payment,
+    PaymentStatusUpdate,
+)
 from vinta_billing.urls_helpers import namespaced
 
 

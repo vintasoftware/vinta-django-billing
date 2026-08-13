@@ -46,7 +46,9 @@ import pytest
 
 from vinta_billing.constants import PaymentProviders
 from vinta_billing.services.payment_adapters.base import BasePaymentAdapter
-from vinta_billing.services.payment_adapters.mercadopago_payment_adapter import MercadoPagoPaymentAdapter
+from vinta_billing.services.payment_adapters.mercadopago_payment_adapter import (
+    MercadoPagoPaymentAdapter,
+)
 from vinta_billing.services.payment_adapters.stripe_payment_adapter import StripePaymentAdapter
 from vinta_billing.services.subscription_adapters.base import BaseSubscriptionAdapter
 from vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter import (
