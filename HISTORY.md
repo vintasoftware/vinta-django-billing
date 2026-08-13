@@ -1,7 +1,13 @@
 # History
 
-## Unreleased
+## 0.2.0
 
+- Renamed the app package and label from `billing` to `vinta_billing` so it no
+  longer collides with a host project's own `billing` app. Update
+  `INSTALLED_APPS` (`vinta_billing.apps.BillingConfig`) and every
+  `from billing...` import to `from vinta_billing...`. The app label change moves
+  default table names from `billing_*` to `vinta_billing_*`; there is no
+  in-place data migration, so treat this as a fresh install.
 - Requires `vinta-django-orgs>=0.2.0,<0.3`, which renamed its apps: every
   `organizations.*` import, the `INSTALLED_APPS` and middleware paths, and the
   app label in the initial migration's dependency are now `vinta_orgs.*`. The
