@@ -213,6 +213,9 @@ django_settings_module = "tests.settings"
 current_version = "0.1.0"
 commit = true
 tag = true
+# The publish workflow triggers on unprefixed tags (0.2.0), so drop the default
+# `v` prefix bump-my-version would otherwise add.
+tag_name = "{new_version}"
 
 [[tool.bumpversion.files]]
 filename = "vinta_billing/__init__.py"
