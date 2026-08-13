@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.urls import include, path
 
-from billing.routing import billing_router, get_extra_patterns
+from vinta_billing.routing import billing_router, get_extra_patterns
 
 
 # Mounted under the `billing` namespace, matching the `URL_NAMESPACE` default

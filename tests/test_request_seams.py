@@ -10,15 +10,15 @@ from django.test import override_settings
 from rest_framework.test import APIRequestFactory
 from vinta_orgs.state import organization_context
 
-from billing.permissions import (
+from tests.testapp.models import Widget
+from vinta_billing.permissions import (
     IsBillingManager,
     any_member_may_manage_billing,
     may_manage_billing,
 )
-from billing.recipients import all_members, get_billing_recipients
-from billing.utils import get_request_organization
-from billing.view_mixins import TenantScopedViewMixin
-from tests.testapp.models import Widget
+from vinta_billing.recipients import all_members, get_billing_recipients
+from vinta_billing.utils import get_request_organization
+from vinta_billing.view_mixins import TenantScopedViewMixin
 
 
 pytestmark = pytest.mark.django_db

@@ -47,7 +47,7 @@ class Company(models.Model):
     """An organization-like model with a parent chain.
 
     Not an organization -- ``vinta-django-orgs``' model has no parent, which is
-    the whole reason :class:`billing.hierarchy.ParentFieldHierarchy` exists.
+    the whole reason :class:`vinta_billing.hierarchy.ParentFieldHierarchy` exists.
     This stands in for the organization model of a project that *does* nest, so
     the subtree walk is exercised against real queries rather than fakes.
     """

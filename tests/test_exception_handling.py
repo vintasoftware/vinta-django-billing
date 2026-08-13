@@ -11,14 +11,14 @@ import pytest
 from rest_framework import status
 from rest_framework.exceptions import NotFound
 
-from billing import exceptions as billing_exceptions
-from billing.exception_handling import (
+from vinta_billing import exceptions as billing_exceptions
+from vinta_billing.exception_handling import (
     BILLING_ERROR_STATUS,
     DEFAULT_BILLING_ERROR_STATUS,
     billing_error_status,
     billing_exception_handler,
 )
-from billing.exceptions import (
+from vinta_billing.exceptions import (
     AddOnNotPurchasableError,
     BillingError,
     ChargeDeclinedError,

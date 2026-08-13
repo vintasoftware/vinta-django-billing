@@ -4,8 +4,8 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
-from billing.constants import LimitKind, LimitRemedy
-from billing.registry import EntitlementRegistry, ResourceRegistry, resources
+from vinta_billing.constants import LimitKind, LimitRemedy
+from vinta_billing.registry import EntitlementRegistry, ResourceRegistry, resources
 
 
 def noop_counter(context):

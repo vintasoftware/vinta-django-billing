@@ -14,10 +14,10 @@ from dateutil.relativedelta import relativedelta
 from django.utils import timezone
 from freezegun import freeze_time
 
-from billing.constants import BillingInterval, LimitKind
-from billing.exceptions import BillingPeriodResolutionError, IncompleteBillingPlanError
-from billing.models import BillingPlan, PlanLimit
-from billing.services.subscription_service import (
+from vinta_billing.constants import BillingInterval, LimitKind
+from vinta_billing.exceptions import BillingPeriodResolutionError, IncompleteBillingPlanError
+from vinta_billing.models import BillingPlan, PlanLimit
+from vinta_billing.services.subscription_service import (
     MAX_BILLING_PERIOD_STEPS,
     assert_plan_is_complete,
     billing_interval_step,

@@ -8,8 +8,8 @@ while still supporting the reseller trees the engine was extracted from.
 import pytest
 from django.test import override_settings
 
-from billing.exceptions import BillingRootCycleError
-from billing.hierarchy import (
+from vinta_billing.exceptions import BillingRootCycleError
+from vinta_billing.hierarchy import (
     FlatHierarchy,
     ParentFieldHierarchy,
     get_hierarchy,

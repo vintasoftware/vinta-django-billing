@@ -13,10 +13,10 @@ from typing import ClassVar
 import pytest
 from django.test import override_settings
 
-from billing.constants import BillingInterval
-from billing.metering import Occurrence
-from billing.models import MeteredOccurrence
-from billing.services.container import get_metering_service
+from vinta_billing.constants import BillingInterval
+from vinta_billing.metering import Occurrence
+from vinta_billing.models import MeteredOccurrence
+from vinta_billing.services.container import get_metering_service
 
 
 pytestmark = pytest.mark.django_db

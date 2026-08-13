@@ -44,15 +44,17 @@ from typing import cast
 
 import pytest
 
-from billing.constants import PaymentProviders
-from billing.services.payment_adapters.base import BasePaymentAdapter
-from billing.services.payment_adapters.mercadopago_payment_adapter import MercadoPagoPaymentAdapter
-from billing.services.payment_adapters.stripe_payment_adapter import StripePaymentAdapter
-from billing.services.subscription_adapters.base import BaseSubscriptionAdapter
-from billing.services.subscription_adapters.mercadopago_subscription_adapter import (
+from vinta_billing.constants import PaymentProviders
+from vinta_billing.services.payment_adapters.base import BasePaymentAdapter
+from vinta_billing.services.payment_adapters.mercadopago_payment_adapter import (
+    MercadoPagoPaymentAdapter,
+)
+from vinta_billing.services.payment_adapters.stripe_payment_adapter import StripePaymentAdapter
+from vinta_billing.services.subscription_adapters.base import BaseSubscriptionAdapter
+from vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter import (
     MercadoPagoSubscriptionAdapter,
 )
-from billing.services.subscription_adapters.stripe_subscription_adapter import (
+from vinta_billing.services.subscription_adapters.stripe_subscription_adapter import (
     StripeSubscriptionAdapter,
 )
 
@@ -458,14 +460,14 @@ class TestProviderRegistries:
     """
 
     def test_payment_provider_registry_contains_both_providers(self):
-        from billing.services.payment_adapters import get_payment_provider_registry
+        from vinta_billing.services.payment_adapters import get_payment_provider_registry
 
         registry = get_payment_provider_registry()
 
         assert set(registry) == {PaymentProviders.STRIPE, PaymentProviders.MERCADOPAGO}
 
     def test_subscription_provider_registry_contains_both_providers(self):
-        from billing.services.subscription_adapters import get_subscription_provider_registry
+        from vinta_billing.services.subscription_adapters import get_subscription_provider_registry
 
         registry = get_subscription_provider_registry()
 
@@ -477,7 +479,7 @@ class TestProviderRegistries:
         This is the property the container used to provide: nothing has to be
         passed in for the ordinary case to work.
         """
-        from billing.services.payment_service import PaymentService
+        from vinta_billing.services.payment_service import PaymentService
 
         service = PaymentService()
 

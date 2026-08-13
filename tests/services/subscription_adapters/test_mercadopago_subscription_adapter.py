@@ -9,9 +9,9 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
-from billing.constants import BillingInterval, PaymentProviders, PaymentStatuses
-from billing.exceptions import CollectionNotSupportedError, ProviderWebhookEventIdMissingError
-from billing.services.dataclasses import (
+from vinta_billing.constants import BillingInterval, PaymentProviders, PaymentStatuses
+from vinta_billing.exceptions import CollectionNotSupportedError, ProviderWebhookEventIdMissingError
+from vinta_billing.services.dataclasses import (
     BillingAddress,
     BillingProfile,
     CreatedPlan,
@@ -20,7 +20,7 @@ from billing.services.dataclasses import (
     Subscription,
     SubscriptionPayment,
 )
-from billing.services.subscription_adapters.mercadopago_subscription_adapter import (
+from vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter import (
     SUBSCRIPTION_STATUS_MAPPING,
     MercadoPagoSubscriptionAdapter,
 )
@@ -129,7 +129,7 @@ def mock_subscription(mock_plan, mock_billing_profile):
 def adapter():
     """Create MercadoPagoSubscriptionAdapter instance with mocked SDK."""
     with patch(
-        "billing.services.subscription_adapters.mercadopago_subscription_adapter.mercadopago.SDK"
+        "vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter.mercadopago.SDK"
     ) as mock_sdk:
         adapter = MercadoPagoSubscriptionAdapter("test-access-token", webhook_secret=WEBHOOK_SECRET)
         adapter.sdk = mock_sdk.return_value
@@ -139,7 +139,7 @@ def adapter():
 def test_init():
     """Test adapter initialization."""
     with patch(
-        "billing.services.subscription_adapters.mercadopago_subscription_adapter.mercadopago.SDK"
+        "vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter.mercadopago.SDK"
     ) as mock_sdk:
         adapter = MercadoPagoSubscriptionAdapter("test-token")
         mock_sdk.assert_called_once_with("test-token")
@@ -212,7 +212,7 @@ def test_update_subscription_plan(adapter, mock_plan):
 
 
 @override_settings(SITE_DOMAIN="example.com")
-@patch("billing.services.subscription_adapters.mercadopago_subscription_adapter.reverse")
+@patch("vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter.reverse")
 def test_create_subscription_success(mock_reverse, adapter, mock_subscription):
     """Test successful subscription creation."""
     mock_reverse.return_value = (
@@ -236,7 +236,7 @@ def test_create_subscription_success(mock_reverse, adapter, mock_subscription):
 
 
 @override_settings(SITE_DOMAIN="example.com")
-@patch("billing.services.subscription_adapters.mercadopago_subscription_adapter.reverse")
+@patch("vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter.reverse")
 def test_create_subscription_forwards_idempotency_key_header(
     mock_reverse, adapter, mock_subscription
 ):
@@ -666,7 +666,7 @@ def test_create_status_update_from_payment_payload_maps_unknown_status(adapter):
     assert result.status == PaymentStatuses.UNKNOWN
 
 
-@patch("billing.services.subscription_adapters.mercadopago_subscription_adapter.logger")
+@patch("vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter.logger")
 def test_create_status_update_from_payment_payload_unknown_status_logs_no_pii(mock_logger, adapter):
     """Logs the id + status only — never `json.dumps(payment_payload)`, which would
     leak payer PII (email, name, document number, billing address)."""

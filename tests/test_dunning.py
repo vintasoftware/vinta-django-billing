@@ -13,9 +13,10 @@ import pytest
 from django.test import override_settings
 from freezegun import freeze_time
 
-from billing.constants import BillingState, LimitKind
-from billing.models import BillingPlan, PlanLimit
-from billing.services.dunning_service import (
+from tests.testapp.models import Widget
+from vinta_billing.constants import BillingState, LimitKind
+from vinta_billing.models import BillingPlan, PlanLimit
+from vinta_billing.services.dunning_service import (
     FINAL_WARNING_WINDOW,
     MIN_DUNNING_RETRY_INTERVAL,
     DunningService,
@@ -24,8 +25,7 @@ from billing.services.dunning_service import (
     is_downgrade_grace,
     retry_attempt_ordinal,
 )
-from billing.services.subscription_service import retry_payment_idempotency_key
-from tests.testapp.models import Widget
+from vinta_billing.services.subscription_service import retry_payment_idempotency_key
 
 
 pytestmark = pytest.mark.django_db

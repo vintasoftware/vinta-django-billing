@@ -15,16 +15,16 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from vinta_orgs.conf import get_organization_membership_model, get_organization_model
 
-from billing.constants import BillingInterval, BillingState, LimitKind
-from billing.models import BillingPlan, PlanLimit, Subscription
-from billing.services.container import reset_services
+from vinta_billing.constants import BillingInterval, BillingState, LimitKind
+from vinta_billing.models import BillingPlan, PlanLimit, Subscription
+from vinta_billing.services.container import reset_services
 
 
 @pytest.fixture(autouse=True)
 def _reset_service_cache():
     """Drop the cached service graph around every test.
 
-    The factories in ``billing.services.container`` are ``lru_cache``d, so a
+    The factories in ``vinta_billing.services.container`` are ``lru_cache``d, so a
     test that reconfigures ``VINTA_BILLING`` would otherwise get a service built
     against the previous settings.
     """
@@ -117,7 +117,7 @@ def subscription(db, organization, plan):
     Created through ``SubscriptionService`` rather than by hand where possible,
     so the per-subscription limit rows the engine actually reads exist.
     """
-    from billing.services.container import get_subscription_service
+    from vinta_billing.services.container import get_subscription_service
 
     sub = _make_subscription(organization, plan)
     get_subscription_service()._sync_limits(sub, plan)
@@ -129,7 +129,7 @@ def make_subscription(db):
     """Build a subscription for an arbitrary organization/plan pair."""
 
     def factory(organization, plan, sync_limits=True, **kwargs):
-        from billing.services.container import get_subscription_service
+        from vinta_billing.services.container import get_subscription_service
 
         sub = _make_subscription(organization, plan, **kwargs)
         if sync_limits:
@@ -141,14 +141,14 @@ def make_subscription(db):
 
 @pytest.fixture
 def entitlement_service():
-    from billing.services.container import get_entitlement_service
+    from vinta_billing.services.container import get_entitlement_service
 
     return get_entitlement_service()
 
 
 @pytest.fixture
 def billing_address(db):
-    from billing.models import BillingAddress
+    from vinta_billing.models import BillingAddress
 
     return BillingAddress.objects.create(
         street_name="Main Street",
@@ -163,8 +163,8 @@ def billing_address(db):
 @pytest.fixture
 def billing_profile(db, organization, billing_address):
     """The payer record every charge hangs off."""
-    from billing.constants import DocumentTypes
-    from billing.models import BillingProfile
+    from vinta_billing.constants import DocumentTypes
+    from vinta_billing.models import BillingProfile
 
     return BillingProfile.objects.create(
         organization=organization,

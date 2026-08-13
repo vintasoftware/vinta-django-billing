@@ -42,7 +42,7 @@ INSTALLED_APPS = [
     ...,
     "rest_framework",
     "vinta_orgs.apps.OrganizationsConfig",  # vinta-django-orgs
-    "billing.apps.BillingConfig",
+    "vinta_billing.apps.BillingConfig",
 ]
 ```
 
@@ -56,10 +56,10 @@ registry is populated and before anything serves a request.
 # myproject/billing_setup.py
 from django.utils.translation import gettext_lazy as _
 
-from billing.constants import LimitKind, LimitRemedy
-from billing.counting import count_by_organization, merge_breakdowns
-from billing.registry import entitlements, resources
-from billing.services.entitlement_service import count_metered_occurrences
+from vinta_billing.constants import LimitKind, LimitRemedy
+from vinta_billing.counting import count_by_organization, merge_breakdowns
+from vinta_billing.registry import entitlements, resources
+from vinta_billing.services.entitlement_service import count_metered_occurrences
 
 
 def count_seats(context):
@@ -89,7 +89,7 @@ resources.register(
 entitlements.register("white_label", label=_("White-label branding"))
 ```
 
-A counter takes a [`UsageContext`](billing/counting.py) and returns
+A counter takes a [`UsageContext`](vinta_billing/counting.py) and returns
 `{organization_id: count}`. Organizations at zero must be **absent** from the
 mapping rather than present with a zero — `GROUP BY` never emits a row for them,
 and `count_by_organization` preserves that.
@@ -109,7 +109,7 @@ change when the registry does.
 ## Enforce a limit
 
 ```python
-from billing.services.container import get_entitlement_service
+from vinta_billing.services.container import get_entitlement_service
 
 result = get_entitlement_service().check_limit(organization, "seats", delta=1, lock=True)
 if not result.allowed:
@@ -164,7 +164,7 @@ VINTA_BILLING = {
 ```
 
 The full list of keys, each with the default it falls back to, is in
-[`billing/conf.py`](billing/conf.py). An unknown key raises rather than being
+[`vinta_billing/conf.py`](vinta_billing/conf.py). An unknown key raises rather than being
 ignored, so a typo cannot silently leave you on a default.
 
 ### Rendering errors
@@ -174,13 +174,13 @@ the shipped handler to render them, or call it from your own:
 
 ```python
 REST_FRAMEWORK = {
-    "EXCEPTION_HANDLER": "billing.exception_handling.billing_exception_handler",
+    "EXCEPTION_HANDLER": "vinta_billing.exception_handling.billing_exception_handler",
 }
 ```
 
 Over-limit and declined-charge errors render as `402`, subscription-state
 conflicts as `409`, and a provider this deployment holds no credential for as
-`503` — see [`billing/exception_handling.py`](billing/exception_handling.py) for
+`503` — see [`vinta_billing/exception_handling.py`](vinta_billing/exception_handling.py) for
 the table.
 
 ### Organization hierarchies
@@ -191,7 +191,7 @@ so the library cannot assume a parent field exists. The default
 whose organizations nest subclasses the shipped parent-chain walk:
 
 ```python
-from billing.hierarchy import ParentFieldHierarchy
+from vinta_billing.hierarchy import ParentFieldHierarchy
 
 
 class ResellerHierarchy(ParentFieldHierarchy):
@@ -206,7 +206,7 @@ a different root depending on where the walk started.
 ### Audit
 
 Transitions are published as Django signals rather than written to an audit log
-this package would have to invent. See [`billing/signals.py`](billing/signals.py).
+this package would have to invent. See [`vinta_billing/signals.py`](vinta_billing/signals.py).
 They are sent inside the caller's transaction, so a receiver that raises rolls
 the transition back with it.
 
@@ -216,7 +216,7 @@ The shipped viewsets are offered as routes rather than a ready-made `urls.py`,
 so you mount them where you want:
 
 ```python
-from billing.routing import billing_router, get_extra_patterns
+from vinta_billing.routing import billing_router, get_extra_patterns
 
 urlpatterns = [
     path("api/", include(billing_router().urls)),

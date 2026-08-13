@@ -6,9 +6,9 @@ import pytest
 from django.core.management import call_command
 from django.db import models
 
-from billing.constants import LimitKind
-from billing.models import PlanLimit
-from billing.registry import ResourceRegistry, resource_choices, resources
+from vinta_billing.constants import LimitKind
+from vinta_billing.models import PlanLimit
+from vinta_billing.registry import ResourceRegistry, resource_choices, resources
 
 
 @pytest.mark.django_db
@@ -65,7 +65,7 @@ def test_the_organization_column_points_at_the_swappable_model():
     """
     from vinta_orgs.conf import get_organization_model
 
-    from billing.models import BillingProfile
+    from vinta_billing.models import BillingProfile
 
     field = BillingProfile._meta.get_field("organization")
 

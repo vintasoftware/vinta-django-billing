@@ -10,13 +10,13 @@ import pkgutil
 
 import pytest
 
-import billing
+import vinta_billing
 
 
 def _module_names():
     return sorted(
         module.name
-        for module in pkgutil.walk_packages(billing.__path__, "billing.")
+        for module in pkgutil.walk_packages(vinta_billing.__path__, "vinta_billing.")
         if ".migrations" not in module.name
     )
 
@@ -44,7 +44,7 @@ def test_the_package_leaks_no_host_application_imports():
         "from common",
     )
     offenders = []
-    for path in pathlib.Path(billing.__path__[0]).rglob("*.py"):
+    for path in pathlib.Path(vinta_billing.__path__[0]).rglob("*.py"):
         for number, line in enumerate(path.read_text().splitlines(), start=1):
             stripped = line.strip()
             if not stripped.startswith(("import ", "from ")):

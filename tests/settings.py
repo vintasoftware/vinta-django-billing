@@ -29,7 +29,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "rest_framework",
     "vinta_orgs.apps.OrganizationsConfig",
-    "billing.apps.BillingConfig",
+    "vinta_billing.apps.BillingConfig",
     # Registers the resources and entitlements the suite bills for, standing in
     # for a host application. Nothing in `billing` knows these exist.
     "tests.testapp.apps.TestAppConfig",
