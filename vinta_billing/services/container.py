@@ -18,65 +18,48 @@ and saves rebuilding the object graph on every limit check.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING
 
-
-if TYPE_CHECKING:
-    from vinta_billing.services.cycle_close_service import CycleCloseService
-    from vinta_billing.services.dunning_service import DunningService
-    from vinta_billing.services.entitlement_service import EntitlementService
-    from vinta_billing.services.metering_service import MeteringService
-    from vinta_billing.services.payment_service import PaymentService
-    from vinta_billing.services.subscription_service import SubscriptionService
-    from vinta_billing.services.usage_warning_service import UsageWarningService
+from vinta_billing.services.cycle_close_service import CycleCloseService
+from vinta_billing.services.dunning_service import DunningService
+from vinta_billing.services.entitlement_service import EntitlementService
+from vinta_billing.services.metering_service import MeteringService
+from vinta_billing.services.payment_service import PaymentService
+from vinta_billing.services.subscription_service import SubscriptionService
+from vinta_billing.services.usage_warning_service import UsageWarningService
 
 
 @lru_cache(maxsize=1)
 def get_entitlement_service() -> EntitlementService:
-    from vinta_billing.services.entitlement_service import EntitlementService
-
     return EntitlementService()
 
 
 @lru_cache(maxsize=1)
 def get_payment_service() -> PaymentService:
-    from vinta_billing.services.payment_service import PaymentService
-
     return PaymentService()
 
 
 @lru_cache(maxsize=1)
 def get_subscription_service() -> SubscriptionService:
-    from vinta_billing.services.subscription_service import SubscriptionService
-
     return SubscriptionService()
 
 
 @lru_cache(maxsize=1)
 def get_metering_service() -> MeteringService:
-    from vinta_billing.services.metering_service import MeteringService
-
     return MeteringService()
 
 
 @lru_cache(maxsize=1)
 def get_dunning_service() -> DunningService:
-    from vinta_billing.services.dunning_service import DunningService
-
     return DunningService()
 
 
 @lru_cache(maxsize=1)
 def get_usage_warning_service() -> UsageWarningService:
-    from vinta_billing.services.usage_warning_service import UsageWarningService
-
     return UsageWarningService()
 
 
 @lru_cache(maxsize=1)
 def get_cycle_close_service() -> CycleCloseService:
-    from vinta_billing.services.cycle_close_service import CycleCloseService
-
     return CycleCloseService()
 
 

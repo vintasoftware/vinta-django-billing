@@ -11,6 +11,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.utils.module_loading import import_string
+
+from vinta_billing.conf import get_provider_config
 from vinta_billing.provider_slugs import MERCADOPAGO, STRIPE
 
 
@@ -41,8 +44,6 @@ def get_subscription_adapter_classes() -> dict[str, type[Any]]:
     See :func:`vinta_billing.services.payment_adapters.get_payment_adapter_classes`
     for why this is separate from the built registry.
     """
-    from django.utils.module_loading import import_string
-
     classes: dict[str, type[Any]] = {}
     for slug, (module, name) in _BUILTIN.items():
         try:
@@ -58,8 +59,6 @@ def get_subscription_provider_registry() -> dict[str, Any]:
 
     See :func:`vinta_billing.services.payment_adapters.get_payment_provider_registry`.
     """
-    from vinta_billing.conf import get_provider_config
-
     return {
         slug: adapter_class.from_config(get_provider_config(slug))
         for slug, adapter_class in get_subscription_adapter_classes().items()

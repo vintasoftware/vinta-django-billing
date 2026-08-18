@@ -23,6 +23,7 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Sum
 from vinta_orgs.models import AbstractOrganization
 
@@ -52,8 +53,6 @@ def metered_resource_key() -> str:
     metering path, and a metering path reached with nothing postpaid registered
     is a misconfiguration, not an empty result.
     """
-    from django.core.exceptions import ImproperlyConfigured
-
     key = resources.metered_key()
     if key is None:
         raise ImproperlyConfigured(

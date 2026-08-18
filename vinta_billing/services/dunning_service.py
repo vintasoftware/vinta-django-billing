@@ -37,7 +37,7 @@ from django.utils import timezone
 from vinta_billing.conf import get_setting
 from vinta_billing.constants import BillingState, PaymentStatuses
 from vinta_billing.models import BillingPlan, Subscription
-from vinta_billing.notifications import NotificationTypes, Notifier
+from vinta_billing.notifications import NotificationTypes, Notifier, get_notifier
 from vinta_billing.recipients import get_billing_recipients
 from vinta_billing.services.billing_state_machine import transition_billing_state
 from vinta_billing.signals import billing_restriction_lifted
@@ -215,7 +215,11 @@ class DunningService:
         entitlement_service: "EntitlementService | None" = None,
         notification_service: "Notifier | None" = None,
     ) -> None:
-        from vinta_billing.notifications import get_notifier
+        # Late by necessity, not by style: ``container`` imports every service
+        # at module scope (it is the composition root), so a module-scope import
+        # back into it here closes a cycle and fails at import time with a
+        # partially initialized module. Deferring to first construction is what
+        # keeps the default wiring available without that cycle.
         from vinta_billing.services import container
 
         self.subscription_service = subscription_service or container.get_subscription_service()

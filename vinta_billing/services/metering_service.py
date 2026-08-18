@@ -98,6 +98,11 @@ class MeteringService:
     """Writes and audits ``MeteredOccurrence`` rows. Stateless; injected via DI."""
 
     def __init__(self, entitlement_service: EntitlementService | None = None) -> None:
+        # Late by necessity, not by style: ``container`` imports every service
+        # at module scope (it is the composition root), so a module-scope import
+        # back into it here closes a cycle and fails at import time with a
+        # partially initialized module. Deferring to first construction is what
+        # keeps the default wiring available without that cycle.
         from vinta_billing.services.container import get_entitlement_service
 
         self._entitlement_service = entitlement_service or get_entitlement_service()

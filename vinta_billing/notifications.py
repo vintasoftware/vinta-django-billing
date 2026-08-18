@@ -33,6 +33,8 @@ import logging
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
+from vinta_billing.conf import get_object_from_setting
+
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +112,6 @@ def get_notifier() -> Notifier:
     Not cached: a notifier can hold a transport connection, and the services
     already keep the instance they were handed for the length of a call.
     """
-    from vinta_billing.conf import get_object_from_setting
-
     notifier = get_object_from_setting("NOTIFIER")
     if isinstance(notifier, type):
         return notifier()  # type: ignore[no-any-return]

@@ -6,6 +6,8 @@ from typing import Any
 
 from django.db.models import Model
 from django.http import HttpRequest
+from vinta_orgs.middleware import get_organization
+from vinta_orgs.state import OrganizationState
 
 
 def get_organization_state() -> Any:
@@ -22,8 +24,6 @@ def get_organization_state() -> Any:
     declare -- it would have to name the project's concrete organization class
     -- and the base class already resolves the configured model at runtime.
     """
-    from vinta_orgs.state import OrganizationState
-
     return OrganizationState()
 
 
@@ -39,8 +39,6 @@ def get_request_organization(request: HttpRequest | Any) -> Model | None:
     organization = getattr(request, "organization", None)
     if organization is not None:
         return organization  # type: ignore[no-any-return]
-
-    from vinta_orgs.middleware import get_organization
 
     if isinstance(request, HttpRequest):
         organization = get_organization(request)

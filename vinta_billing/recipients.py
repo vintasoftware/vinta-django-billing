@@ -21,8 +21,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from vinta_orgs.conf import get_organization_membership_model
 from vinta_orgs.models import AbstractOrganization
 
+from vinta_billing.conf import get_object_from_setting
 from vinta_billing.permissions import MANAGE_BILLING_PERMISSION
 
 
@@ -33,8 +35,6 @@ def all_members(organization: AbstractOrganization) -> Sequence[Any]:
     message that reaches nobody ends in an unexplained suspension, which is a
     worse failure than one extra email.
     """
-    from vinta_orgs.conf import get_organization_membership_model
-
     return list(
         get_organization_membership_model()
         .objects.filter(organization_id=organization.pk)
@@ -64,8 +64,6 @@ def members_holding_manage_billing(organization: AbstractOrganization) -> Sequen
     Inactive memberships are excluded: a deactivated member is not somebody to
     tell, and ``holding_permission`` alone does not exclude them.
     """
-    from vinta_orgs.conf import get_organization_membership_model
-
     return list(
         get_organization_membership_model()
         .objects.filter(organization_id=organization.pk)
@@ -78,6 +76,4 @@ def members_holding_manage_billing(organization: AbstractOrganization) -> Sequen
 
 def get_billing_recipients(organization: AbstractOrganization) -> Sequence[Any]:
     """Run the configured resolver."""
-    from vinta_billing.conf import get_object_from_setting
-
     return get_object_from_setting("BILLING_RECIPIENTS")(organization)

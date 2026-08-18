@@ -40,13 +40,13 @@ from vinta_billing.models import (
 from vinta_billing.services.billing_state_machine import transition_billing_state
 from vinta_billing.services.dataclasses import CreatedPlan, Plan
 from vinta_billing.services.dunning_service import is_downgrade_grace
+from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 from vinta_billing.signals import payment_provider_repointed
 
 
 if TYPE_CHECKING:
     from django.contrib.auth.models import AbstractBaseUser
 
-    from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
     from vinta_billing.services.payment_service import PaymentService
 
 
@@ -302,13 +302,12 @@ class SubscriptionService:
         every later provider resolution for the subscription -- so hardcoding it
         here would make the organization's own pin inert.
 
-        Both default to the ones this package ships, resolved lazily so a bare
-        ``SubscriptionService()`` works. Passing either still wins, which is what
-        a project running its own container, and every test with a double, relies
-        on.
+        Both default to the ones this package ships -- the resolver here, the
+        payment service on first use (see ``_require_payment_service``) -- so a
+        bare ``SubscriptionService()`` works. Passing either still wins, which is
+        what a project running its own container, and every test with a double,
+        relies on.
         """
-        from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
-
         self.payment_service = payment_service
         self.payment_provider_resolver = payment_provider_resolver or PaymentProviderResolver()
 
@@ -321,6 +320,11 @@ class SubscriptionService:
         bookkeeping) never touches a provider at all.
         """
         if self.payment_service is None:
+            # Late by necessity, not by style: ``container`` imports every service
+            # at module scope (it is the composition root), so a module-scope import
+            # back into it here closes a cycle and fails at import time with a
+            # partially initialized module. Deferring to first use is what keeps
+            # the default wiring available without that cycle.
             from vinta_billing.services.container import get_payment_service
 
             self.payment_service = get_payment_service()

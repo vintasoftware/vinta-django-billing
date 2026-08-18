@@ -22,9 +22,12 @@ from typing import Any, cast
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
 from rest_framework.views import APIView
+from vinta_orgs.authorization import has_organization_permission
+from vinta_orgs.conf import get_organization_membership_model
 from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.conf import get_object_from_setting
+from vinta_billing.utils import get_request_organization
 
 
 def any_member_may_manage_billing(user: Any, organization: AbstractOrganization | None) -> bool:
@@ -42,8 +45,6 @@ def any_member_may_manage_billing(user: Any, organization: AbstractOrganization 
     """
     if organization is None or user is None or not user.is_authenticated:
         return False
-
-    from vinta_orgs.conf import get_organization_membership_model
 
     membership_model = get_organization_membership_model()
     return membership_model.objects.filter(user=user, organization_id=organization.pk).exists()
@@ -75,8 +76,6 @@ def member_holding_manage_billing(user: Any, organization: AbstractOrganization 
     ancestor of the bound organization, so all three would answer a question
     nobody asked.
     """
-    from vinta_orgs.authorization import has_organization_permission
-
     if organization is None:
         return False
     return has_organization_permission(user, MANAGE_BILLING_PERMISSION, organization)
@@ -98,8 +97,6 @@ class IsBillingManager(BasePermission):
     message = "You do not have permission to manage this organization's billing."
 
     def has_permission(self, request: Request, view: APIView) -> bool:
-        from vinta_billing.utils import get_request_organization
-
         # `get_request_organization` is typed against the base `Model` because
         # it also reads the context variable, which is not narrowed there.
         organization = cast("AbstractOrganization | None", get_request_organization(request))

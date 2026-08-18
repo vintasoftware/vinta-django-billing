@@ -137,6 +137,11 @@ class CycleCloseService:
         payment_service: PaymentService | None = None,
         entitlement_service: EntitlementService | None = None,
     ) -> None:
+        # Late by necessity, not by style: ``container`` imports every service
+        # at module scope (it is the composition root), so a module-scope import
+        # back into it here closes a cycle and fails at import time with a
+        # partially initialized module. Deferring to first construction is what
+        # keeps the default wiring available without that cycle.
         from vinta_billing.services import container
 
         metering_service = metering_service or container.get_metering_service()

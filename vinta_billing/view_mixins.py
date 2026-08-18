@@ -19,6 +19,8 @@ from typing import Any
 from django.db.models import Model
 from rest_framework.request import Request
 
+from vinta_billing.utils import get_request_organization
+
 
 class TenantScopedViewMixin:
     """Puts ``request.organization`` on every request the viewset serves.
@@ -38,8 +40,6 @@ class TenantScopedViewMixin:
         request.organization = self.resolve_organization(request)  # type: ignore[attr-defined]
 
     def resolve_organization(self, request: Request) -> Model | None:
-        from vinta_billing.utils import get_request_organization
-
         return get_request_organization(request)
 
     def get_organization(self) -> Model | None:

@@ -51,6 +51,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from django.dispatch import receiver
 
+from vinta_billing.conf import get_setting
+from vinta_billing.constants import LimitKind, LimitRemedy
+
 
 if TYPE_CHECKING:
     from vinta_billing.counting import UsageContext
@@ -174,8 +177,6 @@ class ResourceRegistry(Registry[ResourceDefinition]):
         is the :class:`vinta_billing.constants.LimitRemedy` the over-limit error tells
         the client about, so it can route the user to the right screen.
         """
-        from vinta_billing.constants import LimitKind, LimitRemedy
-
         if kind not in LimitKind.values:
             raise ImproperlyConfigured(
                 "Resource %r has kind %r; expected one of %s."
@@ -214,11 +215,6 @@ class ResourceRegistry(Registry[ResourceDefinition]):
         ``None`` when nothing postpaid is registered, which is the ordinary
         state of a project that only caps prepaid resources.
         """
-        from django.core.exceptions import ImproperlyConfigured
-
-        from vinta_billing.conf import get_setting
-        from vinta_billing.constants import LimitKind
-
         configured = get_setting("METERED_RESOURCE_KEY")
         if configured is not None:
             definition = self.get(configured)
