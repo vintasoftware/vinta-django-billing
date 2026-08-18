@@ -469,7 +469,13 @@ class MeteringService:
                 # Through a subquery on Organization rather than a `organization__`
                 # -prefixed copy of the predicate, so `billing_root_filter` stays the
                 # single definition of "is a billing root" (see `is_billing_root`).
-                organization__in=get_organization_model().objects.filter(billing_root_filter())
+                # ``_default_manager`` rather than ``objects``: the configured model
+                # is only known to be an ``AbstractOrganization``, which declares no
+                # manager of its own -- the same access ``vinta-django-orgs`` uses
+                # internally for the same reason.
+                organization__in=get_organization_model()._default_manager.filter(
+                    billing_root_filter()
+                )
             ).values_list("pk", flat=True)
         )
         excluded = all_ids - root_ids

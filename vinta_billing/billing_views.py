@@ -30,7 +30,7 @@ from rest_framework.serializers import BaseSerializer
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.viewsets import GenericViewSet, ViewSet
 from vinta_orgs.conf import get_organization_model
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import BillingState
 from vinta_billing.filtersets import (
@@ -92,7 +92,7 @@ BILLING_ERROR_BODY_SERIALIZER = inline_serializer(
 )
 
 
-def _require_organization(request) -> Organization:
+def _require_organization(request) -> AbstractOrganization:
     """``request.organization``, or ``PermissionDenied`` -- every action in this
     module needs an active organization to resolve a billing root against."""
     organization = getattr(request, "organization", None)
@@ -315,9 +315,9 @@ class BillingPeriodViewSet(
     """``GET /billing/usage/periods/`` and ``GET /billing/usage/periods/{id}/``
     -- the durable statements ``CycleCloseService`` writes at cycle close (see
     ``BillingPeriodSummary``'s docstring). List and detail are bundled
-    deliberately: they share a queryset, a permission, and a serializer tree
-    (see the plan's "Bundled phase granularity" decision) rather than shipping
-    as two PRs whose second one is fifty lines.
+    deliberately: they share a queryset, a permission, and a serializer tree,
+    so shipping them together avoided a second PR that would only add fifty
+    lines.
 
     Scoped to the caller's resolved pool exactly like ``BillingUsageViewSet``:
     ``resolve_billing_root`` then ``get_pooled_organization_ids``, both
@@ -331,7 +331,7 @@ class BillingPeriodViewSet(
     organization needs in order to resolve billing, including while
     ``RESTRICTED``.
 
-    History is forward-only (see the plan's Non-goals / Risk & Rollout Notes):
+    History is forward-only:
     an organization with no closed periods yet gets ``200`` with an empty list,
     never a ``404`` -- there is nothing wrong with that organization, cycle
     close simply has not run for it yet. A caller with **no active
@@ -419,7 +419,7 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
     ``IsBillingManager``. A ledger row carries an ``event_id`` and an exact
     ``occurrence_start`` -- that is calendar content, and it spans every
     calendar in the caller's pooled subtree, including ones the caller has no
-    membership scope on. A count is not. See the plan's Guiding Decisions.
+    membership scope on. A count is not.
 
     ``check_object_permissions`` is called explicitly in ``list()`` against the
     resolved billing root -- the same two-step dance
@@ -792,7 +792,7 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
             return queryset.none()
         return queryset.filter(subscription__organization=resolve_billing_root(organization))
 
-    def _get_subscription(self, organization: Organization) -> Subscription:
+    def _get_subscription(self, organization: AbstractOrganization) -> Subscription:
         subscription = Subscription.objects.filter(
             organization=resolve_billing_root(organization)
         ).first()

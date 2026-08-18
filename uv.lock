@@ -1779,7 +1779,7 @@ requires-dist = [
     { name = "mercadopago", marker = "extra == 'mercadopago'", specifier = ">=3.2,<4" },
     { name = "python-dateutil", specifier = ">=2.9" },
     { name = "stripe", marker = "extra == 'stripe'", specifier = ">=11.0" },
-    { name = "vinta-django-orgs", specifier = ">=0.2.0,<0.3" },
+    { name = "vinta-django-orgs", specifier = ">=0.5,<0.6" },
 ]
 provides-extras = ["mercadopago", "openapi", "stripe"]
 
@@ -1814,7 +1814,7 @@ test = [
 
 [[package]]
 name = "vinta-django-orgs"
-version = "0.2.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "django", version = "5.2.17", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -1822,9 +1822,9 @@ dependencies = [
     { name = "django-model-utils" },
     { name = "djangorestframework" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e8/da/81325f3b5f76202b6980ea14afb801b7a01219825b123328c7ae134d84e5/vinta_django_orgs-0.2.0.tar.gz", hash = "sha256:b0cc99d104f4110541f031fe3b8cd5a84558d1cb43647157edfeea92fe0d95a5", size = 79296, upload-time = "2026-08-12T14:09:18.961Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/7a/7c03866d4f79334232e077f04b1c6fa16953ae2e0cd159e0f29040a59c79/vinta_django_orgs-0.5.0.tar.gz", hash = "sha256:791f024ab8ef8b2cbbe4f98353113d0ac6db557bc03937c1dc73ceb7554585af", size = 125087, upload-time = "2026-08-17T01:55:00.027Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/45/61/de3133b622149eb4de0601a1d323f6b3623b80dd411a2b2502eac808fe00/vinta_django_orgs-0.2.0-py3-none-any.whl", hash = "sha256:5d4e8f7e6f729a5d9c2418468bbad486f14e33393dd9c7f0610b0e7239554d54", size = 74112, upload-time = "2026-08-12T14:09:17.75Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/46/0b4aa940f80910fb26d64cbc6164371ef417f0922ee799f71e6886847694/vinta_django_orgs-0.5.0-py3-none-any.whl", hash = "sha256:ec7ed4048c413a93b3dd84d77427b70440aa9f73545b71b452d948eb30f52e4b", size = 104221, upload-time = "2026-08-17T01:54:58.792Z" },
 ]
 
 [[package]]

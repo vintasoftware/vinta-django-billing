@@ -41,10 +41,12 @@ dependencies = [
     # the scoping mixin and the retriever -- never a project-specific field.
     #
     # Upper-bounded because it is pre-1.0 and moving: 0.2.0 renamed both apps,
-    # which changes every import path and app label here. An uncapped floor let
-    # that release reach CI unannounced and break `main`. Raise the cap
-    # deliberately, with the migration in the same change.
-    "vinta-django-orgs>=0.2.0,<0.3",
+    # 0.3.0 defaulted `STRICT_ORGANIZATION_FILTER` to `True`, and 0.4.0 deleted
+    # the module-level organization-context API -- three consecutive minors, each
+    # breaking. An uncapped floor let the first of them reach CI unannounced and
+    # break `main`. Raise the cap deliberately, with the migration in the same
+    # change.
+    "vinta-django-orgs>=0.5,<0.6",
 ]
 
 [project.optional-dependencies]

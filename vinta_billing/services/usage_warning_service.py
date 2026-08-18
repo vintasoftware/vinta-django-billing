@@ -18,7 +18,7 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import BillingState, LimitWarningLevel
 from vinta_billing.models import LimitWarningNotification, Subscription
@@ -108,7 +108,7 @@ class UsageWarningService:
     def _check_resource(
         self,
         subscription: Subscription,
-        organization: Organization,
+        organization: AbstractOrganization,
         resource_key: str,
         billing_period_start: datetime.datetime,
     ) -> None:

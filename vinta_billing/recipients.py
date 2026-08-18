@@ -21,10 +21,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
+
+from vinta_billing.permissions import MANAGE_BILLING_PERMISSION
 
 
-def all_members(organization: Organization) -> Sequence[Any]:
+def all_members(organization: AbstractOrganization) -> Sequence[Any]:
     """The default: every member of the organization.
 
     Errs towards telling too many people rather than too few -- a dunning
@@ -35,13 +37,46 @@ def all_members(organization: Organization) -> Sequence[Any]:
 
     return list(
         get_organization_membership_model()
-        .objects.filter(organization=organization)
+        .objects.filter(organization_id=organization.pk)
         .values_list("user_id", flat=True)
         .distinct()
     )
 
 
-def get_billing_recipients(organization: Organization) -> Sequence[Any]:
+def members_holding_manage_billing(organization: AbstractOrganization) -> Sequence[Any]:
+    """The members who hold ``vinta_billing.manage_billing`` in the organization.
+
+    The counterpart to
+    :func:`vinta_billing.permissions.member_holding_manage_billing`, so that "who
+    may change billing" and "who is told when it goes wrong" come from one grant
+    rather than drifting apart. Offered rather than defaulted to, and for a
+    sharper reason than the predicate: nothing here grants the permission, and a
+    dunning ladder whose messages reach **nobody** ends in a suspension the payer
+    was never warned about. Point ``BILLING_RECIPIENTS`` at it only once the
+    grant exists::
+
+        VINTA_BILLING = {
+            "BILLING_RECIPIENTS": (
+                "vinta_billing.recipients.members_holding_manage_billing"
+            ),
+        }
+
+    Inactive memberships are excluded: a deactivated member is not somebody to
+    tell, and ``holding_permission`` alone does not exclude them.
+    """
+    from vinta_orgs.conf import get_organization_membership_model
+
+    return list(
+        get_organization_membership_model()
+        .objects.filter(organization_id=organization.pk)
+        .active()
+        .holding_permission(MANAGE_BILLING_PERMISSION)
+        .values_list("user_id", flat=True)
+        .distinct()
+    )
+
+
+def get_billing_recipients(organization: AbstractOrganization) -> Sequence[Any]:
     """Run the configured resolver."""
     from vinta_billing.conf import get_object_from_setting
 

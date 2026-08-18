@@ -22,12 +22,12 @@ from typing import Any, cast
 from rest_framework.permissions import BasePermission
 from rest_framework.request import Request
 from rest_framework.views import APIView
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.conf import get_object_from_setting
 
 
-def any_member_may_manage_billing(user: Any, organization: Organization | None) -> bool:
+def any_member_may_manage_billing(user: Any, organization: AbstractOrganization | None) -> bool:
     """The default predicate: any member of the organization may manage billing.
 
     The most permissive answer that is still tenant-safe -- it never lets one
@@ -46,10 +46,43 @@ def any_member_may_manage_billing(user: Any, organization: Organization | None) 
     from vinta_orgs.conf import get_organization_membership_model
 
     membership_model = get_organization_membership_model()
-    return membership_model.objects.filter(user=user, organization=organization).exists()
+    return membership_model.objects.filter(user=user, organization_id=organization.pk).exists()
 
 
-def may_manage_billing(user: Any, organization: Organization | None) -> bool:
+MANAGE_BILLING_PERMISSION = "vinta_billing.manage_billing"
+
+
+def member_holding_manage_billing(user: Any, organization: AbstractOrganization | None) -> bool:
+    """A stricter predicate: the member must hold ``vinta_billing.manage_billing``.
+
+    Offered rather than defaulted to. The permission is declared on
+    ``Subscription`` but granted by nobody here, so making this the default would
+    403 every billing endpoint in a project that has not seeded a group carrying
+    it -- including every project upgrading from a version where any member
+    could manage billing. Point ``BILLING_MANAGER_PREDICATE`` at it once the
+    grant exists::
+
+        VINTA_BILLING = {
+            "BILLING_MANAGER_PREDICATE": (
+                "vinta_billing.permissions.member_holding_manage_billing"
+            ),
+        }
+
+    Asks ``vinta-django-orgs``' organization-scoped question, not
+    ``user.has_perm``: the latter answers for whichever organization is *bound*,
+    unions in the user's global permissions and groups, and says yes to every
+    superuser. Billing is routinely read against a reseller **root** that is an
+    ancestor of the bound organization, so all three would answer a question
+    nobody asked.
+    """
+    from vinta_orgs.authorization import has_organization_permission
+
+    if organization is None:
+        return False
+    return has_organization_permission(user, MANAGE_BILLING_PERMISSION, organization)
+
+
+def may_manage_billing(user: Any, organization: AbstractOrganization | None) -> bool:
     """Run the configured predicate."""
     predicate = get_object_from_setting("BILLING_MANAGER_PREDICATE")
     return bool(predicate(user, organization))
@@ -69,7 +102,7 @@ class IsBillingManager(BasePermission):
 
         # `get_request_organization` is typed against the base `Model` because
         # it also reads the context variable, which is not narrowed there.
-        organization = cast("Organization | None", get_request_organization(request))
+        organization = cast("AbstractOrganization | None", get_request_organization(request))
         return may_manage_billing(request.user, organization)
 
     def has_object_permission(self, request: Request, view: APIView, obj: Any) -> bool:

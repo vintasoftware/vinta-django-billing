@@ -278,10 +278,9 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
         run an equivalent probe (real sandbox account + a genuine renewal
         failure via a declined test card + inspecting whether the reauthorized
         preapproval's next charge actually recovers the missed amount or only
-        the next period's). No organization is routed to MercadoPago today
-        (see the payment-provider-selection plan), so shipping a second,
-        unverified "looks like it works" no-op on a money path is strictly
-        worse than refusing loudly here until someone can actually check.
+        the next period's). Shipping a second, unverified "looks like it
+        works" no-op on a money path is strictly worse than refusing loudly here
+        until someone can actually check.
 
         **Probe recipe for whoever enables MercadoPago and needs to verify
         this before removing the refusal:**

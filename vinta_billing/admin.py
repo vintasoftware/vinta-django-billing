@@ -418,7 +418,7 @@ class BillingPeriodSummaryAdmin(admin.ModelAdmin):
 
     This is where reconciliation drift (`reconciliation_unmetered` /
     `reconciliation_orphaned`) is surfaced — deliberately not in any API
-    response, per the plan's non-goal on exposing drift to customers. The
+    response, since customers must not be shown internal drift figures. The
     `payment` link is the statement's tie to the charge that settled it, not a
     rendered invoice (`BillingPeriodSummary` is a statement, not an invoice).
     """
