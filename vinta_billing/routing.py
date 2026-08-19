@@ -107,9 +107,11 @@ def get_extra_patterns(trailing_slash: bool = True) -> list[URLPattern]:
     receive a payment webhook. Binding them here with ``re_path`` takes them out
     of the router's hands: this is an ordinary URL pattern, and Django mixes
     ``path()`` and ``re_path()`` in one urlconf without caring which the
-    neighbouring routes used. The regex is character for character what the regex
-    router produced, and the reversible names are unchanged, so a project already
-    mounting these keeps the URLs it published to its providers.
+    neighbouring routes used. Both paths now live under ``billing/``, matching
+    every other route this package serves instead of sitting apart at
+    ``payments/``; the reversible names are unchanged, so a caller reversing
+    them by name -- which is how both shipped MercadoPago adapters build their
+    ``notification_url`` -- needs no change.
 
     :param trailing_slash: Whether these paths end in ``/``. Match whatever the
         router they are mounted alongside was built with: the webhook patterns
@@ -118,12 +120,12 @@ def get_extra_patterns(trailing_slash: bool = True) -> list[URLPattern]:
     slash = "/" if trailing_slash else ""
     return [
         re_path(
-            r"^payments/(?P<pk>[^/.]+)/payment-update/(?P<provider>[^/.]+)" + slash + "$",
+            r"^billing/payments/(?P<pk>[^/.]+)/payment-update/(?P<provider>[^/.]+)" + slash + "$",
             PaymentsViewSet.as_view({"post": "payment_update"}, detail=True, basename="Payments"),
             name="Payments-payment-update",
         ),
         re_path(
-            r"^payments/(?P<pk>[^/.]+)/subscription-payment-update/(?P<provider>[^/.]+)"
+            r"^billing/payments/(?P<pk>[^/.]+)/subscription-payment-update/(?P<provider>[^/.]+)"
             + slash
             + "$",
             PaymentsViewSet.as_view(

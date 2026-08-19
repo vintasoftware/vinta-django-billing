@@ -30,9 +30,20 @@ whole release unnoticed.
   their own URLs, made for them by a billing dependency. So the two webhooks are
   bound by `get_extra_patterns()` now, with `re_path`, which no router is
   involved in and which Django mixes with `path()` in one urlconf without
-  complaint. The URLs and the reversible names are unchanged, character for
-  character, so the callback URLs already published to Stripe and MercadoPago
-  keep working. What did change is that `get_routes()` no longer lists
+  complaint. The reversible names are unchanged, character for character, but
+  the paths move from `payments/...` to `billing/payments/...`, bringing them
+  in line with every other route this package serves -- `get_extra_patterns()`
+  already hardcoded its other two endpoints under `billing/payment-provider`,
+  so `payments/` sitting apart from that prefix was this module's own
+  inconsistency, not a project's choice to preserve. Moving it is safe because
+  there is nothing running on the old path to move away from: 0.3.0's
+  `PaymentsViewSet.__init__` required `payment_service`, `subscription_service`,
+  and `dunning_service` as keyword-only arguments with no default -- the same
+  defect fixed above -- so any request that ever reached `payments/...` raised
+  `TypeError` before a provider's notification could be processed. No
+  deployment has a webhook that ever worked at that path, so no callback URL
+  already published to a provider is broken by the move. What did change is
+  that `get_routes()` no longer lists
   `PaymentsViewSet`: **a project mounting `get_routes()` without also mounting
   `get_extra_patterns()` will lose its webhooks.** Mount both -- the README
   always showed both. `get_extra_patterns()` gained a `trailing_slash` argument

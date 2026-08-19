@@ -216,7 +216,7 @@ def test_update_subscription_plan(adapter, mock_plan):
 def test_create_subscription_success(mock_reverse, adapter, mock_subscription):
     """Test successful subscription creation."""
     mock_reverse.return_value = (
-        "/api/payments/subscription-payment-update/mercadopago/subscription-123/"
+        "/api/billing/payments/subscription-payment-update/mercadopago/subscription-123/"
     )
     adapter.sdk.preapproval().create.return_value = {"response": {"id": "mp-subscription-456"}}
 
@@ -230,7 +230,7 @@ def test_create_subscription_success(mock_reverse, adapter, mock_subscription):
         "external_reference": "subscription-123",
         "card_token_id": "test-token",
         "status": "authorized",
-        "notification_url": "https://example.com/api/payments/subscription-payment-update/mercadopago/subscription-123/",
+        "notification_url": "https://example.com/api/billing/payments/subscription-payment-update/mercadopago/subscription-123/",
     }
     adapter.sdk.preapproval().create.assert_called_once_with(expected_subscription_data)
 
@@ -243,7 +243,7 @@ def test_create_subscription_forwards_idempotency_key_header(
     """A stable key is threaded to MercadoPago as `x-idempotency-key` so a retried
     first-upgrade resolves to the same preapproval instead of a second one."""
     mock_reverse.return_value = (
-        "/api/payments/subscription-payment-update/mercadopago/subscription-123/"
+        "/api/billing/payments/subscription-payment-update/mercadopago/subscription-123/"
     )
     adapter.sdk.preapproval().create.return_value = {"response": {"id": "mp-subscription-456"}}
 

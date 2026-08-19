@@ -95,19 +95,21 @@ class TestTheDocumentedMounting:
 
         assert response.status_code != 500
 
-    def test_the_webhook_urls_the_providers_were_given_have_not_moved(self):
-        """These are baked into every ``notification_url`` sent so far -- moving
-        one silently stops a provider's callbacks from arriving."""
+    def test_the_webhooks_resolve_under_billing_and_keep_their_reverse_names(self):
+        """Both webhooks live under ``billing/`` now, alongside every other route
+        this package serves, rather than at a bare ``payments/`` prefix. The
+        reverse names are what a caller -- including both shipped MercadoPago
+        adapters -- actually depends on, and those are pinned here unchanged."""
         assert (
             reverse("billing:Payments-payment-update", kwargs={"pk": 7, "provider": "stripe"})
-            == "/api/payments/7/payment-update/stripe/"
+            == "/api/billing/payments/7/payment-update/stripe/"
         )
         assert (
             reverse(
                 "billing:Payments-subscription-payment-update",
                 kwargs={"pk": 7, "provider": "mercadopago"},
             )
-            == "/api/payments/7/subscription-payment-update/mercadopago/"
+            == "/api/billing/payments/7/subscription-payment-update/mercadopago/"
         )
 
 
@@ -186,7 +188,7 @@ class TestRouterMode:
         assert reverse("billing:BillingAddOn-detail", kwargs={"pk": 3}) == "/api/billing/add-ons/3/"
         assert (
             reverse("billing:Payments-payment-update", kwargs={"pk": 7, "provider": "stripe"})
-            == "/api/payments/7/payment-update/stripe/"
+            == "/api/billing/payments/7/payment-update/stripe/"
         )
 
     def test_a_converter_router_leaves_no_unrendered_regex_behind(self):
@@ -198,7 +200,7 @@ class TestRouterMode:
 
     @override_settings(ROOT_URLCONF="tests.urls_converter")
     def test_the_webhook_still_resolves_to_its_own_action_on_a_converter_router(self):
-        match = resolve("/api/payments/7/payment-update/stripe/")
+        match = resolve("/api/billing/payments/7/payment-update/stripe/")
 
         assert match.url_name == "Payments-payment-update"
         assert match.kwargs == {"pk": "7", "provider": "stripe"}
@@ -206,7 +208,7 @@ class TestRouterMode:
     @pytest.mark.django_db
     @override_settings(ROOT_URLCONF="tests.urls_converter")
     def test_a_request_reaches_a_webhook_on_a_converter_router(self, client):
-        response = client.post("/api/payments/7/payment-update/stripe/")
+        response = client.post("/api/billing/payments/7/payment-update/stripe/")
 
         assert response.status_code != 404
         assert response.status_code != 500
