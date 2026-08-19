@@ -27,6 +27,7 @@ from vinta_billing.models import (
     SubscriptionStatusUpdate,
 )
 from vinta_billing.registry import resources
+from vinta_billing.services.container import resolve_service
 from vinta_billing.services.subscription_service import SubscriptionService
 
 
@@ -199,14 +200,17 @@ class BillingProfileAdmin(admin.ModelAdmin):
         ``AbstractBaseUser`` for mypy, matching the pattern in
         ``vinta_orgs.views``'s branding write gate) even though the admin
         already refuses an unauthenticated request before ``save_model`` runs.
+
+        ``subscription_service`` is resolved through
+        ``VINTA_BILLING['SERVICE_CONTAINER']`` when nothing supplies it -- which
+        was every repoint made through this admin until 0.5.0, since Django
+        calls ``save_model(request, obj, form, change)`` and nothing here ever
+        passed a fourth argument. The keyword is kept for a project that hands
+        its own service over from a subclass, and for tests.
         """
         if change and "payment_provider" in form.changed_data:
             if subscription_service is None:
-                raise RuntimeError(
-                    "BillingProfileAdmin.save_model: subscription_service not "
-                    "injected (DI not wired?) -- payment_provider edit for "
-                    f"BillingProfile {obj.pk} was not applied."
-                )
+                subscription_service = resolve_service("subscription_service")
             actor = request.user if request.user.is_authenticated else None
             subscription_service.set_payment_provider(
                 obj.organization, obj.payment_provider, actor=actor
