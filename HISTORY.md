@@ -1,6 +1,6 @@
 # History
 
-## Unreleased
+## 0.3.0
 
 - Requires `vinta-django-orgs>=0.5,<0.6`, up from `>=0.2,<0.3`. Three of the
   intervening minors carried a breaking change, and the host applications this
