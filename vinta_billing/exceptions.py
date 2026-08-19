@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from vinta_billing.constants import LimitRemedy
@@ -232,6 +233,45 @@ class InvalidLimitCheckResultError(BillingError):
     which would flatten this invariant violation into a user-facing validation
     message instead of surfacing it as the programming error it is.
     """
+
+
+class InapplicableUsageExtraError(BillingError):
+    """Raised when ``usage_extra`` carries a key the resource being checked does
+    not read.
+
+    Only reachable for a resource that declared its keys -- see
+    :attr:`vinta_billing.registry.ResourceDefinition.usage_extra_keys`. A
+    resource registered without that declaration (every registration written
+    before 0.4.0) keeps taking ``usage_extra`` opaquely and never raises this.
+
+    A per-call extra is read by exactly one counter. Every other counter takes
+    the same ``UsageContext`` and ignores the field, so handing one to the wrong
+    resource is a no-op that *looks* like it took effect: the caller gets a count
+    computed as though they had passed nothing, and no part of the answer says
+    so. Raising is the only way that mistake is visible -- logging would leave
+    the caller holding a wrong number it believes, which on a seat-accept path
+    means refusing a member the organization has room for.
+
+    Inherits ``BillingError`` rather than ``PaymentError`` (a ``ValueError``): it
+    is a call-site error, and the ``except ValueError`` wrappers that surround
+    service calls would otherwise flatten it into a user-facing validation
+    message instead of surfacing it to whoever wrote the call.
+    """
+
+    code = "inapplicable_usage_extra"
+
+    def __init__(self, resource_key: str, unexpected_keys: Iterable[str], declared: Iterable[str]):
+        unexpected = sorted(unexpected_keys)
+        declared_keys = sorted(declared)
+        super().__init__(
+            f"usage_extra key(s) {unexpected} are not read by resource "
+            f"{resource_key!r}, which declares {declared_keys or 'no keys'}. The "
+            "counter would ignore them silently and report a usage number "
+            "computed as if nothing had been passed, so they are refused here."
+        )
+        self.resource_key = resource_key
+        self.unexpected_keys = unexpected
+        self.declared_keys = declared_keys
 
 
 class OverLimitError(BillingError):

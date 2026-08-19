@@ -121,3 +121,53 @@ class TestEntitlementRegistry:
 
         assert registry.get("flag").label == "Flag"
         assert registry.choices() == [("flag", "Flag")]
+
+
+class TestUsageExtraKeys:
+    """Three states, not two: undeclared, declared-with-keys, declared-empty.
+
+    ``None`` and ``frozenset()`` cannot be collapsed into one another. Undeclared
+    has to mean "check nothing", or every 0.3.0 project passing ``usage_extra``
+    would start raising on upgrade; declared-empty has to mean "reject
+    everything", or a resource whose counter reads no per-call data could never
+    say so, and a key meant for some other resource would stay invisible when it
+    was misrouted there.
+    """
+
+    def test_undeclared_by_default(self, registry):
+        registry.register("things", label="Things", kind=LimitKind.PREPAID, counter=noop_counter)
+
+        assert registry.get("things").usage_extra_keys is None
+
+    def test_declared_keys_are_frozen(self, registry):
+        registry.register(
+            "things",
+            label="Things",
+            kind=LimitKind.PREPAID,
+            counter=noop_counter,
+            usage_extra_keys=["a", "b"],
+        )
+
+        assert registry.get("things").usage_extra_keys == frozenset({"a", "b"})
+
+    def test_an_empty_declaration_is_not_the_same_as_no_declaration(self, registry):
+        registry.register(
+            "things",
+            label="Things",
+            kind=LimitKind.PREPAID,
+            counter=noop_counter,
+            usage_extra_keys=(),
+        )
+
+        assert registry.get("things").usage_extra_keys == frozenset()
+        assert registry.get("things").usage_extra_keys is not None
+
+    def test_the_shipped_registrations_still_re_register_identically(self):
+        """Registration is idempotent for an unchanged definition, and the new
+        field takes part in that comparison -- so a module registering on import
+        can still be imported twice."""
+        from tests.testapp.billing_resources import register
+
+        register()
+
+        assert resources.get("seats").usage_extra_keys == frozenset({"exclude_invitation_id"})

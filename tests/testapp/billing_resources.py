@@ -73,6 +73,11 @@ def register() -> None:
         kind=LimitKind.PREPAID,
         counter=count_seats,
         remedy=LimitRemedy.PURCHASE_ADD_ON,
+        # The one key `count_seats` reads. Declaring it turns on the check that
+        # refuses the same key when it is aimed at a resource whose counter would
+        # quietly ignore it. `widgets` above is deliberately left undeclared, so
+        # the suite covers both a 0.3.0-style registration and an opted-in one.
+        usage_extra_keys={EXCLUDE_INVITATION_ID},
     )
     resources.register(
         "event_occurrences",
@@ -80,6 +85,10 @@ def register() -> None:
         kind=LimitKind.POSTPAID,
         counter=count_metered_occurrences,
         remedy=LimitRemedy.ADD_PAYMENT_METHOD,
+        # `count_metered_occurrences` reads nothing out of `UsageContext.extra`,
+        # and says so: an empty declaration is what makes a seat exclusion aimed
+        # at this resource raise instead of being silently dropped.
+        usage_extra_keys=frozenset(),
     )
 
     entitlements.register("white_label", label=_("White-label branding"))

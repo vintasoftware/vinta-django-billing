@@ -63,6 +63,10 @@ from vinta_billing.serializers import (
     SubscriptionSerializer,
     UsageResponseSerializer,
 )
+from vinta_billing.services.container import (
+    get_entitlement_service,
+    get_subscription_service,
+)
 from vinta_billing.services.subscription_service import (
     current_billing_period_start,
     resolve_billing_period,
@@ -149,11 +153,18 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
     def __init__(
         self,
         *args,
-        entitlement_service: "EntitlementService",
+        entitlement_service: "EntitlementService | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.entitlement_service = entitlement_service
+        # Resolved from `vinta_billing.services.container` when the caller passes
+        # nothing, so `as_view()` -- which DRF's routers call with no way to
+        # supply a constructor argument -- can build this view at all. A project
+        # running its own DI container keeps passing the service explicitly and
+        # never reaches the factory. Resolved here rather than at import time:
+        # the factory builds a service that reads `VINTA_BILLING` and the app
+        # registry, neither of which is ready while this module is importing.
+        self.entitlement_service = entitlement_service or get_entitlement_service()
 
     @extend_schema(summary="Get current usage against effective limits", request=None)
     @action(methods=["get"], detail=False, url_path="", url_name="retrieve")
@@ -348,11 +359,18 @@ class BillingPeriodViewSet(
     def __init__(
         self,
         *args,
-        entitlement_service: "EntitlementService",
+        entitlement_service: "EntitlementService | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.entitlement_service = entitlement_service
+        # Resolved from `vinta_billing.services.container` when the caller passes
+        # nothing, so `as_view()` -- which DRF's routers call with no way to
+        # supply a constructor argument -- can build this view at all. A project
+        # running its own DI container keeps passing the service explicitly and
+        # never reaches the factory. Resolved here rather than at import time:
+        # the factory builds a service that reads `VINTA_BILLING` and the app
+        # registry, neither of which is ready while this module is importing.
+        self.entitlement_service = entitlement_service or get_entitlement_service()
 
     def get_serializer_class(self) -> type[BaseSerializer]:
         if self.action == "retrieve":
@@ -440,11 +458,18 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
     def __init__(
         self,
         *args,
-        entitlement_service: "EntitlementService",
+        entitlement_service: "EntitlementService | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.entitlement_service = entitlement_service
+        # Resolved from `vinta_billing.services.container` when the caller passes
+        # nothing, so `as_view()` -- which DRF's routers call with no way to
+        # supply a constructor argument -- can build this view at all. A project
+        # running its own DI container keeps passing the service explicitly and
+        # never reaches the factory. Resolved here rather than at import time:
+        # the factory builds a service that reads `VINTA_BILLING` and the app
+        # registry, neither of which is ready while this module is importing.
+        self.entitlement_service = entitlement_service or get_entitlement_service()
 
     def get_queryset(self) -> QuerySet[MeteredOccurrence]:
         organization = _require_organization(self.request)
@@ -557,11 +582,13 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
     def __init__(
         self,
         *args,
-        subscription_service: "SubscriptionService",
+        subscription_service: "SubscriptionService | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.subscription_service = subscription_service
+        # See `BillingUsageViewSet.__init__` for why this defaults through the
+        # container instead of demanding an injected service.
+        self.subscription_service = subscription_service or get_subscription_service()
 
     def get_permissions(self):
         if self.action in self.write_actions:
@@ -774,11 +801,13 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
     def __init__(
         self,
         *args,
-        subscription_service: "SubscriptionService",
+        subscription_service: "SubscriptionService | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.subscription_service = subscription_service
+        # See `BillingUsageViewSet.__init__` for why this defaults through the
+        # container instead of demanding an injected service.
+        self.subscription_service = subscription_service or get_subscription_service()
 
     def get_throttles(self):
         if self.action in self.write_actions:

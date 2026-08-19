@@ -23,6 +23,7 @@ from vinta_billing.services.cycle_close_service import CycleCloseService
 from vinta_billing.services.dunning_service import DunningService
 from vinta_billing.services.entitlement_service import EntitlementService
 from vinta_billing.services.metering_service import MeteringService
+from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 from vinta_billing.services.payment_service import PaymentService
 from vinta_billing.services.subscription_service import SubscriptionService
 from vinta_billing.services.usage_warning_service import UsageWarningService
@@ -36,6 +37,11 @@ def get_entitlement_service() -> EntitlementService:
 @lru_cache(maxsize=1)
 def get_payment_service() -> PaymentService:
     return PaymentService()
+
+
+@lru_cache(maxsize=1)
+def get_payment_provider_resolver() -> PaymentProviderResolver:
+    return PaymentProviderResolver()
 
 
 @lru_cache(maxsize=1)
@@ -72,6 +78,7 @@ def reset_services() -> None:
     for factory in (
         get_entitlement_service,
         get_payment_service,
+        get_payment_provider_resolver,
         get_subscription_service,
         get_metering_service,
         get_dunning_service,

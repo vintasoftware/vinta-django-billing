@@ -133,6 +133,12 @@ def test_every_error_class_has_a_deliberate_status(error_class):
         "BillingProfileContactEmailMissingError",
         "BillingRootCycleError",
         "IllegalBillingStateTransitionError",
+        # A call site naming a usage_extra key the resource does not read is a
+        # programming error, like InvalidLimitCheckResultError below: there is
+        # nothing a client did wrong and nothing it could do differently, so this
+        # falls through to the 500 default rather than getting a 4xx that would
+        # invite a retry.
+        "InapplicableUsageExtraError",
         "InvalidLimitCheckResultError",
         "MissingSeedBillingPlanError",
         "ProviderWebhookEventIdMissingError",
