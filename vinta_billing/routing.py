@@ -38,6 +38,7 @@ from vinta_billing.billing_views import (
     MeteredOccurrenceViewSet,
     SubscriptionViewSet,
 )
+from vinta_billing.view_mixins import apply_view_mixin
 from vinta_billing.views import (
     BillingProfileViewSet,
     DefaultPaymentProviderView,
@@ -61,31 +62,50 @@ def get_routes() -> list[RouteDict]:
     carry the provider slug as a URL segment, which a router can only render in
     its own mode. They are bound by :func:`get_extra_patterns` instead -- see
     that docstring, and mount both halves.
+
+    Every tenant-scoped viewset here is passed through
+    :func:`vinta_billing.view_mixins.apply_view_mixin` first, so a project that
+    configured ``VINTA_BILLING['VIEW_MIXIN']`` mounts these routes as they are
+    instead of subclassing each viewset to mix its own scoping in. Under the
+    default that function returns the same class objects, so this table is
+    unchanged for a project that configured nothing.
     """
     return [
         {
             "regex": r"billing-profile",
-            "viewset": BillingProfileViewSet,
+            "viewset": apply_view_mixin(BillingProfileViewSet),
             "basename": "BillingProfile",
         },
-        {"regex": r"billing/plans", "viewset": BillingPlanViewSet, "basename": "BillingPlan"},
-        {"regex": r"billing/usage", "viewset": BillingUsageViewSet, "basename": "BillingUsage"},
+        {
+            "regex": r"billing/plans",
+            "viewset": apply_view_mixin(BillingPlanViewSet),
+            "basename": "BillingPlan",
+        },
+        {
+            "regex": r"billing/usage",
+            "viewset": apply_view_mixin(BillingUsageViewSet),
+            "basename": "BillingUsage",
+        },
         {
             "regex": r"billing/usage/periods",
-            "viewset": BillingPeriodViewSet,
+            "viewset": apply_view_mixin(BillingPeriodViewSet),
             "basename": "BillingUsagePeriod",
         },
         {
             "regex": r"billing/usage/occurrences",
-            "viewset": MeteredOccurrenceViewSet,
+            "viewset": apply_view_mixin(MeteredOccurrenceViewSet),
             "basename": "BillingUsageOccurrence",
         },
         {
             "regex": r"billing/subscription",
-            "viewset": SubscriptionViewSet,
+            "viewset": apply_view_mixin(SubscriptionViewSet),
             "basename": "BillingSubscription",
         },
-        {"regex": r"billing/add-ons", "viewset": AddOnViewSet, "basename": "BillingAddOn"},
+        {
+            "regex": r"billing/add-ons",
+            "viewset": apply_view_mixin(AddOnViewSet),
+            "basename": "BillingAddOn",
+        },
     ]
 
 
@@ -135,7 +155,11 @@ def get_extra_patterns(trailing_slash: bool = True) -> list[URLPattern]:
         ),
         path(
             "billing/payment-provider" + slash,
-            PaymentProviderViewSet.as_view({"get": "retrieve_provider"}),
+            # Tenant-scoped, so it takes the configured view mixin like every
+            # viewset `get_routes` returns. The two webhooks above do not: a
+            # provider posts to them with no session and no member, and their
+            # tenancy comes from the payment row the URL names.
+            apply_view_mixin(PaymentProviderViewSet).as_view({"get": "retrieve_provider"}),
             name="payment-provider",
         ),
         path(

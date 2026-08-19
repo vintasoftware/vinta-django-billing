@@ -750,12 +750,14 @@ def test_get_payment_external_id_from_subscription_payload_expanded(adapter):
     """Shape derived from introspecting `stripe.InvoicePayment.__annotations__`
     (`payment: InvoicePayment.Payment`) and
     `stripe.InvoicePayment.Payment.__annotations__`
-    (`payment_intent: Union[str, PaymentIntent, None]`) on the pinned
-    `stripe==15.3.1` SDK — `latest_invoice.payments.data[0].payment.payment_intent`,
-    not the removed `latest_invoice.payment_intent`."""
+    (`payment_intent: Union[str, PaymentIntent, None]`) on the installed SDK —
+    `latest_invoice.payments.data[0].payment.payment_intent`, not the removed
+    `latest_invoice.payment_intent`. Pinned against those annotations rather
+    than a remembered name by
+    `TestTheInvoiceFieldIsTheOneTheSDKActuallyHas`."""
     subscription_payload = {
         "latest_invoice": {
-            "billing": {
+            "payments": {
                 "object": "list",
                 "data": [
                     {
@@ -782,7 +784,7 @@ def test_get_payment_external_id_from_subscription_payload_unexpanded_id(adapter
     only the id is needed."""
     subscription_payload = {
         "latest_invoice": {
-            "billing": {
+            "payments": {
                 "object": "list",
                 "data": [
                     {
@@ -807,7 +809,7 @@ def test_get_payment_external_id_from_subscription_payload_missing_invoice(adapt
 def test_get_payment_external_id_from_subscription_payload_no_payments_yet(adapter):
     """An invoice that hasn't been paid yet has an empty `payments.data` list —
     must return `None`, not raise an `IndexError`."""
-    subscription_payload = {"latest_invoice": {"billing": {"object": "list", "data": []}}}
+    subscription_payload = {"latest_invoice": {"payments": {"object": "list", "data": []}}}
 
     assert adapter.get_payment_external_id_from_subscription_payload(subscription_payload) is None
 
@@ -825,7 +827,7 @@ def test_get_payment_external_id_from_subscription_payload_picks_the_paid_entry_
     was genuinely collected."""
     subscription_payload = {
         "latest_invoice": {
-            "billing": {
+            "payments": {
                 "object": "list",
                 "data": [
                     {
@@ -863,7 +865,7 @@ def test_get_payment_external_id_from_subscription_payload_falls_back_to_most_re
     falls back to the most recently created entry, not list position."""
     subscription_payload = {
         "latest_invoice": {
-            "billing": {
+            "payments": {
                 "object": "list",
                 "data": [
                     {
@@ -898,7 +900,7 @@ def test_receive_payment_update_invoice_event_resolves_off_the_events_own_invoic
     """BLOCKER 1 (Billing API Contract Hardening, Phase 4 reviewer finding):
     `invoice.paid` for a **non-latest** invoice must resolve the payment off
     the invoice the event was actually about (`Invoice.retrieve(event's
-    invoice id, expand=["billing"])`), never `Subscription.latest_invoice` --
+    invoice id, expand=["payments"])`), never `Subscription.latest_invoice` --
     the most recently *created* invoice, which the dunning ladder's $0
     proration tick makes a different, unrelated, PaymentIntent-less invoice
     by the time a payer recovers through `retry_payment`.
@@ -923,7 +925,7 @@ def test_receive_payment_update_invoice_event_resolves_off_the_events_own_invoic
     mock_invoice.retrieve.return_value = Mock(
         to_dict=lambda: {
             "id": "in_past_due_49",
-            "billing": {
+            "payments": {
                 "object": "list",
                 "data": [
                     {
@@ -964,7 +966,7 @@ def test_receive_payment_update_invoice_event_resolves_off_the_events_own_invoic
     assert result is not None
     subscription_payment, status_update = result
     mock_invoice.retrieve.assert_called_once_with(
-        "in_past_due_49", expand=["billing"], api_key="sk_test_123"
+        "in_past_due_49", expand=["payments"], api_key="sk_test_123"
     )
     mock_payment_intent.retrieve.assert_called_once_with(
         "pi_new_card_success", api_key="sk_test_123"
@@ -1025,7 +1027,7 @@ def test_receive_payment_update_non_invoice_event_keeps_the_latest_invoice_looku
     mock_subscription_resource.retrieve.return_value = Mock(
         to_dict=lambda: {
             "latest_invoice": {
-                "billing": {
+                "payments": {
                     "object": "list",
                     "data": [
                         {
@@ -1162,3 +1164,110 @@ def test_get_event_id_raises_when_signature_invalid(adapter):
 
     with pytest.raises(ProviderWebhookEventIdMissingError):
         adapter.get_event_id(tampered_body, headers, payload={"id": "evt_123"})
+
+
+class TestTheInvoiceFieldIsTheOneTheSDKActuallyHas:
+    """`Invoice.payments`, never `Invoice.billing`.
+
+    The extraction renamed the field this adapter reads from `payments` to
+    `billing` at three call sites while leaving the *expand* it is fetched
+    with, and every docstring around it, saying `payments`. Expanding one field
+    and reading another resolves nothing: `get_payment_external_id_*` returned
+    `None` for every Stripe subscription charge, so an `invoice.paid` webhook
+    matched no payment, dunning was never cleared, and a customer who had paid
+    kept being chased.
+
+    Asserted against the installed SDK's own annotations rather than against a
+    remembered field name, so this fails the day Stripe renames it for real
+    instead of quietly resolving nothing again.
+    """
+
+    def test_the_sdk_has_payments_and_has_no_billing_field(self):
+        annotations = stripe.Invoice.__annotations__
+
+        assert "payments" in annotations
+        assert "billing" not in annotations
+
+    def test_the_chain_the_adapter_walks_exists_on_the_sdk(self):
+        """`latest_invoice.payments.data[N].payment.payment_intent`, field by
+        field."""
+        assert "payments" in stripe.Invoice.__annotations__
+        assert "status" in stripe.InvoicePayment.__annotations__
+        assert "created" in stripe.InvoicePayment.__annotations__
+        assert "payment" in stripe.InvoicePayment.__annotations__
+        assert "payment_intent" in stripe.InvoicePayment.Payment.__annotations__
+
+    def test_a_subscription_payload_in_the_sdks_shape_resolves_the_payment(self, adapter):
+        """The payload Stripe actually returns for the expand
+        `get_subscription_payload` sends."""
+        subscription_payload = {
+            "latest_invoice": {
+                "payments": {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "inpay_123",
+                            "object": "invoice_payment",
+                            "status": "paid",
+                            "created": 1000,
+                            "payment": {
+                                "type": "payment_intent",
+                                "payment_intent": "pi_real",
+                            },
+                        }
+                    ],
+                }
+            }
+        }
+
+        result = adapter.get_payment_external_id_from_subscription_payload(subscription_payload)
+
+        assert result == "pi_real"
+
+    @patch(
+        "vinta_billing.services.subscription_adapters.stripe_subscription_adapter.stripe.Invoice"
+    )
+    def test_the_invoice_lookup_expands_and_reads_the_same_field(self, mock_invoice, adapter):
+        """One field, both halves: what is expanded is what is read. Expanding
+        `payments` and reading `billing` is how this failed silently."""
+        mock_invoice.retrieve.return_value = Mock(
+            to_dict=lambda: {
+                "id": "in_1",
+                "payments": {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "inpay_1",
+                            "status": "paid",
+                            "created": 1000,
+                            "payment": {
+                                "type": "payment_intent",
+                                "payment_intent": "pi_off_the_invoice",
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+
+        result = adapter._get_payment_external_id_from_invoice("in_1")
+
+        mock_invoice.retrieve.assert_called_once_with(
+            "in_1", expand=["payments"], api_key="sk_test_123"
+        )
+        assert result == "pi_off_the_invoice"
+
+    def test_no_call_site_reads_a_field_the_sdk_does_not_have(self):
+        """The guard that keeps the rename from coming back. Every quoted
+        field name this module reads off an invoice has to be a real
+        `stripe.Invoice` field."""
+        import inspect
+        import re
+
+        from vinta_billing.services.subscription_adapters import stripe_subscription_adapter
+
+        source = inspect.getsource(stripe_subscription_adapter)
+        read_fields = set(re.findall(r"(?:latest_)?invoice(?:_dict)?\.get\(\"(\w+)\"\)", source))
+
+        unknown = read_fields - set(stripe.Invoice.__annotations__)
+        assert not unknown, f"read off an invoice but absent from stripe.Invoice: {unknown}"

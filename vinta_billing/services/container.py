@@ -13,12 +13,27 @@ module entirely.
 The instances are cached per process. Every service here is stateless -- they
 hold no request, no organization and no transaction -- so sharing one is safe
 and saves rebuilding the object graph on every limit check.
+
+Everything above is the *default*. The shipped views and the admin do not name
+this module: they call :func:`resolve_service`, which asks whatever
+``VINTA_BILLING['SERVICE_CONTAINER']`` points at, and which points here until a
+project says otherwise. That is what lets a project running its own container
+mount the shipped routes as they are and still have its own factories build the
+services -- including anything a test overrode on them, which a second,
+parallel set of instances cached here could never reflect.
 """
 
 from __future__ import annotations
 
+import sys
 from functools import lru_cache
+from importlib import import_module
+from typing import Any
 
+from django.core.exceptions import ImproperlyConfigured
+from django.utils.module_loading import import_string
+
+from vinta_billing.conf import get_setting
 from vinta_billing.services.cycle_close_service import CycleCloseService
 from vinta_billing.services.dunning_service import DunningService
 from vinta_billing.services.entitlement_service import EntitlementService
@@ -86,3 +101,65 @@ def reset_services() -> None:
         get_cycle_close_service,
     ):
         factory.cache_clear()
+
+
+def _import_container(path: str) -> Any:
+    """The object ``path`` names: a module, or something inside one.
+
+    ``SERVICE_CONTAINER`` is spelled both ways in practice -- this package's own
+    default names a module (``vinta_billing.services.container``), and a project
+    running ``dependency_injector`` names an instance inside one
+    (``myproject.di.container``). A module is tried first, and only a
+    ``ModuleNotFoundError`` *about this very path* falls through to the
+    attribute lookup; a module that exists but whose own imports fail raises
+    from here rather than being reported as a missing attribute.
+    """
+    try:
+        return import_module(path)
+    except ModuleNotFoundError as error:
+        if error.name != path:
+            raise
+        return import_string(path)
+
+
+def get_service_container() -> Any:
+    """The object the shipped views and the admin build their services from.
+
+    ``VINTA_BILLING['SERVICE_CONTAINER']``, or this module when it is unset.
+    Resolved per call rather than cached: a project's container is built in its
+    app's ``ready()``, and a test that overrides a provider on it must be what
+    the next request sees.
+    """
+    container = get_setting("SERVICE_CONTAINER")
+    if container is None:
+        return sys.modules[__name__]
+    if not isinstance(container, str):
+        # Tests and programmatic configuration hand over the container itself.
+        return container
+    return _import_container(container)
+
+
+def resolve_service(name: str) -> Any:
+    """Build the service called ``name`` through the configured container.
+
+    ``name`` is the service's own name -- ``"payment_service"``,
+    ``"entitlement_service"`` -- and two spellings of a factory for it are
+    accepted, in this order:
+
+    * ``get_<name>()``, which is how this module (and any plain module of
+      factory functions) offers one;
+    * ``<name>()``, which is how a ``dependency_injector`` container offers one:
+      its providers are callables named after what they build.
+
+    Both are called with no arguments, so a container has to be able to build
+    each service without help from here -- which every provider already can,
+    since nothing in a view knows what a service's collaborators are.
+    """
+    container = get_service_container()
+    factory = getattr(container, f"get_{name}", None) or getattr(container, name, None)
+    if factory is None:
+        raise ImproperlyConfigured(
+            "VINTA_BILLING['SERVICE_CONTAINER'] (%r) offers neither get_%s() nor %s(); "
+            "the shipped views cannot build a %s." % (container, name, name, name)
+        )
+    return factory()

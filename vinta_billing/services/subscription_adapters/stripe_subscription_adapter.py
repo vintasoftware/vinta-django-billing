@@ -597,7 +597,7 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
         latest_invoice = subscription_payload.get("latest_invoice")
         if not isinstance(latest_invoice, dict):
             return None
-        return _select_payment_intent_id(latest_invoice.get("billing"))
+        return _select_payment_intent_id(latest_invoice.get("payments"))
 
     def _get_payment_external_id_from_invoice(self, invoice_id: str) -> str | None:
         """Resolve the PaymentIntent id off `invoice_id`'s own `payments` list --
@@ -607,8 +607,8 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
         `get_subscription_payload` -- `Invoice.payment_intent` no longer exists
         under the pinned `2026-06-24.dahlia` API version.
         """
-        invoice = stripe.Invoice.retrieve(invoice_id, expand=["billing"], api_key=self.api_key)
-        return _select_payment_intent_id(invoice.to_dict().get("billing"))
+        invoice = stripe.Invoice.retrieve(invoice_id, expand=["payments"], api_key=self.api_key)
+        return _select_payment_intent_id(invoice.to_dict().get("payments"))
 
     def receive_payment_update(
         self, update_payload: dict
@@ -616,7 +616,7 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
         """Override `BaseSubscriptionAdapter.receive_payment_update`'s generic
         subscription-payload lookup for `invoice.*` events: resolve the payment
         off the invoice the event was actually about (`data.object.id` ->
-        `Invoice.retrieve(..., expand=["billing"])`), not
+        `Invoice.retrieve(..., expand=["payments"])`), not
         `Subscription.latest_invoice` -- the most recently *created* invoice,
         not necessarily the one this event fired for.
 
