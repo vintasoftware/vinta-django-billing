@@ -61,7 +61,7 @@ is what stood between that project and deleting its own copy of the REST layer.
   `ignore_missing_imports` -- which makes every name in it `Any`. That is worse
   than untyped for a project re-exporting these models: a star re-export from an
   `Any` module re-exports nothing, and the host counted 565 extra errors from
-  it, 655 of them `[attr-defined]` on names that plainly exist. The marker is in
+  it -- 562 of them `[attr-defined]` on names that plainly exist. The marker is in
   the wheel and the sdist. If you added `vinta_billing` to
   `ignore_missing_imports`, remove that entry -- while it is there the
   annotations are still thrown away.
