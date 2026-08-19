@@ -37,6 +37,13 @@ pip install "vinta-django-billing[stripe]"  # provider SDKs are extras
 
 Extras: `stripe`, `mercadopago`, `openapi`.
 
+The distribution is typed (PEP 561): it ships a `py.typed` marker from 0.5.0 on,
+so mypy reads the annotations instead of treating the package as `Any`. If you
+listed `vinta_billing` under `ignore_missing_imports` to silence it, drop that
+entry — while it is there the annotations are still discarded, and a
+`from vinta_billing.models import *` re-export out of an `Any` module re-exports
+nothing.
+
 ```python
 INSTALLED_APPS = [
     ...,
