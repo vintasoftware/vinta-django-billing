@@ -5,16 +5,28 @@ ready-made ``urls.py`` so a project can mount them under its own prefix, drop
 the ones it does not want, or register them on a router it already has:
 
     # myproject/urls.py
-    from vinta_billing.routing import billing_router
+    from vinta_billing.routing import billing_router, get_extra_patterns
 
-    urlpatterns = [path('api/', include(billing_router().urls))]
+    urlpatterns = [
+        path('api/', include(billing_router().urls)),
+        *get_extra_patterns(),
+    ]
+
+Both halves are needed: the endpoints a router cannot express -- the singleton
+payment-provider reads, and the two inbound provider webhooks, which carry the
+provider slug in the URL -- are bound by ``get_extra_patterns`` instead. See its
+docstring.
+
+Nothing here assumes the regex router. ``register_routes`` mounts the shipped
+viewsets on whatever router a project already has, including one built with
+``use_regex_path=False``, and ``billing_router`` takes the same flag.
 """
 
 from __future__ import annotations
 
 from typing import TypedDict
 
-from django.urls import URLPattern, path
+from django.urls import URLPattern, path, re_path
 from rest_framework.routers import DefaultRouter, SimpleRouter
 from rest_framework.viewsets import ViewSetMixin
 
@@ -43,9 +55,14 @@ class RouteDict(TypedDict):
 
 
 def get_routes() -> list[RouteDict]:
-    """Every viewset this app ships, in registration order."""
+    """Every viewset this app ships that a router can mount, in registration order.
+
+    ``PaymentsViewSet`` is deliberately absent from 0.4.0 on: both of its actions
+    carry the provider slug as a URL segment, which a router can only render in
+    its own mode. They are bound by :func:`get_extra_patterns` instead -- see
+    that docstring, and mount both halves.
+    """
     return [
-        {"regex": r"payments", "viewset": PaymentsViewSet, "basename": "Payments"},
         {
             "regex": r"billing-profile",
             "viewset": BillingProfileViewSet,
@@ -72,21 +89,55 @@ def get_routes() -> list[RouteDict]:
     ]
 
 
-def get_extra_patterns() -> list[URLPattern]:
+def get_extra_patterns(trailing_slash: bool = True) -> list[URLPattern]:
     """Endpoints bound directly rather than through the router.
 
     The payment-provider endpoints are singletons -- one per organization, with
     no list and no primary key -- so they are bound to explicit paths instead of
     being given a router prefix that implies a collection.
+
+    The two inbound provider webhooks are here for a different reason. They carry
+    the provider slug as a URL segment, and a DRF ``@action`` can spell that
+    segment only one way. Written as a regex (``(?P<provider>[^/.]+)``) it is
+    emitted literally by a router built with ``use_regex_path=False``; written as
+    a path converter (``<str:provider>``) it is emitted literally by the default
+    regex router. Either spelling therefore hands half of the projects mounting
+    these a route that can never match, and a project should not have to change
+    its router's mode -- a project-wide decision affecting its own URLs -- to
+    receive a payment webhook. Binding them here with ``re_path`` takes them out
+    of the router's hands: this is an ordinary URL pattern, and Django mixes
+    ``path()`` and ``re_path()`` in one urlconf without caring which the
+    neighbouring routes used. The regex is character for character what the regex
+    router produced, and the reversible names are unchanged, so a project already
+    mounting these keeps the URLs it published to its providers.
+
+    :param trailing_slash: Whether these paths end in ``/``. Match whatever the
+        router they are mounted alongside was built with: the webhook patterns
+        used to come out of that router and inherited its choice.
     """
+    slash = "/" if trailing_slash else ""
     return [
+        re_path(
+            r"^payments/(?P<pk>[^/.]+)/payment-update/(?P<provider>[^/.]+)" + slash + "$",
+            PaymentsViewSet.as_view({"post": "payment_update"}, detail=True, basename="Payments"),
+            name="Payments-payment-update",
+        ),
+        re_path(
+            r"^payments/(?P<pk>[^/.]+)/subscription-payment-update/(?P<provider>[^/.]+)"
+            + slash
+            + "$",
+            PaymentsViewSet.as_view(
+                {"post": "subscription_payment_update"}, detail=True, basename="Payments"
+            ),
+            name="Payments-subscription-payment-update",
+        ),
         path(
-            "billing/payment-provider/",
+            "billing/payment-provider" + slash,
             PaymentProviderViewSet.as_view({"get": "retrieve_provider"}),
             name="payment-provider",
         ),
         path(
-            "billing/payment-provider/default/",
+            "billing/payment-provider/default" + slash,
             DefaultPaymentProviderView.as_view(),
             name="payment-provider-default",
         ),
@@ -94,12 +145,25 @@ def get_extra_patterns() -> list[URLPattern]:
 
 
 def register_routes(router: SimpleRouter) -> SimpleRouter:
-    """Register every shipped viewset on an existing router."""
+    """Register every shipped viewset on an existing router.
+
+    The router's own mode is respected: every prefix here is a plain literal and
+    every ``@action`` carries a plain ``url_path``, so the only parameterised
+    segments a router renders for these viewsets are its own detail lookups --
+    which it already spells in whichever form it was built with.
+    """
     for route in get_routes():
         router.register(route["regex"], route["viewset"], basename=route["basename"])
     return router
 
 
-def billing_router() -> DefaultRouter:
-    """A router carrying only this app's endpoints."""
-    return register_routes(DefaultRouter())  # type: ignore[return-value]
+def billing_router(use_regex_path: bool = True) -> DefaultRouter:
+    """A router carrying only this app's endpoints.
+
+    :param use_regex_path: Passed to ``DefaultRouter``. Defaults to ``True``,
+        DRF's own default, so an existing project's URLs do not move. Pass
+        ``False`` for path-converter routes (``<str:pk>`` rather than
+        ``(?P<pk>[^/.]+)``) to match a project that already builds its routers
+        that way.
+    """
+    return register_routes(DefaultRouter(use_regex_path=use_regex_path))  # type: ignore[return-value]

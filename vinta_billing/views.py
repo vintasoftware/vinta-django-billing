@@ -25,6 +25,12 @@ from vinta_billing.models import BillingProfile, SubscriptionAddOn
 from vinta_billing.models import PaymentStatusUpdate as PaymentStatusUpdateModel
 from vinta_billing.permissions import IsBillingManager
 from vinta_billing.serializers import BillingProfileSerializer, PaymentProviderSerializer
+from vinta_billing.services.container import (
+    get_dunning_service,
+    get_payment_provider_resolver,
+    get_payment_service,
+    get_subscription_service,
+)
 from vinta_billing.services.dunning_service import FAILED_SUBSCRIPTION_PAYMENT_STATUSES
 from vinta_billing.services.provider_credentials import resolve_public_credentials
 from vinta_billing.view_mixins import TenantScopedViewMixin
@@ -93,15 +99,24 @@ class PaymentsViewSet(ViewSet):
     def __init__(
         self,
         *args,
-        payment_service: "PaymentService",
-        subscription_service: "SubscriptionService",
-        dunning_service: "DunningService",
+        payment_service: "PaymentService | None" = None,
+        subscription_service: "SubscriptionService | None" = None,
+        dunning_service: "DunningService | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.payment_service = payment_service
-        self.subscription_service = subscription_service
-        self.dunning_service = dunning_service
+        # Each service is resolved from `vinta_billing.services.container` when
+        # the caller passes nothing. `as_view()` takes no per-registration
+        # constructor arguments, so a required keyword-only service here made
+        # every shipped route unmountable -- the endpoint resolved and then
+        # raised `TypeError` on the first request. A project running its own DI
+        # container keeps passing all three and never reaches a factory.
+        # Resolved here rather than at import time: the factories build services
+        # that read `VINTA_BILLING` and the app registry, neither of which is
+        # ready while this module is importing.
+        self.payment_service = payment_service or get_payment_service()
+        self.subscription_service = subscription_service or get_subscription_service()
+        self.dunning_service = dunning_service or get_dunning_service()
 
     @extend_schema(
         summary="Receive payment updates",
@@ -490,11 +505,15 @@ class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
     def __init__(
         self,
         *args,
-        payment_provider_resolver: "PaymentProviderResolver",
+        payment_provider_resolver: "PaymentProviderResolver | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.payment_provider_resolver = payment_provider_resolver
+        # See `PaymentsViewSet.__init__` for why this defaults through the
+        # container instead of demanding an injected resolver.
+        self.payment_provider_resolver = (
+            payment_provider_resolver or get_payment_provider_resolver()
+        )
 
     @extend_schema(
         summary="Get the active organization's payment provider",
@@ -554,11 +573,15 @@ class DefaultPaymentProviderView(APIView):
     def __init__(
         self,
         *args,
-        payment_provider_resolver: "PaymentProviderResolver",
+        payment_provider_resolver: "PaymentProviderResolver | None" = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.payment_provider_resolver = payment_provider_resolver
+        # See `PaymentsViewSet.__init__` for why this defaults through the
+        # container instead of demanding an injected resolver.
+        self.payment_provider_resolver = (
+            payment_provider_resolver or get_payment_provider_resolver()
+        )
 
     @extend_schema(
         summary="Get the system default payment provider",

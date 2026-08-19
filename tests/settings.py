@@ -68,6 +68,16 @@ SITE_ID = 1
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
+    # Every throttle scope the shipped viewsets name. DRF's `ScopedRateThrottle`
+    # raises `ImproperlyConfigured` for a scope with no rate, so a project that
+    # mounts these routes without all three gets a 500 on the endpoint instead
+    # of a throttle. The numbers are the test project's, not the package's --
+    # a rate limit is a deployment's decision.
+    "DEFAULT_THROTTLE_RATES": {
+        "payment-webhook": "120/min",
+        "payment-provider": "60/min",
+        "billing-write": "30/min",
+    },
 }
 
 # The metered resource `tests.testapp` registers. Named explicitly rather than

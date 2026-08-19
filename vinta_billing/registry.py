@@ -43,7 +43,7 @@ class would have given.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -77,6 +77,27 @@ class ResourceDefinition:
     kind: str
     counter: UsageCounter
     remedy: str
+    usage_extra_keys: frozenset[str] | None = None
+    """Which ``usage_extra`` keys this resource's counter reads, if declared.
+
+    ``None`` -- the default, and what every registration written before 0.4.0
+    says -- means undeclared: nothing is checked, and any key reaches the counter
+    exactly as it always did.
+
+    A frozenset, **including an empty one**, means declared: passing this
+    resource a key outside the set raises
+    :class:`vinta_billing.exceptions.InapplicableUsageExtraError`. The empty set
+    is the useful extreme, not a degenerate case -- it says "this counter reads
+    no per-call data at all", which is what makes a key meant for some *other*
+    resource visible when it is misrouted here.
+
+    That mistake is otherwise silent, and silently wrong. A counter that does not
+    read a key ignores it, so a caller who meant "exclude the invitation being
+    accepted from the seat count" and named the wrong resource gets an answer
+    computed as if they had asked for no exclusion at all -- an answer they
+    believe, and act on. Nothing about the result says the exclusion did not
+    happen. Declaring the keys is how a project makes that failure raise.
+    """
 
     def __str__(self) -> str:
         return self.key
@@ -169,6 +190,7 @@ class ResourceRegistry(Registry[ResourceDefinition]):
         kind: str,
         counter: UsageCounter,
         remedy: str = "",
+        usage_extra_keys: Iterable[str] | None = None,
     ) -> ResourceDefinition:
         """Declare that plans may limit ``key``, and how to count it.
 
@@ -176,6 +198,13 @@ class ResourceRegistry(Registry[ResourceDefinition]):
         resource is capped up front or metered and billed afterwards. ``remedy``
         is the :class:`vinta_billing.constants.LimitRemedy` the over-limit error tells
         the client about, so it can route the user to the right screen.
+
+        ``usage_extra_keys`` names the ``usage_extra`` keys ``counter`` reads.
+        Omitting it keeps 0.3.0's behaviour -- ``usage_extra`` stays entirely
+        opaque for this resource. Passing it, even as an empty iterable, turns on
+        the check described in :attr:`ResourceDefinition.usage_extra_keys`; a
+        project that wants the check everywhere declares it on every resource,
+        which is what makes an empty declaration worth writing.
         """
         if kind not in LimitKind.values:
             raise ImproperlyConfigured(
@@ -194,6 +223,12 @@ class ResourceRegistry(Registry[ResourceDefinition]):
                 kind=kind,
                 counter=counter,
                 remedy=remedy or LimitRemedy.UPGRADE_PLAN,
+                # `None` and `frozenset()` mean different things here (undeclared
+                # versus declared-empty), so the conversion has to preserve the
+                # `None` rather than normalise it away.
+                usage_extra_keys=(
+                    None if usage_extra_keys is None else frozenset(usage_extra_keys)
+                ),
             )
         )
 

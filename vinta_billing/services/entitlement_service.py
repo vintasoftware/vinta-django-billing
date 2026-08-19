@@ -29,7 +29,7 @@ from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import BillingState, LimitKind, LimitRemedy
 from vinta_billing.counting import UsageContext, count_by_organization
-from vinta_billing.exceptions import OverLimitError
+from vinta_billing.exceptions import InapplicableUsageExtraError, OverLimitError
 from vinta_billing.hierarchy import get_hierarchy, resolve_billing_root
 from vinta_billing.models import (
     MeteredOccurrence,
@@ -98,6 +98,30 @@ def count_metered_occurrences(context: UsageContext) -> dict[int, int]:
             subscription.pk, current_billing_period_start(subscription)
         ).for_organizations(context.organization_ids)
     )
+
+
+def _validate_usage_extra(resource_key: str, usage_extra: dict[str, Any] | None) -> None:
+    """Refuse ``usage_extra`` keys ``resource_key``'s counter does not read.
+
+    A no-op unless the resource declared ``usage_extra_keys`` at registration
+    (``None``, the default, means undeclared -- see
+    ``vinta_billing.registry.ResourceDefinition.usage_extra_keys``), so nothing a
+    0.3.0 project already passes starts raising on upgrade.
+
+    Also a no-op for an unregistered key: ``_usage_breakdown`` deliberately fails
+    open there rather than raising mid-request, and there is no declaration to
+    check against anyway.
+    """
+    if not usage_extra:
+        return
+    if resource_key not in resources:
+        return
+    declared = resources.get(resource_key).usage_extra_keys
+    if declared is None:
+        return
+    unexpected = set(usage_extra) - declared
+    if unexpected:
+        raise InapplicableUsageExtraError(resource_key, unexpected, declared)
 
 
 class EntitlementService:
@@ -291,7 +315,9 @@ class EntitlementService:
         computed alongside it.
 
         :param usage_extra: Opaque per-call data forwarded to the resource's own
-            counter as ``UsageContext.extra``. The engine never reads it.
+            counter as ``UsageContext.extra``. The engine never reads its values,
+            only checks its keys against what the resource declared -- see
+            ``check_limit``.
         """
         root = resolve_billing_root(organization)
         return self._count_usage(
@@ -320,7 +346,9 @@ class EntitlementService:
         whether a non-contributor is worth rendering.
 
         :param usage_extra: Opaque per-call data forwarded to the resource's own
-            counter as ``UsageContext.extra``. The engine never reads it.
+            counter as ``UsageContext.extra``. The engine never reads its values,
+            only checks its keys against what the resource declared -- see
+            ``check_limit``.
         """
         root = resolve_billing_root(organization)
         return self._usage_breakdown(
@@ -389,7 +417,15 @@ class EntitlementService:
             has it (see ``usage_breakdown_for_root``). Resolved via
             ``_get_pooled_organization_ids`` when omitted -- the behavior every
             existing caller keeps unchanged.
+        :raises InapplicableUsageExtraError: if ``usage_extra`` carries a key
+            ``resource_key`` declared it does not read. Checked here, at the one
+            place every counter is actually invoked, so the public read methods
+            (``get_current_usage``, ``get_usage_breakdown``) are covered by the
+            same rule as ``check_limit`` without each restating it. ``check_limit``
+            checks once more up front, because its unlimited path never reaches
+            here.
         """
+        _validate_usage_extra(resource_key, usage_extra)
         if resource_key not in resources:
             # Fails open rather than raising mid-request. An unregistered key
             # reaching here means a plan carries a limit row for a resource this
@@ -508,6 +544,7 @@ class EntitlementService:
         delta: int = 1,
         lock: bool = False,
         usage_extra: dict[str, Any] | None = None,
+        usage_extra_resolver: Callable[[], dict[str, Any]] | None = None,
     ) -> LimitCheckResult:
         """Would creating ``delta`` more of ``resource_key`` stay within the ceiling?
 
@@ -545,8 +582,40 @@ class EntitlementService:
             project ever raises the isolation level, this guard has to be
             revisited, not just retested.
         :param usage_extra: Opaque per-call data forwarded to the resource's own
-            counter as ``UsageContext.extra``. The engine never reads it.
+            counter as ``UsageContext.extra``. The engine never reads its
+            *values*; it does check its *keys* against whatever the resource
+            declared at registration, and refuses one the counter cannot read --
+            see ``vinta_billing.registry.ResourceDefinition.usage_extra_keys``. A
+            resource that declared nothing is unchecked, as before.
+        :param usage_extra_resolver: Lazy alternative to ``usage_extra`` for a
+            caller whose per-call data is itself a query -- the seat-accept case,
+            where working out which invitation to exclude costs a lookup. Called
+            at most once, and **only after the ceiling is known to be finite**,
+            so an ``unlimited`` organization never pays for it; on the unlimited
+            path usage is not counted at all, so there would be nothing to hand
+            the result to. Its return value is merged into ``UsageContext.extra``
+            exactly as an eager ``usage_extra`` would be, and validated the same
+            way. Mutually exclusive with ``usage_extra`` -- two sources for one
+            field means one of them is silently discarded, so passing both
+            raises. Mirrors ``check_postpaid_allowance``'s ``delta_resolver``.
+        :raises InapplicableUsageExtraError: if ``usage_extra`` (or the
+            resolver's result) carries a key ``resource_key`` declared it does
+            not read.
+        :raises ValueError: if both ``usage_extra`` and ``usage_extra_resolver``
+            are given.
         """
+        if usage_extra is not None and usage_extra_resolver is not None:
+            raise ValueError(
+                "check_limit() takes usage_extra or usage_extra_resolver, not both -- "
+                "one of the two would be silently discarded."
+            )
+        # Validated before the unlimited short-circuit below, not alongside the
+        # count. A misrouted key on an organization with no ceiling would
+        # otherwise never be reported, and "every organization is unlimited" is
+        # the ordinary state of a rollout -- exactly when a call site is new and
+        # most likely to be wrong.
+        _validate_usage_extra(resource_key, usage_extra)
+
         root = resolve_billing_root(organization)
         if lock:
             self._lock_billing_root_row(root)
@@ -589,6 +658,11 @@ class EntitlementService:
 
         # Narrowed by the ``is_unlimited`` return above: limit_value is not None here.
         ceiling = effective_limit.limit_value or 0
+        if usage_extra_resolver is not None:
+            # Past the unlimited return, so the resolver's cost is only paid
+            # where the count it feeds is actually read. Called exactly once.
+            usage_extra = usage_extra_resolver()
+            _validate_usage_extra(resource_key, usage_extra)
         current_usage = self._count_usage(root, resource_key, subscription, usage_extra=usage_extra)
         allowed = current_usage + delta <= ceiling
         return LimitCheckResult(

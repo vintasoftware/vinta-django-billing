@@ -88,12 +88,16 @@ resources.register(
     kind=LimitKind.PREPAID,
     counter=count_seats,
     remedy=LimitRemedy.UPGRADE_PLAN,
+    # The `usage_extra` keys `count_seats` reads. Optional; see below.
+    usage_extra_keys={"exclude_invitation_id"},
 )
 resources.register(
     "events",
     label=_("Events"),
     kind=LimitKind.POSTPAID,
     counter=count_metered_occurrences,
+    # Reads nothing per call, and says so.
+    usage_extra_keys=frozenset(),
 )
 
 entitlements.register("white_label", label=_("White-label branding"))
@@ -121,6 +125,22 @@ Registering a resource never asks for a migration: the fields storing resource
 keys take their `choices` by callable reference, so the migration state does not
 change when the registry does.
 
+### Per-call data, and declaring it
+
+A counter that needs something the call site knows — "the invitation currently
+being accepted, which must not be double-counted" — reads it out of
+`UsageContext.extra`, which the caller fills through `usage_extra`. The engine
+never reads the values.
+
+It does check the keys, but only if you asked it to. `usage_extra_keys` names
+what a counter reads; omit it and nothing is checked, which is how every
+registration behaved before 0.4.0. Declare it — on **every** resource, including
+the ones that read nothing, as `frozenset()` — and a key aimed at the wrong
+resource raises `InapplicableUsageExtraError` instead of being ignored. That is
+worth doing because the mistake is otherwise invisible: a counter that does not
+read a key ignores it, so the caller gets a count computed as though they had
+passed nothing and no part of the answer says so.
+
 ## Enforce a limit
 
 ```python
@@ -143,6 +163,22 @@ Three rules the engine holds to, and which are easy to break by accident:
 2. **Usage pools at the billing root.** A child organization's usage counts
    against its root's ceiling, together with the rest of the subtree.
 3. **Counting and checking are inseparable under concurrency.** See `lock`.
+
+When the per-call data your counter needs is itself a query, pass
+`usage_extra_resolver` rather than `usage_extra`:
+
+```python
+result = get_entitlement_service().check_limit(
+    organization,
+    "seats",
+    usage_extra_resolver=lambda: {"exclude_invitation_id": find_the_invitation()},
+)
+```
+
+It is called at most once, and only once the ceiling is known to be finite — so
+an organization on an unlimited plan, which skips counting entirely, never pays
+for the query. Pass one or the other, never both. `check_postpaid_allowance`'s
+`delta_resolver` is the same idea for a delta that costs a query to work out.
 
 ## Configure the seams
 
@@ -266,6 +302,43 @@ urlpatterns = [
     path("api/", include(billing_router().urls)),
     *get_extra_patterns(),
 ]
+```
+
+Mount **both halves**. The endpoints a router cannot express — the singleton
+payment-provider reads, and the two inbound provider webhooks, which carry the
+provider slug in the URL — come from `get_extra_patterns()`, not from the
+router. Drop it and you have no webhooks, so no provider callback ever arrives.
+
+Already have a router? `register_routes(your_router)` puts the shipped viewsets
+on it. Either way the router's own mode is respected: nothing here assumes the
+regex form, so a `DefaultRouter(use_regex_path=False)` works as well as the
+default, and `billing_router(use_regex_path=False)` builds one. If your router
+was built with `trailing_slash=False`, pass the same to
+`get_extra_patterns(trailing_slash=False)` — those patterns do not come out of
+the router and cannot read the choice off it.
+
+Every service the viewsets use defaults through
+`vinta_billing.services.container`. Pass your own to the constructor
+(`entitlement_service=`, `payment_service=`, `subscription_service=`,
+`dunning_service=`, `payment_provider_resolver=`) if you run your own DI
+container; leave them out and the container supplies them.
+
+The shipped viewsets throttle their write and unauthenticated endpoints through
+three `ScopedRateThrottle` scopes, and DRF raises `ImproperlyConfigured` for a
+scope with no configured rate — so all three need one, or those endpoints answer
+500 instead of throttling. The numbers are yours to pick:
+
+```python
+REST_FRAMEWORK = {
+    "DEFAULT_THROTTLE_RATES": {
+        # Inbound provider callbacks.
+        "payment-webhook": "120/min",
+        # The unauthenticated provider read.
+        "payment-provider": "60/min",
+        # Plan changes, payment retries, add-on purchases.
+        "billing-write": "30/min",
+    },
+}
 ```
 
 ## Development
