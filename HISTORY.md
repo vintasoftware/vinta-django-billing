@@ -1,5 +1,123 @@
 # History
 
+## 0.5.0
+
+Another release driven by the host application migrating onto this package, and
+this time what it found first was an authorization bypass. Everything else here
+is what stood between that project and deleting its own copy of the REST layer.
+
+- **SECURITY: the object-level billing permission decided nothing, and a child
+  organization's administrator could act on a reseller root's billing.** This
+  affects 0.3.0 and 0.4.0, and upgrading is the fix -- there is no configuration
+  that closes it. `IsBillingManager.has_object_permission` read
+  `getattr(obj, "organization", None)` and, finding nothing, fell back to
+  `has_permission` -- the *request*-level check, which the caller has by
+  definition already passed. Every object-level check the shipped viewsets make
+  passes a billing root, and a billing root is an `Organization`, which has no
+  `organization` field. So all three of them -- `MeteredOccurrenceViewSet.list`,
+  `SubscriptionViewSet.get_subscription`, `AddOnViewSet.create`, each with a
+  comment calling this "the real gate" -- degraded to the coarse one. An
+  administrator of a child organization that bills against a reseller root it
+  holds no membership in could change that root's plan, cancel its
+  subscription, buy add-ons charged to its payment method, and read the whole
+  pooled subtree's usage. The check now asks the predicate about the object
+  itself when the object is an organization (tested against
+  `vinta_orgs.models.AbstractOrganization`, so it holds under a swapped
+  `ORGANIZATION_MODEL`), and is unchanged for every genuinely
+  organization-scoped row. Whatever `BILLING_MANAGER_PREDICATE` names is what
+  answers, so a project that configured a predicate needs no further change; a
+  project on the permissive default gets "a member of that root" as the answer.
+  The defect survived two releases because the suite tested the permission class
+  in isolation, by handing `has_object_permission` an object it had built
+  itself, and never sent a request through a mounted viewset to see what the
+  class did with a real one. `tests/test_viewset_permissions.py` does that now,
+  against all five root-gated endpoints, and before this fix five of them
+  answered 200 or 400 to a caller they were supposed to refuse -- `cancel`
+  answered 200, having genuinely cancelled another organization's subscription.
+- **Stripe subscription charges resolved no payment at all, so nobody's dunning
+  ever cleared.** `stripe.Invoice` has a `payments` field and has never had a
+  `billing` one, and this adapter expanded `latest_invoice.payments` and then
+  read `latest_invoice.billing` off the result -- as did the invoice-scoped
+  lookup, which expanded `billing` too. Reading a field that does not exist
+  returns nothing rather than raising, so
+  `get_payment_external_id_from_subscription_payload` and
+  `_get_payment_external_id_from_invoice` returned `None` for every Stripe
+  subscription charge there has ever been. An `invoice.paid` webhook then
+  matched no payment, the subscription was never taken out of grace, and a
+  customer whose card had gone through kept being dunned toward suspension. Both
+  call sites read `payments` now, which is what the surrounding docstrings said
+  all along -- the rename looks like an over-eager search and replace during the
+  extraction. The correct chain is
+  `latest_invoice.payments.data[N].payment.payment_intent`, and the suite now
+  pins each field of it against `stripe.Invoice.__annotations__` and
+  `stripe.InvoicePayment.Payment.__annotations__` rather than against a
+  remembered name, plus a guard that no call site in that module reads an
+  invoice field the installed SDK does not have. Nothing to do on upgrade beyond
+  taking it: a project on 0.3.0 or 0.4.0 charging through Stripe has
+  subscriptions sitting in `grace`/`restricted` that were paid for, and their
+  next successful webhook now resolves.
+- **The package ships `py.typed`.** It was fully annotated and ran mypy in its
+  own gate, but shipped no PEP 561 marker, so a consumer had to add it to
+  `ignore_missing_imports` -- which makes every name in it `Any`. That is worse
+  than untyped for a project re-exporting these models: a star re-export from an
+  `Any` module re-exports nothing, and the host counted 565 extra errors from
+  it, 655 of them `[attr-defined]` on names that plainly exist. The marker is in
+  the wheel and the sdist. If you added `vinta_billing` to
+  `ignore_missing_imports`, remove that entry -- while it is there the
+  annotations are still thrown away.
+- **`VINTA_BILLING['VIEW_MIXIN']` and `VINTA_BILLING['SERVICE_CONTAINER']`: the
+  shipped routes can be mounted by a project that has its own tenancy and its
+  own DI.** 0.4.0 made `get_routes()` mountable; it did not make it *usable* by
+  a project whose DRF surface resolves the acting organization its own way, or
+  whose services come out of its own container. Such a project had to restate
+  the whole REST layer -- one subclass per viewset, plus its own route table --
+  to change those two things, which is exactly what the host was still doing.
+  Both are settings now. `VIEW_MIXIN` names a mixin that is mixed in *front* of
+  every tenant-scoped viewset these routes mount (the plan catalogue and the two
+  provider webhooks are left alone -- one answers the same for everybody, the
+  others are authenticated by a provider signature). `SERVICE_CONTAINER` names
+  the module or object the views and the admin build their services from: the
+  service called `payment_service` is looked up as
+  `container.get_payment_service()` when that exists and
+  `container.payment_service()` otherwise, the second spelling being what a
+  `dependency_injector` container offers, so one can be pointed at directly.
+  Both default to today's behaviour, and by identity rather than by
+  equivalence: `VIEW_MIXIN` defaults to the very mixin those viewsets already
+  inherit, so `apply_view_mixin` hands back the same class objects and a project
+  that configures nothing mounts what it always did; `SERVICE_CONTAINER`
+  defaults to `vinta_billing.services.container`, which is where every one of
+  those call sites already went. Passing a service to a viewset's constructor
+  still wins over both. `vinta_billing.view_mixins.apply_view_mixin` and
+  `vinta_billing.services.container.resolve_service` are public, for a project
+  that wants to do either by hand.
+- **`TenantScopedViewMixin` composes with a mixin in front of it, and stops
+  stamping a lazy nothing onto the request.** Its `initial()` used to assign
+  whatever `resolve_organization` returned, which broke both ways. A project
+  mixin in front spells `resolve_organization` too --
+  `vinta_orgs.drf.OrganizationScopedAPIViewMixin` does -- and means the opposite
+  by it: it *assigns* `request.organization` and returns `None`. Its method wins
+  on name resolution, so the returned `None` landed on top of the organization
+  it had just resolved and every billing endpoint answered 403. Resolution moved
+  into `resolve_request_organization`, which reads what is already on the
+  request first, asks `resolve_organization` second, and reads the request again
+  before believing a `None` -- so a project mixin needs no adapter, and its
+  resolution runs once rather than twice. The same method now normalizes a
+  falsy result to a real `None`: under `OrganizationMiddleware` an unresolved
+  organization arrives as a `SimpleLazyObject` wrapping `None`, which is not
+  `None` by identity, so every `is None` check downstream -- including the
+  fail-closed branch in `filter_queryset_by_organization` -- read it as an
+  organization and a request that should have been refused went on to build a
+  query against it. `resolve_organization` itself is unchanged, and a project
+  that overrode it is unaffected.
+- **`BillingProfileAdmin.save_model` can complete a provider repoint again.** It
+  took a `subscription_service` argument that nothing ever passed -- Django
+  calls `save_model(request, obj, form, change)` -- and raised `RuntimeError`
+  when it was missing, so every audited repoint made through the admin failed,
+  in the one place a staff member is meant to be able to make one. It resolves
+  the service through `SERVICE_CONTAINER` now, the same fallback 0.4.0 gave the
+  viewsets and the only call site that had been left without it. The keyword
+  still wins, for a subclass that hands its own service over.
+
 ## 0.4.0
 
 Everything in this release came out of a host application migrating its own
