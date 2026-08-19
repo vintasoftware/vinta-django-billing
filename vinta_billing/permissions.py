@@ -92,6 +92,13 @@ class IsBillingManager(BasePermission):
 
     Resolves the organization from the request the same way the tenant-scoped
     view mixin does, then defers to the configured predicate.
+
+    The object-level check answers the same question about the object instead
+    of about the request -- about the object's own ``organization`` for an
+    organization-scoped row, and about the object itself when it *is* an
+    organization, which is what every object-level check the shipped viewsets
+    make passes (the resolved billing root). See
+    :meth:`has_object_permission`.
     """
 
     message = "You do not have permission to manage this organization's billing."
@@ -103,10 +110,30 @@ class IsBillingManager(BasePermission):
         return may_manage_billing(request.user, organization)
 
     def has_object_permission(self, request: Request, view: APIView, obj: Any) -> bool:
-        # Objects in this app are organization-scoped, so the object-level check
-        # is the same question asked about the object's own organization --
-        # which stops a correctly-scoped user from reaching another tenant's row
-        # through a guessed URL.
+        # An organization *is* the object every one of this package's own
+        # object-level checks passes: `MeteredOccurrenceViewSet.list`,
+        # `SubscriptionViewSet.get_subscription` and `AddOnViewSet.create` all
+        # hand over the resolved billing root, because "may this caller act on
+        # this root's billing?" is what those actions actually need answered.
+        # An organization has no `organization` field, so reading one off it
+        # found nothing and dropped through to `has_permission` -- the
+        # request-level check, taken against the organization the *request*
+        # resolved, which the caller had already passed. The gate those call
+        # sites call "the real gate" therefore decided nothing at all, and an
+        # administrator of a child organization could change a reseller root's
+        # plan, cancel its subscription and buy add-ons billed to it.
+        #
+        # Asked of `AbstractOrganization`, not of the concrete class
+        # `get_organization_model()` returns: a project that swapped
+        # `ORGANIZATION_MODEL` has an organization model of its own, and the
+        # abstract base is the one thing every such model inherits.
+        if isinstance(obj, AbstractOrganization):
+            return may_manage_billing(request.user, obj)
+
+        # Everything else in this app is organization-scoped, so the
+        # object-level check is the same question asked about the object's own
+        # organization -- which stops a correctly-scoped user from reaching
+        # another tenant's row through a guessed URL.
         organization = getattr(obj, "organization", None)
         if organization is None:
             return self.has_permission(request, view)
