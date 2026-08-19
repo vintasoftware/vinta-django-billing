@@ -208,6 +208,12 @@ VINTA_BILLING = {
     "METERED_RESOURCE_KEY": "events",
     # How a sweep hands each per-subscription job over. Default: run it inline.
     "JOB_DISPATCHER": "myproject.billing.enqueue",
+    # How your DRF surface resolves the acting organization, and where the
+    # shipped views build their services. Defaults: this package's own mixin
+    # and its own container. See "Mounting the routes in a project that has its
+    # own tenancy and its own DI" below.
+    "VIEW_MIXIN": "myproject.api.TenantScopedViewMixin",
+    "SERVICE_CONTAINER": "myproject.di.container",
     # Per-provider credentials. A provider absent here stays registered -- its
     # inbound webhook route keeps resolving -- but every outbound call site
     # refuses it rather than authenticating with an empty credential.
@@ -270,6 +276,14 @@ Both read the organization-scoped grant alone (`vinta_orgs.authorization`), neve
 ancestor of the bound organization, and `has_perm` would answer for the bound
 one, union in the user's global permissions, and say yes to every superuser.
 
+Your predicate answers the object-level question too. `IsBillingManager` asks it
+about the request's organization for the coarse gate, and about the object for
+the object-level one — about that object's `organization` for a billing row, and
+about the object itself when it *is* an organization, which is what the write
+actions pass (the resolved billing root). So a predicate reading "a member of
+this organization holding the grant" is also what refuses a child
+organization's administrator on a reseller root's plan.
+
 ### Organization hierarchies
 
 `vinta-django-orgs`' organization model has a name and a slug and nothing else,
@@ -324,11 +338,48 @@ was built with `trailing_slash=False`, pass the same to
 `get_extra_patterns(trailing_slash=False)` — those patterns do not come out of
 the router and cannot read the choice off it.
 
-Every service the viewsets use defaults through
-`vinta_billing.services.container`. Pass your own to the constructor
+### Mounting the routes in a project that has its own tenancy and its own DI
+
+Two things a project usually owns are what stopped these routes from being
+mounted as they are: how a request says which organization it is acting on, and
+where services come from. Both are settings now, and both default to what this
+package did before they existed — so a project that configures neither mounts
+exactly the classes, and builds them from exactly the container, that it always
+did.
+
+```python
+VINTA_BILLING = {
+    # Mixed in *front* of every tenant-scoped viewset these routes mount, so
+    # your resolution runs first and this package reads what it left on the
+    # request. Default: "vinta_billing.view_mixins.TenantScopedViewMixin",
+    # which those viewsets already inherit — so the default mixes in nothing.
+    "VIEW_MIXIN": "myproject.api.TenantScopedViewMixin",
+    # Where the shipped views and the admin build their services. Names a
+    # module or an object; the service called `payment_service` is looked up as
+    # `container.get_payment_service()` when that exists and
+    # `container.payment_service()` otherwise — the second being what a
+    # `dependency_injector` container offers, so point this straight at yours.
+    # Default: "vinta_billing.services.container".
+    "SERVICE_CONTAINER": "myproject.di.container",
+}
+```
+
+`VIEW_MIXIN` reaches the tenant-scoped viewsets only. The plan catalogue answers
+the same for every caller, and the two inbound provider webhooks are
+authenticated by a provider signature rather than by a member of anything;
+neither takes your scoping.
+
+Your mixin may resolve the organization the way DRF mixins usually do — in
+`perform_authentication`, *assigning* `request.organization` and returning
+`None`, which is `vinta_orgs.drf.OrganizationScopedAPIViewMixin`'s shape. Both
+mixins then spell `resolve_organization` and yours wins on name resolution, so
+this package reads the request rather than taking that `None` at face value. No
+adapter of your own is needed for it.
+
+Passing a service to a viewset's constructor still wins over the container
 (`entitlement_service=`, `payment_service=`, `subscription_service=`,
-`dunning_service=`, `payment_provider_resolver=`) if you run your own DI
-container; leave them out and the container supplies them.
+`dunning_service=`, `payment_provider_resolver=`), so a project that injects
+them by hand today is unaffected by `SERVICE_CONTAINER`.
 
 The shipped viewsets throttle their write and unauthenticated endpoints through
 three `ScopedRateThrottle` scopes, and DRF raises `ImproperlyConfigured` for a

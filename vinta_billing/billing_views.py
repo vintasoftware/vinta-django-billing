@@ -63,10 +63,7 @@ from vinta_billing.serializers import (
     SubscriptionSerializer,
     UsageResponseSerializer,
 )
-from vinta_billing.services.container import (
-    get_entitlement_service,
-    get_subscription_service,
-)
+from vinta_billing.services.container import resolve_service
 from vinta_billing.services.subscription_service import (
     current_billing_period_start,
     resolve_billing_period,
@@ -157,14 +154,17 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        # Resolved from `vinta_billing.services.container` when the caller passes
-        # nothing, so `as_view()` -- which DRF's routers call with no way to
-        # supply a constructor argument -- can build this view at all. A project
-        # running its own DI container keeps passing the service explicitly and
-        # never reaches the factory. Resolved here rather than at import time:
-        # the factory builds a service that reads `VINTA_BILLING` and the app
-        # registry, neither of which is ready while this module is importing.
-        self.entitlement_service = entitlement_service or get_entitlement_service()
+        # Resolved through `VINTA_BILLING['SERVICE_CONTAINER']` when the caller
+        # passes nothing, so `as_view()` -- which DRF's routers call with no way
+        # to supply a constructor argument -- can build this view at all. That
+        # setting defaults to this package's own container, and a project
+        # running its own points it there instead, so the shipped routes can be
+        # mounted as they are and still build the project's services. Passing
+        # the service explicitly still wins over both. Resolved here rather than
+        # at import time: the factory builds a service that reads
+        # `VINTA_BILLING` and the app registry, neither of which is ready while
+        # this module is importing.
+        self.entitlement_service = entitlement_service or resolve_service("entitlement_service")
 
     @extend_schema(summary="Get current usage against effective limits", request=None)
     @action(methods=["get"], detail=False, url_path="", url_name="retrieve")
@@ -363,14 +363,17 @@ class BillingPeriodViewSet(
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        # Resolved from `vinta_billing.services.container` when the caller passes
-        # nothing, so `as_view()` -- which DRF's routers call with no way to
-        # supply a constructor argument -- can build this view at all. A project
-        # running its own DI container keeps passing the service explicitly and
-        # never reaches the factory. Resolved here rather than at import time:
-        # the factory builds a service that reads `VINTA_BILLING` and the app
-        # registry, neither of which is ready while this module is importing.
-        self.entitlement_service = entitlement_service or get_entitlement_service()
+        # Resolved through `VINTA_BILLING['SERVICE_CONTAINER']` when the caller
+        # passes nothing, so `as_view()` -- which DRF's routers call with no way
+        # to supply a constructor argument -- can build this view at all. That
+        # setting defaults to this package's own container, and a project
+        # running its own points it there instead, so the shipped routes can be
+        # mounted as they are and still build the project's services. Passing
+        # the service explicitly still wins over both. Resolved here rather than
+        # at import time: the factory builds a service that reads
+        # `VINTA_BILLING` and the app registry, neither of which is ready while
+        # this module is importing.
+        self.entitlement_service = entitlement_service or resolve_service("entitlement_service")
 
     def get_serializer_class(self) -> type[BaseSerializer]:
         if self.action == "retrieve":
@@ -462,14 +465,17 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        # Resolved from `vinta_billing.services.container` when the caller passes
-        # nothing, so `as_view()` -- which DRF's routers call with no way to
-        # supply a constructor argument -- can build this view at all. A project
-        # running its own DI container keeps passing the service explicitly and
-        # never reaches the factory. Resolved here rather than at import time:
-        # the factory builds a service that reads `VINTA_BILLING` and the app
-        # registry, neither of which is ready while this module is importing.
-        self.entitlement_service = entitlement_service or get_entitlement_service()
+        # Resolved through `VINTA_BILLING['SERVICE_CONTAINER']` when the caller
+        # passes nothing, so `as_view()` -- which DRF's routers call with no way
+        # to supply a constructor argument -- can build this view at all. That
+        # setting defaults to this package's own container, and a project
+        # running its own points it there instead, so the shipped routes can be
+        # mounted as they are and still build the project's services. Passing
+        # the service explicitly still wins over both. Resolved here rather than
+        # at import time: the factory builds a service that reads
+        # `VINTA_BILLING` and the app registry, neither of which is ready while
+        # this module is importing.
+        self.entitlement_service = entitlement_service or resolve_service("entitlement_service")
 
     def get_queryset(self) -> QuerySet[MeteredOccurrence]:
         organization = _require_organization(self.request)
@@ -588,7 +594,7 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
         super().__init__(*args, **kwargs)
         # See `BillingUsageViewSet.__init__` for why this defaults through the
         # container instead of demanding an injected service.
-        self.subscription_service = subscription_service or get_subscription_service()
+        self.subscription_service = subscription_service or resolve_service("subscription_service")
 
     def get_permissions(self):
         if self.action in self.write_actions:
@@ -807,7 +813,7 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
         super().__init__(*args, **kwargs)
         # See `BillingUsageViewSet.__init__` for why this defaults through the
         # container instead of demanding an injected service.
-        self.subscription_service = subscription_service or get_subscription_service()
+        self.subscription_service = subscription_service or resolve_service("subscription_service")
 
     def get_throttles(self):
         if self.action in self.write_actions:

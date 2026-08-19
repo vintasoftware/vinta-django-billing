@@ -125,6 +125,33 @@ _DEFAULTS: dict[str, Any] = {
     # False, so every outbound call site refuses it loudly instead of
     # authenticating with an empty credential.
     "PROVIDERS": {},
+    # Mixed in front of every tenant-scoped viewset this package mounts. The
+    # default is this package's own mixin, which every one of those viewsets
+    # already inherits -- so the default changes nothing and `get_routes()`
+    # hands back the very classes it always did.
+    #
+    # A project whose DRF surface resolves the acting organization its own way
+    # (a header its clients already send, a URL segment, a membership lookup
+    # its own refusal bodies are written against) points this at its mixin
+    # instead, and mounts the shipped routes as they are rather than
+    # subclassing seven viewsets to mix it in by hand. See
+    # `vinta_billing.view_mixins.apply_view_mixin` for what "in front of"
+    # means and what it does about the method name both mixins spell.
+    "VIEW_MIXIN": "vinta_billing.view_mixins.TenantScopedViewMixin",
+    # Where the shipped views and the admin get their services. Names either a
+    # module or an object; either way the lookup for `payment_service` is
+    # `container.get_payment_service()` if that exists and `container
+    # .payment_service()` otherwise -- the second spelling being what a
+    # `dependency_injector` container offers, so one can be pointed at
+    # directly.
+    #
+    # The default is this package's own container module, which is right for a
+    # project that runs no DI framework and is what every call site fell back
+    # to before this setting existed. A project that *does* run a container
+    # points this at it, and its own factories -- and anything a test
+    # overrode on them -- are what the shipped views build. Passing a service
+    # to a viewset's constructor still wins over both.
+    "SERVICE_CONTAINER": "vinta_billing.services.container",
     # Which provider governs an organization's charges when its billing profile
     # carries no pin of its own. Empty rather than a guess at "stripe": a
     # library must not pick which payment processor a project charges through.
