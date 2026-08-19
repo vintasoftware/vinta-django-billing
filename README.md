@@ -44,6 +44,16 @@ INSTALLED_APPS = [
     "vinta_orgs.apps.OrganizationsConfig",  # vinta-django-orgs
     "vinta_billing.apps.BillingConfig",
 ]
+
+MIDDLEWARE = [
+    ...,
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # After `AuthenticationMiddleware`. `vinta-django-orgs` refuses an
+    # organization the caller holds no active membership in, and it needs
+    # `request.user` to do that; placed earlier the check silently does nothing.
+    # Its `vinta_orgs.W001` system check reports the wrong order.
+    "vinta_orgs.middleware.OrganizationMiddleware",
+]
 ```
 
 ## Register what you bill for
@@ -94,13 +104,18 @@ A counter takes a [`UsageContext`](vinta_billing/counting.py) and returns
 mapping rather than present with a zero — `GROUP BY` never emits a row for them,
 and `count_by_organization` preserves that.
 
-> **Read through the unscoped manager.** On a model using
-> `SingleOrganizationModelMixin`, count through `Model.original_manager`, never
-> `Model.objects`. Usage pools across a whole billing subtree, so a counter is
-> asked about several organizations at once and must not be narrowed to whichever
-> one is bound to the current context. In a background sweep nothing is bound at
-> all, and the scoped manager reports zero for everybody — every ceiling silently
-> reads as empty.
+> **Read unscoped.** On a model using `SingleOrganizationModelMixin`, count
+> through `Model.objects.unscoped()` or `Model.original_manager`, never the
+> scoped default manager. Usage pools across a whole billing subtree, so a
+> counter is asked about several organizations at once and must not be narrowed
+> to whichever one is bound to the current context — `organization_id__in` is
+> the tenant boundary here, and it is the counter's own filter.
+>
+> In a background sweep nothing is bound at all, and a scoped read then depends
+> on `vinta-django-orgs`' `STRICT_ORGANIZATION_FILTER`: `True` (its default since
+> 0.3) raises `OrganizationNotFoundError` and the sweep dies; `False` reports
+> zero for everybody and every ceiling silently reads as empty. Neither is a
+> counter you want.
 
 Registering a resource never asks for a migration: the fields storing resource
 keys take their `choices` by callable reference, so the migration state does not
@@ -140,6 +155,9 @@ VINTA_BILLING = {
     "HIERARCHY": "myproject.billing.ResellerHierarchy",
     # Who may see and change billing. Default: any member of the organization.
     "BILLING_MANAGER_PREDICATE": "myproject.billing.is_billing_owner",
+    # Who hears about a failed charge or an approaching limit. Default: every
+    # member of the organization.
+    "BILLING_RECIPIENTS": "myproject.billing.owners_and_admins",
     # Where dunning and warning messages go. Default: log and drop.
     "NOTIFIER": "myproject.billing.Notifier",
     # What the meter bills. Default: the single registered postpaid resource.
@@ -182,6 +200,32 @@ Over-limit and declined-charge errors render as `402`, subscription-state
 conflicts as `409`, and a provider this deployment holds no credential for as
 `503` — see [`vinta_billing/exception_handling.py`](vinta_billing/exception_handling.py) for
 the table.
+
+### Who may manage billing
+
+Both seams above default to *every member*: the most permissive answer that is
+still tenant-safe, so the shipped endpoints work before anything is wired.
+
+If your project expresses roles as `vinta-django-orgs` organization permissions,
+`Subscription` declares a codename to grant — `vinta_billing.manage_billing` —
+and this package ships both halves of the question already written against it:
+
+```python
+VINTA_BILLING = {
+    "BILLING_MANAGER_PREDICATE": "vinta_billing.permissions.member_holding_manage_billing",
+    "BILLING_RECIPIENTS": "vinta_billing.recipients.members_holding_manage_billing",
+}
+```
+
+Nothing here grants the permission, so **select these only once a group carries
+it**. Until then the predicate 403s every billing endpoint and, worse, the
+recipient resolver returns nobody — which turns the dunning ladder into a
+suspension the payer was never warned about.
+
+Both read the organization-scoped grant alone (`vinta_orgs.authorization`), never
+`user.has_perm`: billing is routinely read against a reseller **root** that is an
+ancestor of the bound organization, and `has_perm` would answer for the bound
+one, union in the user's global permissions, and say yes to every superuser.
 
 ### Organization hierarchies
 

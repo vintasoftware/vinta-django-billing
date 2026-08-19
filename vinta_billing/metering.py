@@ -25,6 +25,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from vinta_billing.conf import get_object_from_setting
+
 
 @dataclass(frozen=True)
 class Occurrence:
@@ -88,8 +90,6 @@ class NullOccurrenceSource:
 
 def get_occurrence_source() -> OccurrenceSource:
     """The configured source, or the null one when the project set none."""
-    from vinta_billing.conf import get_object_from_setting
-
     source = get_object_from_setting("OCCURRENCE_SOURCE")
     if source is None:
         return NullOccurrenceSource()

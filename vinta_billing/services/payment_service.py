@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Generic, TypeVar
 
 from django.db import transaction
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import (
     BillingInterval,
@@ -205,7 +205,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
 
     def create_payment(
         self,
-        organization: Organization,
+        organization: AbstractOrganization,
         currency: str,
         amount: Decimal,
         description: str,
@@ -216,7 +216,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         try:
             billing_profile = organization.billing_profile
         except BillingProfileModel.DoesNotExist as e:
-            raise ValueError("Organization does not have a billing profile") from e
+            raise ValueError("AbstractOrganization does not have a billing profile") from e
 
         # New row: resolve from the organization -- its pin when set, the system
         # default otherwise -- never from any existing row. Resolved (and the
@@ -649,7 +649,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
 
     def create_subscription(
         self,
-        organization: Organization,
+        organization: AbstractOrganization,
         plan: BillingPlanModel,
         current_period_start: datetime.datetime,
         current_period_end: datetime.datetime,

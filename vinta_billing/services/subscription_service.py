@@ -7,7 +7,7 @@ from dateutil.relativedelta import relativedelta
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing import hierarchy
 from vinta_billing.conf import get_setting
@@ -40,13 +40,13 @@ from vinta_billing.models import (
 from vinta_billing.services.billing_state_machine import transition_billing_state
 from vinta_billing.services.dataclasses import CreatedPlan, Plan
 from vinta_billing.services.dunning_service import is_downgrade_grace
+from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 from vinta_billing.signals import payment_provider_repointed
 
 
 if TYPE_CHECKING:
     from django.contrib.auth.models import AbstractBaseUser
 
-    from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
     from vinta_billing.services.payment_service import PaymentService
 
 
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 MAX_BILLING_PERIOD_STEPS = 1200
 
 
-def is_billing_root(organization: Organization) -> bool:
+def is_billing_root(organization: AbstractOrganization) -> bool:
     """True when ``organization`` holds its own ``Subscription`` rather than
     pooling against an ancestor's.
 
@@ -78,7 +78,7 @@ def billing_root_filter() -> Q:
     return hierarchy.get_hierarchy().billing_root_q()
 
 
-def resolve_billing_root(organization: Organization) -> Organization:
+def resolve_billing_root(organization: AbstractOrganization) -> AbstractOrganization:
     """The organization whose ``Subscription`` pays for ``organization``.
 
     Delegates to the configured hierarchy strategy, which owns the walk and its
@@ -302,13 +302,12 @@ class SubscriptionService:
         every later provider resolution for the subscription -- so hardcoding it
         here would make the organization's own pin inert.
 
-        Both default to the ones this package ships, resolved lazily so a bare
-        ``SubscriptionService()`` works. Passing either still wins, which is what
-        a project running its own container, and every test with a double, relies
-        on.
+        Both default to the ones this package ships -- the resolver here, the
+        payment service on first use (see ``_require_payment_service``) -- so a
+        bare ``SubscriptionService()`` works. Passing either still wins, which is
+        what a project running its own container, and every test with a double,
+        relies on.
         """
-        from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
-
         self.payment_service = payment_service
         self.payment_provider_resolver = payment_provider_resolver or PaymentProviderResolver()
 
@@ -321,6 +320,11 @@ class SubscriptionService:
         bookkeeping) never touches a provider at all.
         """
         if self.payment_service is None:
+            # Late by necessity, not by style: ``container`` imports every service
+            # at module scope (it is the composition root), so a module-scope import
+            # back into it here closes a cycle and fails at import time with a
+            # partially initialized module. Deferring to first use is what keeps
+            # the default wiring available without that cycle.
             from vinta_billing.services.container import get_payment_service
 
             self.payment_service = get_payment_service()
@@ -330,7 +334,7 @@ class SubscriptionService:
         return self.payment_provider_resolver
 
     def create_subscription_for_organization(
-        self, organization: Organization, plan: BillingPlan | None = None
+        self, organization: AbstractOrganization, plan: BillingPlan | None = None
     ) -> Subscription | None:
         """Create ``organization``'s ``Subscription`` (+ its ``SubscriptionPlanLimit``
         / ``SubscriptionEntitlement`` copies), unless ``organization`` is a reseller
@@ -584,7 +588,7 @@ class SubscriptionService:
         # `set_payment_provider`, or a `DEFAULT_PROVIDER` change, reach
         # a subscription that was stamped before any `BillingProfile` pin
         # existed -- `create_subscription_for_organization` runs from the
-        # `Organization` post-save signal, before a `BillingProfile` can exist.
+        # `AbstractOrganization` post-save signal, before a `BillingProfile` can exist.
         # Once `external_id` is non-empty, the row carries live provider state
         # and must not move -- Rule A applies unchanged from here on.
         if not subscription.external_id:
@@ -1266,7 +1270,7 @@ class SubscriptionService:
         return add_on
 
     def record_payment_method(
-        self, organization: Organization, provider: str, external_id: str
+        self, organization: AbstractOrganization, provider: str, external_id: str
     ) -> PaymentMethod | None:
         """Record that ``organization`` (its billing root) has a confirmed,
         chargeable payment instrument on file with ``provider``.
@@ -1344,7 +1348,7 @@ class SubscriptionService:
                     billing_profile.refresh_from_db(fields=["payment_provider"])
                     if billing_profile.payment_provider != provider:
                         logger.warning(
-                            "Organization %s confirmed a payment method at provider %s but "
+                            "AbstractOrganization %s confirmed a payment method at provider %s but "
                             "is already pinned to %s; leaving the existing pin in place.",
                             organization.pk,
                             provider,
@@ -1353,7 +1357,10 @@ class SubscriptionService:
         return payment_method
 
     def set_payment_provider(
-        self, organization: Organization, provider: str, actor: "AbstractBaseUser | None" = None
+        self,
+        organization: AbstractOrganization,
+        provider: str,
+        actor: "AbstractBaseUser | None" = None,
     ) -> BillingProfile:
         """Staff repoint lever: pin ``organization``'s ``BillingProfile`` to
         ``provider``, overwriting whatever it was pinned to before (including a
@@ -1363,15 +1370,13 @@ class SubscriptionService:
         it is the explicit escape hatch for moving an organization's *future*
         charges onto a different provider. Callers are Django admin (see
         ``vinta_billing.admin.BillingProfileAdmin``) or an operator running this by
-        hand; there is no end-user-facing API surface for it (see the plan's
-        **Pin mutability** guiding decision).
+        hand; there is no end-user-facing API surface for it.
 
         ``provider=""`` is a legitimate un-pin, not an error: an empty string is
         what the admin's ``<select>`` submits when a staff member clears the
-        field, and the plan's **Pin mutability** decision treats a staff repoint
-        (including back to "unset") as a deliberate action, not a slug to
-        validate against the provider registry. Any other value must still name
-        a real, configured provider.
+        field, and a staff repoint (including back to "unset") is a deliberate
+        action, not a slug to validate against the provider registry. Any other
+        value must still name a real, configured provider.
 
         Deliberately carries **no active-subscription guard**: this succeeds
         even when the organization holds a live ``Subscription`` at the old

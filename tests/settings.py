@@ -38,10 +38,15 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "vinta_orgs.middleware.OrganizationMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # After `AuthenticationMiddleware`, which `vinta_orgs.W001` checks for: from
+    # `vinta-django-orgs` 0.3 the middleware refuses an organization the caller
+    # holds no active membership in, and it needs `request.user` to do that.
+    # Placed earlier, the check silently does nothing and any authenticated
+    # caller can select any tenant by naming its slug.
+    "vinta_orgs.middleware.OrganizationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
 

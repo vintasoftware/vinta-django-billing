@@ -1,5 +1,39 @@
 # History
 
+## Unreleased
+
+- Requires `vinta-django-orgs>=0.5,<0.6`, up from `>=0.2,<0.3`. Three of the
+  intervening minors carried a breaking change, and the host applications this
+  package is built for have already moved:
+  - `vinta_orgs.state`'s module-level organization-context functions were deleted
+    in 0.4 in favour of a class-specialized `OrganizationState`. Resolving the
+    acting organization now goes through `vinta_billing.utils
+    .get_organization_state()`, which binds the base class to the configured
+    `ORGANIZATION_MODEL` -- the typed project-specific subclass is exactly what a
+    library cannot declare.
+  - Public signatures that annotated an organization as the concrete
+    `vinta_orgs.Organization` now say `AbstractOrganization`, matching what 0.4
+    did to the same signatures upstream. Under a swapped `ORGANIZATION_MODEL` the
+    old annotation named a class the instances were never of.
+  - `STRICT_ORGANIZATION_FILTER` defaults to `True` from 0.3, which changes how a
+    usage counter fails when it reads a scoped model with nothing bound: it now
+    raises instead of quietly counting zero. The README's counter guidance says
+    so, and names `unscoped()` alongside `original_manager`.
+  - The test settings run `OrganizationMiddleware` after
+    `AuthenticationMiddleware`, which `vinta_orgs.W001` checks for: from 0.3 the
+    middleware refuses an organization the caller holds no active membership in,
+    and it needs `request.user` to do it. The README's install snippet shows the
+    order.
+- `Subscription` declares a `manage_billing` permission, and
+  `vinta_billing.permissions.member_holding_manage_billing` /
+  `vinta_billing.recipients.members_holding_manage_billing` answer "who may
+  manage billing" and "who is told about it" from that one grant. Neither is a
+  default and nothing here grants the permission: a project selects them through
+  `BILLING_MANAGER_PREDICATE` / `BILLING_RECIPIENTS` once a group carries it. The
+  permissive defaults (any member / every member) are unchanged.
+- Code comments no longer point at the implementation plans of the application
+  this was extracted from -- a reader of this package cannot open them.
+
 ## 0.2.0
 
 - Renamed the app package and label from `billing` to `vinta_billing` so it no

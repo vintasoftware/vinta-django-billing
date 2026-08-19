@@ -18,11 +18,11 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import BillingState, LimitWarningLevel
 from vinta_billing.models import LimitWarningNotification, Subscription
-from vinta_billing.notifications import NotificationTypes, Notifier
+from vinta_billing.notifications import NotificationTypes, Notifier, get_notifier
 from vinta_billing.recipients import get_billing_recipients
 from vinta_billing.registry import resources
 from vinta_billing.services.entitlement_service import EntitlementService
@@ -56,7 +56,11 @@ class UsageWarningService:
         entitlement_service: EntitlementService | None = None,
         notification_service: "Notifier | None" = None,
     ) -> None:
-        from vinta_billing.notifications import get_notifier
+        # Late by necessity, not by style: ``container`` imports every service
+        # at module scope (it is the composition root), so a module-scope import
+        # back into it here closes a cycle and fails at import time with a
+        # partially initialized module. Deferring to first construction is what
+        # keeps the default wiring available without that cycle.
         from vinta_billing.services.container import get_entitlement_service
 
         self.entitlement_service = entitlement_service or get_entitlement_service()
@@ -108,7 +112,7 @@ class UsageWarningService:
     def _check_resource(
         self,
         subscription: Subscription,
-        organization: Organization,
+        organization: AbstractOrganization,
         resource_key: str,
         billing_period_start: datetime.datetime,
     ) -> None:

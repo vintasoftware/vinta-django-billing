@@ -98,6 +98,11 @@ class MeteringService:
     """Writes and audits ``MeteredOccurrence`` rows. Stateless; injected via DI."""
 
     def __init__(self, entitlement_service: EntitlementService | None = None) -> None:
+        # Late by necessity, not by style: ``container`` imports every service
+        # at module scope (it is the composition root), so a module-scope import
+        # back into it here closes a cycle and fails at import time with a
+        # partially initialized module. Deferring to first construction is what
+        # keeps the default wiring available without that cycle.
         from vinta_billing.services.container import get_entitlement_service
 
         self._entitlement_service = entitlement_service or get_entitlement_service()
@@ -469,7 +474,13 @@ class MeteringService:
                 # Through a subquery on Organization rather than a `organization__`
                 # -prefixed copy of the predicate, so `billing_root_filter` stays the
                 # single definition of "is a billing root" (see `is_billing_root`).
-                organization__in=get_organization_model().objects.filter(billing_root_filter())
+                # ``_default_manager`` rather than ``objects``: the configured model
+                # is only known to be an ``AbstractOrganization``, which declares no
+                # manager of its own -- the same access ``vinta-django-orgs`` uses
+                # internally for the same reason.
+                organization__in=get_organization_model()._default_manager.filter(
+                    billing_root_filter()
+                )
             ).values_list("pk", flat=True)
         )
         excluded = all_ids - root_ids

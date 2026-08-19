@@ -16,7 +16,7 @@ read path and the write path.
 
 import logging
 
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.conf import get_setting
 from vinta_billing.models import BillingProfile
@@ -33,7 +33,7 @@ class PaymentProviderResolver:
     from this class.
     """
 
-    def resolve_for_organization(self, organization: Organization) -> str:
+    def resolve_for_organization(self, organization: AbstractOrganization) -> str:
         """The provider governing ``organization``'s next charge: its pin when non-empty,
         ``VINTA_BILLING['DEFAULT_PROVIDER']`` otherwise.
 

@@ -17,6 +17,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.utils.module_loading import import_string
+
+from vinta_billing.conf import get_provider_config
 from vinta_billing.provider_slugs import MERCADOPAGO, STRIPE
 
 
@@ -50,8 +53,6 @@ def get_payment_adapter_classes() -> dict[str, type[Any]]:
     (registration, validation, a conformance test) should not have to build an
     adapter to find out.
     """
-    from django.utils.module_loading import import_string
-
     classes: dict[str, type[Any]] = {}
     for slug, (module, name) in _BUILTIN.items():
         try:
@@ -71,8 +72,6 @@ def get_payment_provider_registry() -> dict[str, Any]:
     included, holding an empty credential, so its inbound webhook route resolves
     while every outbound call site refuses it through ``is_configured``.
     """
-    from vinta_billing.conf import get_provider_config
-
     return {
         slug: adapter_class.from_config(get_provider_config(slug))
         for slug, adapter_class in get_payment_adapter_classes().items()

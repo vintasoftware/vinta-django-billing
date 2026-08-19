@@ -14,9 +14,24 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from django.urls import URLPattern
+from django.urls import URLPattern, path
 from rest_framework.routers import DefaultRouter, SimpleRouter
 from rest_framework.viewsets import ViewSetMixin
+
+from vinta_billing.billing_views import (
+    AddOnViewSet,
+    BillingPeriodViewSet,
+    BillingPlanViewSet,
+    BillingUsageViewSet,
+    MeteredOccurrenceViewSet,
+    SubscriptionViewSet,
+)
+from vinta_billing.views import (
+    BillingProfileViewSet,
+    DefaultPaymentProviderView,
+    PaymentProviderViewSet,
+    PaymentsViewSet,
+)
 
 
 class RouteDict(TypedDict):
@@ -29,16 +44,6 @@ class RouteDict(TypedDict):
 
 def get_routes() -> list[RouteDict]:
     """Every viewset this app ships, in registration order."""
-    from vinta_billing.billing_views import (
-        AddOnViewSet,
-        BillingPeriodViewSet,
-        BillingPlanViewSet,
-        BillingUsageViewSet,
-        MeteredOccurrenceViewSet,
-        SubscriptionViewSet,
-    )
-    from vinta_billing.views import BillingProfileViewSet, PaymentsViewSet
-
     return [
         {"regex": r"payments", "viewset": PaymentsViewSet, "basename": "Payments"},
         {
@@ -74,10 +79,6 @@ def get_extra_patterns() -> list[URLPattern]:
     no list and no primary key -- so they are bound to explicit paths instead of
     being given a router prefix that implies a collection.
     """
-    from django.urls import path
-
-    from vinta_billing.views import DefaultPaymentProviderView, PaymentProviderViewSet
-
     return [
         path(
             "billing/payment-provider/",

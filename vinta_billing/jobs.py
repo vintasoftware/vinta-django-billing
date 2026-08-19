@@ -45,6 +45,7 @@ from typing import Any
 
 from django.utils import timezone
 
+from vinta_billing.conf import get_object_from_setting
 from vinta_billing.constants import BillingState
 from vinta_billing.models import Subscription
 from vinta_billing.services.container import (
@@ -76,8 +77,6 @@ def run_inline(job: Dispatch, *args: Any) -> None:
 
 def get_dispatcher() -> Dispatch:
     """The configured dispatcher, or :func:`run_inline`."""
-    from vinta_billing.conf import get_object_from_setting
-
     dispatcher = get_object_from_setting("JOB_DISPATCHER")
     if dispatcher is None:
         return run_inline

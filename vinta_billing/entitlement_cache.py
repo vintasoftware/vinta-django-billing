@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from vinta_orgs.models import Organization
+    from vinta_orgs.models import AbstractOrganization
 
     from vinta_billing.services.entitlement_service import EntitlementService
 
@@ -65,7 +65,7 @@ def entitlement_request_cache():
 
 def has_entitlement_cached(
     entitlement_service: "EntitlementService",
-    organization: "Organization",
+    organization: "AbstractOrganization",
     entitlement_key: str,
 ) -> bool:
     """``entitlement_service.has_entitlement``, memoized when a cache is active.

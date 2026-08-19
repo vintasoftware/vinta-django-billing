@@ -297,6 +297,24 @@ class Subscription(BaseModel):
     add_ons: "RelatedManager[SubscriptionAddOn]"
     payments: "RelatedManager[Payment]"
 
+    class Meta(BaseModel.Meta):
+        # Declared on ``Subscription`` rather than on the organization model --
+        # which this package does not own and cannot add a permission to -- and
+        # because the subscription is the object the capability acts on: changing
+        # the plan, buying add-ons, managing the payment method.
+        #
+        # Nothing here grants it and nothing here requires it. It exists so a
+        # project that expresses roles as ``vinta-django-orgs`` organization
+        # permissions has a codename to grant, and so the two seams that ask "who
+        # may manage billing" (``BILLING_MANAGER_PREDICATE``) and "who is told
+        # about it" (``BILLING_RECIPIENTS``) can be answered from one grant --
+        # see ``vinta_billing.permissions.member_holding_manage_billing`` and
+        # ``vinta_billing.recipients.members_holding_manage_billing``, neither of
+        # which is the default.
+        permissions: ClassVar = [
+            ("manage_billing", "Can manage the organization's billing"),
+        ]
+
     def __str__(self):
         return (
             f"{self.id} - {self.status} - {self.current_period_start} - {self.current_period_end}"

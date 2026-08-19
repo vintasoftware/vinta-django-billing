@@ -23,8 +23,9 @@ import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Sum
-from vinta_orgs.models import Organization
+from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import BillingState, LimitKind, LimitRemedy
 from vinta_billing.counting import UsageContext, count_by_organization
@@ -52,8 +53,6 @@ def metered_resource_key() -> str:
     metering path, and a metering path reached with nothing postpaid registered
     is a misconfiguration, not an empty result.
     """
-    from django.core.exceptions import ImproperlyConfigured
-
     key = resources.metered_key()
     if key is None:
         raise ImproperlyConfigured(
@@ -110,7 +109,9 @@ class EntitlementService:
     ``check_limit(lock=True)`` requires exactly that).
     """
 
-    def get_effective_limit(self, organization: Organization, resource_key: str) -> EffectiveLimit:
+    def get_effective_limit(
+        self, organization: AbstractOrganization, resource_key: str
+    ) -> EffectiveLimit:
         """Resolve ``organization``'s ceiling for ``resource_key``.
 
         The value is the billing root's ``SubscriptionPlanLimit.limit_value`` plus
@@ -204,7 +205,7 @@ class EntitlementService:
         return self.effective_limit_from_resolved(resource_key, limit, add_on_quantity)
 
     def effective_limit_for_subscription(
-        self, subscription: Subscription | None, resource_key: str, root: Organization
+        self, subscription: Subscription | None, resource_key: str, root: AbstractOrganization
     ) -> EffectiveLimit:
         """Public entry point onto ``_effective_limit_for_subscription`` for a
         caller that already holds both ``root`` and ``subscription`` (e.g.
@@ -272,7 +273,7 @@ class EntitlementService:
 
     def get_current_usage(
         self,
-        organization: Organization,
+        organization: AbstractOrganization,
         resource_key: str,
         usage_extra: dict[str, Any] | None = None,
     ) -> int:
@@ -302,7 +303,7 @@ class EntitlementService:
 
     def get_usage_breakdown(
         self,
-        organization: Organization,
+        organization: AbstractOrganization,
         resource_key: str,
         usage_extra: dict[str, Any] | None = None,
     ) -> dict[int, int]:
@@ -331,7 +332,7 @@ class EntitlementService:
 
     def usage_breakdown_for_root(
         self,
-        root: Organization,
+        root: AbstractOrganization,
         resource_key: str,
         subscription: Subscription | None,
         pooled_organization_ids: list[int] | None = None,
@@ -357,7 +358,7 @@ class EntitlementService:
 
     def _count_usage(
         self,
-        root: Organization,
+        root: AbstractOrganization,
         resource_key: str,
         subscription: Subscription | None,
         usage_extra: dict[str, Any] | None = None,
@@ -376,7 +377,7 @@ class EntitlementService:
 
     def _usage_breakdown(
         self,
-        root: Organization,
+        root: AbstractOrganization,
         resource_key: str,
         subscription: Subscription | None,
         usage_extra: dict[str, Any] | None = None,
@@ -414,7 +415,7 @@ class EntitlementService:
         )
 
     @staticmethod
-    def _lock_billing_root_row(root: Organization) -> None:
+    def _lock_billing_root_row(root: AbstractOrganization) -> None:
         """Take ``SELECT ... FOR UPDATE`` on ``root``'s ``Subscription`` row.
 
         Discards the returned row: the point is the row lock, and every subsequent
@@ -422,7 +423,7 @@ class EntitlementService:
         """
         Subscription.objects.select_for_update().filter(organization=root).first()
 
-    def lock_billing_root(self, organization: Organization) -> None:
+    def lock_billing_root(self, organization: AbstractOrganization) -> None:
         """Acquire the guard lock for ``organization`` *before* computing a delta.
 
         ``check_limit(lock=True)`` locks and counts in one call, which is all a
@@ -439,7 +440,7 @@ class EntitlementService:
         """
         self._lock_billing_root_row(resolve_billing_root(organization))
 
-    def is_billing_root_restricted(self, organization: Organization) -> bool:
+    def is_billing_root_restricted(self, organization: AbstractOrganization) -> bool:
         """The single check for "must this organization's writes be blocked and
         its calendar sync paused?" -- ``True`` only when the *billing root*'s
         ``Subscription.billing_state`` is ``RESTRICTED``.
@@ -486,7 +487,7 @@ class EntitlementService:
         subscription = self._get_subscription_for_root(root)
         return subscription is not None and subscription.billing_state == BillingState.RESTRICTED
 
-    def check_not_restricted(self, organization: Organization) -> None:
+    def check_not_restricted(self, organization: AbstractOrganization) -> None:
         """Raise ``OverLimitError`` (``remedy=resolve_billing``) when
         ``organization``'s billing root is ``RESTRICTED``; otherwise a no-op.
 
@@ -502,7 +503,7 @@ class EntitlementService:
 
     def check_limit(
         self,
-        organization: Organization,
+        organization: AbstractOrganization,
         resource_key: str,
         delta: int = 1,
         lock: bool = False,
@@ -598,7 +599,7 @@ class EntitlementService:
             remedy=(None if allowed else self._resolve_remedy_for(subscription, effective_limit)),
         )
 
-    def has_payment_method(self, organization: Organization) -> bool:
+    def has_payment_method(self, organization: AbstractOrganization) -> bool:
         """Does the billing root have a chargeable payment method on file, right now?
 
         Resolved at the billing root, like every other check in this service, so a
@@ -644,7 +645,7 @@ class EntitlementService:
 
     def check_postpaid_allowance(
         self,
-        organization: Organization,
+        organization: AbstractOrganization,
         delta: int = 1,
         lock: bool = False,
         delta_resolver: Callable[[Subscription], int] | None = None,
@@ -791,7 +792,7 @@ class EntitlementService:
             remedy=LimitRemedy.ADD_PAYMENT_METHOD,
         )
 
-    def has_entitlement(self, organization: Organization, entitlement_key: str) -> bool:
+    def has_entitlement(self, organization: AbstractOrganization, entitlement_key: str) -> bool:
         """Is the boolean feature gate ``entitlement_key`` granted to ``organization``?
 
         Resolved at the billing root, like limits. **Unlike limits, this fails
@@ -816,7 +817,7 @@ class EntitlementService:
         return entitlement is not None and entitlement.is_enabled
 
     def has_entitlement_for_organizations(
-        self, organizations: Sequence[Organization], entitlement_key: str
+        self, organizations: Sequence[AbstractOrganization], entitlement_key: str
     ) -> dict[int, bool]:
         """Bulk ``has_entitlement``: the same fail-closed boolean gate for many
         organizations, in two queries total instead of two per organization.
@@ -901,10 +902,10 @@ class EntitlementService:
             return LimitRemedy.UPGRADE_PLAN
         return LimitRemedy.PURCHASE_ADD_ON
 
-    def _get_root_subscription(self, organization: Organization) -> Subscription | None:
+    def _get_root_subscription(self, organization: AbstractOrganization) -> Subscription | None:
         return self._get_subscription_for_root(resolve_billing_root(organization))
 
-    def _get_subscription_for_root(self, root: Organization) -> Subscription | None:
+    def _get_subscription_for_root(self, root: AbstractOrganization) -> Subscription | None:
         """Fetch ``root``'s subscription without raising when it is missing.
 
         ``Subscription.organization`` is a ``OneToOneField``, so the reverse
@@ -913,7 +914,7 @@ class EntitlementService:
         """
         return Subscription.objects.filter(organization=root).first()
 
-    def get_pooled_organization_ids(self, organization: Organization) -> list[int]:
+    def get_pooled_organization_ids(self, organization: AbstractOrganization) -> list[int]:
         """Every organization whose usage pools with ``organization``'s.
 
         Public entry point onto the same subtree walk every usage counter runs on,
@@ -924,7 +925,7 @@ class EntitlementService:
         """
         return self._get_pooled_organization_ids(resolve_billing_root(organization))
 
-    def _get_pooled_organization_ids(self, root: Organization) -> list[int]:
+    def _get_pooled_organization_ids(self, root: AbstractOrganization) -> list[int]:
         """Every organization whose usage counts against ``root``'s ceiling.
 
         Delegated to the configured hierarchy strategy: whether organizations
