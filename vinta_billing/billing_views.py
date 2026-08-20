@@ -653,11 +653,22 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
             409: OpenApiResponse(
                 response=BILLING_ERROR_BODY_SERIALIZER,
                 description=(
-                    "Either another plan change is already awaiting payment confirmation "
-                    '(`code: "unconfirmed_plan_change"`, `UnconfirmedPlanChangeError`), or '
-                    "the provider this organization resolves to is not configured in this "
-                    'deployment (`code: "payment_provider_not_configured"`, '
-                    "`PaymentProviderNotConfiguredError`). Both are mapped centrally by "
+                    "Another plan change is already awaiting payment confirmation "
+                    '(`code: "unconfirmed_plan_change"`, `UnconfirmedPlanChangeError`).'
+                ),
+            ),
+            503: OpenApiResponse(
+                response=BILLING_ERROR_BODY_SERIALIZER,
+                description=(
+                    "A deployment fault, not a bad request -- the same call will fail "
+                    "identically until an operator fixes the deployment, so do not retry "
+                    "with different input. Either the provider this organization resolves "
+                    "to is not configured in this deployment "
+                    '(`code: "payment_provider_not_configured"`, '
+                    "`PaymentProviderNotConfiguredError`), or the target plan is missing a "
+                    "`PlanLimit` row for a registered resource, so the downgrade has no "
+                    'well-defined ceiling to apply (`code: "incomplete_billing_plan"`, '
+                    "`IncompleteBillingPlanError`). Both are mapped centrally by "
                     "`vinta_billing.exception_handling.billing_exception_handler`."
                 ),
             ),
@@ -696,12 +707,17 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
         request=None,
         responses={
             200: SubscriptionSerializer,
-            409: {
-                "description": (
+            503: OpenApiResponse(
+                response=BILLING_ERROR_BODY_SERIALIZER,
+                description=(
                     "The provider this subscription is stamped with is not configured in "
-                    "this deployment, so the provider-side cancellation cannot be driven."
-                )
-            },
+                    "this deployment, so the provider-side cancellation cannot be driven "
+                    '(`code: "payment_provider_not_configured"`, '
+                    "`PaymentProviderNotConfiguredError`). A deployment fault, not a bad "
+                    "request -- retrying the same call changes nothing until an operator "
+                    "configures the provider."
+                ),
+            ),
         },
     )
     @action(methods=["post"], detail=False, url_path="cancel", url_name="cancel")
@@ -848,13 +864,15 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
                     '(`code: "add_on_not_purchasable"`, `AddOnNotPurchasableError`).'
                 ),
             ),
-            409: OpenApiResponse(
+            503: OpenApiResponse(
                 response=BILLING_ERROR_BODY_SERIALIZER,
                 description=(
                     "The provider this organization resolves to is not configured in this "
                     "deployment, so the one-time charge cannot be driven "
                     '(`code: "payment_provider_not_configured"`, '
-                    "`PaymentProviderNotConfiguredError`)."
+                    "`PaymentProviderNotConfiguredError`). A deployment fault, not a bad "
+                    "request -- retrying the same call changes nothing until an operator "
+                    "configures the provider."
                 ),
             ),
         },

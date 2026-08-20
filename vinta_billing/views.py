@@ -404,7 +404,16 @@ class BillingProfileViewSet(
     @extend_schema(
         summary="Create billing profile",
         description="Create a new billing profile for the active organization.",
-        responses={201: BillingProfileSerializer},
+        responses={
+            201: BillingProfileSerializer,
+            409: {
+                "description": (
+                    "This organization already has a billing profile. Not a `BillingError` "
+                    "and not routed through `vinta_billing.exception_handling` -- the body "
+                    "is DRF's `{'detail': ...}`, with no machine-readable `code`."
+                )
+            },
+        },
     )
     @action(
         methods=["post"],
@@ -520,10 +529,13 @@ class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
         responses={
             200: PaymentProviderSerializer,
             403: {"description": "No active organization."},
-            409: {
+            503: {
                 "description": (
                     "The resolved provider is unknown or has no public credentials "
-                    "configured in this deployment."
+                    "configured in this deployment. A deployment fault, not a bad request "
+                    "-- matches `DefaultPaymentProviderView` below and the status "
+                    "`vinta_billing.exception_handling` maps "
+                    "`PaymentProviderNotConfiguredError` to everywhere else."
                 )
             },
         },
@@ -536,13 +548,18 @@ class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
         try:
             credentials = resolve_public_credentials(provider)
         except PaymentProviderNotConfiguredError:
+            # 503, not 409: an unconfigured provider is a deployment fault, and
+            # nothing the caller sends changes the answer. This endpoint answered
+            # 409 through 0.5.0 while its unauthenticated sibling below, the
+            # central status table and the README all said 503 -- see HISTORY.md
+            # for 0.6.0.
             return Response(
                 {
                     "detail": (
                         f"Payment provider {provider!r} is not configured in this deployment."
                     )
                 },
-                status=status.HTTP_409_CONFLICT,
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         return Response(PaymentProviderSerializer(credentials).data)
 

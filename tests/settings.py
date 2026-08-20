@@ -5,17 +5,44 @@ Deliberately minimal: the point is to prove the library works against a stock
 notifier or a manager predicate. The tests that need those override them.
 """
 
+import os
+
+
 DEBUG = True
 USE_TZ = True
 SECRET_KEY = "test-only-key-not-used-anywhere-else"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": ":memory:",
+# SQLite by default -- fast, needs nothing installed, and enough for
+# everything the suite asserts about rows and queries.
+#
+# Except one thing. SQLite has no row locks: Django notices
+# `has_select_for_update` is False and drops the clause rather than raising, so
+# `CycleCloseService.close_subscription`'s `SELECT ... FOR UPDATE` is silently a
+# plain SELECT there, and a concurrency test written against it would pass
+# whether or not the lock was ever taken. `tests/test_cycle_close_concurrency.py`
+# is skipped unless the database actually supports the lock, and this is the
+# switch that gives it one: set `VINTA_BILLING_TEST_POSTGRES_HOST` (see the
+# `postgres` environment in `tox.ini`, which CI runs).
+_postgres_host = os.environ.get("VINTA_BILLING_TEST_POSTGRES_HOST")
+if _postgres_host:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "HOST": _postgres_host,
+            "PORT": os.environ.get("VINTA_BILLING_TEST_POSTGRES_PORT", "5432"),
+            "NAME": os.environ.get("VINTA_BILLING_TEST_POSTGRES_DB", "postgres"),
+            "USER": os.environ.get("VINTA_BILLING_TEST_POSTGRES_USER", "postgres"),
+            "PASSWORD": os.environ.get("VINTA_BILLING_TEST_POSTGRES_PASSWORD", "postgres"),
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": ":memory:",
+        }
+    }
 
 ROOT_URLCONF = "tests.urls"
 ALLOWED_HOSTS = ["*"]
@@ -68,6 +95,15 @@ SITE_ID = 1
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
+    # Set here rather than inside the one test that generates a schema.
+    # `extend_schema` builds its inspector class from whatever
+    # DEFAULT_SCHEMA_CLASS was when a view's `schema` was first touched, and
+    # caches it -- so an `override_settings` that arrives after some earlier
+    # test has resolved a route is silently too late, and the generator then
+    # calls drf-spectacular's inspector through DRF's incompatible base. A
+    # project mounting these routes sets this in its own settings anyway; the
+    # shipped viewsets carry `@extend_schema` unconditionally.
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     # Every throttle scope the shipped viewsets name. DRF's `ScopedRateThrottle`
     # raises `ImproperlyConfigured` for a scope with no rate, so a project that
     # mounts these routes without all three gets a 500 on the endpoint instead

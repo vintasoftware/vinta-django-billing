@@ -10,6 +10,8 @@ and the call after them raised ``TypeError``. These tests pin the built shape
 down.
 """
 
+from typing import ClassVar
+
 import pytest
 from django.test import override_settings
 
@@ -194,3 +196,50 @@ class TestDefaultProvider:
         from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 
         assert PaymentProviderResolver().resolve_default() == PaymentProviders.MERCADOPAGO
+
+
+@pytest.mark.django_db
+class TestTheProviderEndpointsRefuseAnUnconfiguredProviderTheSameWay:
+    """Both shipped payment-provider endpoints answer **503** for a provider this
+    deployment holds no credential for.
+
+    Through 0.5.0 the authenticated one answered 409 and the unauthenticated one
+    answered 503, for the same condition, three hundred lines apart in the same
+    module -- and the central status table and the README both said 503. An
+    unconfigured provider is a deployment fault: nothing the caller sent is
+    wrong, retrying with different input changes nothing, and a 5xx is what an
+    adopter's error monitoring is already watching.
+    """
+
+    UNCONFIGURED: ClassVar = {"PROVIDERS": {}, "DEFAULT_PROVIDER": PaymentProviders.STRIPE}
+
+    def _member_client(self, organization):
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIClient
+        from vinta_orgs.conf import get_organization_membership_model
+
+        user = get_user_model().objects.create_user(username="provider-reader", password="pw")
+        get_organization_membership_model().objects.create(organization=organization, user=user)
+        client = APIClient()
+        client.force_login(user)
+        client.credentials(HTTP_ORGANIZATION_SLUG=organization.slug)
+        return client
+
+    def test_the_organizations_provider_endpoint_is_503(self, organization):
+        from django.urls import reverse
+
+        client = self._member_client(organization)
+
+        with override_settings(VINTA_BILLING=self.UNCONFIGURED):
+            response = client.get(reverse("billing:payment-provider"))
+
+        assert response.status_code == 503
+
+    def test_the_default_provider_endpoint_is_503(self, db):
+        from django.urls import reverse
+        from rest_framework.test import APIClient
+
+        with override_settings(VINTA_BILLING=self.UNCONFIGURED):
+            response = APIClient().get(reverse("billing:payment-provider-default"))
+
+        assert response.status_code == 503

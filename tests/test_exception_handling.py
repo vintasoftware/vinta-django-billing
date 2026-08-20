@@ -7,6 +7,8 @@ until it hand-rolled the mapping. These tests pin the mapping down and, more
 importantly, assert that *every* error class has one.
 """
 
+import re
+
 import pytest
 from rest_framework import status
 from rest_framework.exceptions import NotFound
@@ -157,3 +159,62 @@ def test_every_error_class_has_a_deliberate_status(error_class):
         f"{error_class.__name__} has no entry in BILLING_ERROR_STATUS and is not "
         "listed as non-HTTP-facing -- decide which it is."
     )
+
+
+def _declared_error_statuses():
+    """``(path, method, status, error_class_name)`` for every error class the
+    shipped OpenAPI annotations name in a response description.
+
+    Generated from the real schema through the real urlconf, not read off the
+    decorators: what an adopter generates a client from is the rendered
+    document, and that is what has to agree with ``BILLING_ERROR_STATUS``.
+    """
+    from drf_spectacular.generators import SchemaGenerator
+
+    schema = SchemaGenerator(urlconf="tests.urls").get_schema(request=None, public=True)
+
+    declared = []
+    for path, operations in sorted(schema["paths"].items()):
+        for method, operation in operations.items():
+            if method not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            for code, response in sorted(operation.get("responses", {}).items()):
+                description = response.get("description") or ""
+                for name in sorted(set(re.findall(r"\b([A-Z][A-Za-z]*Error)\b", description))):
+                    declared.append((path, method.upper(), int(code), name))
+    return declared
+
+
+def test_the_published_schema_agrees_with_the_status_table():
+    """The bug this exists to stop: through 0.5.0 three shipped annotations
+    declared ``PaymentProviderNotConfiguredError`` under **409** while
+    ``BILLING_ERROR_STATUS`` rendered it **503**. Both were deliberate, which is
+    why neither side noticed -- and a client generated from the published schema
+    handled a status this API never returns, then met a 503 it had no branch
+    for.
+
+    Every error class an annotation names has to be listed under the status the
+    handler actually returns for it. A description that mentions a class only to
+    contrast with it still has to name the right status, which is a feature: a
+    cross-reference that has gone stale is exactly as misleading as a wrong
+    declaration.
+    """
+    pytest.importorskip("drf_spectacular")
+
+    declared = _declared_error_statuses()
+    assert declared, "no error classes are named in any response description -- check the regex"
+
+    disagreements = []
+    for path, method, code, name in declared:
+        error_class = getattr(billing_exceptions, name, None)
+        if error_class is None:
+            disagreements.append(f"{method} {path} {code}: names {name}, which does not exist")
+            continue
+        expected = billing_error_status(error_class.__new__(error_class))
+        if expected != code:
+            disagreements.append(
+                f"{method} {path}: declares {name} under {code}, "
+                f"but BILLING_ERROR_STATUS renders it {expected}"
+            )
+
+    assert not disagreements, "schema and status table disagree:\n  " + "\n  ".join(disagreements)

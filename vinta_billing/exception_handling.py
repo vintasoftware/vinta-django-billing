@@ -78,6 +78,19 @@ from vinta_billing.exceptions import (
 #: ``NoDefaultBillingPlanError``, ``IncompleteBillingPlanError``) render as
 #: **503**: nothing the caller sent is wrong, and a 4xx would tell them to change
 #: a request that will fail identically until an operator fixes the deployment.
+#: A 5xx is also what an adopter's error monitoring already watches, which is the
+#: difference between an unconfigured provider being noticed in an hour and it
+#: being filed under "clients sending bad requests" for a week.
+#:
+#: **This table is the contract, and the shipped ``@extend_schema`` annotations
+#: have to agree with it.** Through 0.5.0 three of them declared
+#: ``PaymentProviderNotConfiguredError`` as a 409 while this table rendered it
+#: 503, so a client generated from the published schema handled a status the API
+#: never returned and treated the one it did return as an unexpected server
+#: error. ``tests/test_exception_handling.py`` now walks the mounted schema and
+#: fails if any declared status for a named error class contradicts this table --
+#: adding an entry here without updating the annotation that names it, or the
+#: reverse, is a test failure rather than a silent divergence.
 BILLING_ERROR_STATUS: tuple[tuple[type[BillingError], int], ...] = (
     (OverLimitError, status.HTTP_402_PAYMENT_REQUIRED),
     (ChargeDeclinedError, status.HTTP_402_PAYMENT_REQUIRED),
