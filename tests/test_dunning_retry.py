@@ -249,9 +249,7 @@ class TestTheMoneyPathGuard:
 
         subscription_service.retry_failed_charge(in_grace, "dunning-retry-1-0")
 
-        assert payment_service.create_subscription_plan_providers == [
-            PaymentProviders.MERCADOPAGO
-        ]
+        assert payment_service.create_subscription_plan_providers == [PaymentProviders.MERCADOPAGO]
 
 
 class TestTheBeatTickToleratesWhatItCannotFix:

@@ -123,9 +123,7 @@ class TestTheSweepsHonourTheServiceContainer:
     ``resolve_service``, so a project's ``SERVICE_CONTAINER`` governs a beat
     tick exactly as it governs a request."""
 
-    def test_the_metering_sweep_uses_the_configured_container(
-        self, container, due_subscription
-    ):
+    def test_the_metering_sweep_uses_the_configured_container(self, container, due_subscription):
         with override_settings(VINTA_BILLING={"SERVICE_CONTAINER": container}):
             jobs.meter_event_occurrences()
 
@@ -142,18 +140,14 @@ class TestTheSweepsHonourTheServiceContainer:
         assert container.built == ["dunning_service"]
         assert container.calls == [("dun", subscription.pk)]
 
-    def test_the_cycle_close_sweep_uses_the_configured_container(
-        self, container, due_subscription
-    ):
+    def test_the_cycle_close_sweep_uses_the_configured_container(self, container, due_subscription):
         with override_settings(VINTA_BILLING={"SERVICE_CONTAINER": container}):
             jobs.close_billing_periods()
 
         assert container.built == ["cycle_close_service"]
         assert container.calls == [("close", due_subscription.pk)]
 
-    def test_the_usage_warning_sweep_uses_the_configured_container(
-        self, container, subscription
-    ):
+    def test_the_usage_warning_sweep_uses_the_configured_container(self, container, subscription):
         with override_settings(VINTA_BILLING={"SERVICE_CONTAINER": container}):
             jobs.check_approaching_limits()
 
