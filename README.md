@@ -207,6 +207,8 @@ VINTA_BILLING = {
     "OCCURRENCE_SOURCE": "myproject.billing.EventOccurrenceSource",
     "METERED_RESOURCE_KEY": "events",
     # How a sweep hands each per-subscription job over. Default: run it inline.
+    # The jobs the sweep hands over build their services through
+    # `SERVICE_CONTAINER`, same as the views.
     "JOB_DISPATCHER": "myproject.billing.enqueue",
     # How your DRF surface resolves the acting organization, and where the
     # shipped views build their services. Defaults: this package's own mixin
@@ -246,9 +248,23 @@ REST_FRAMEWORK = {
 ```
 
 Over-limit and declined-charge errors render as `402`, subscription-state
-conflicts as `409`, and a provider this deployment holds no credential for as
-`503` — see [`vinta_billing/exception_handling.py`](vinta_billing/exception_handling.py) for
-the table.
+conflicts as `409`, and deployment faults as `503` — an unconfigured provider
+(`PaymentProviderNotConfiguredError`), a missing default plan
+(`NoDefaultBillingPlanError`), a plan with no limit row for a registered
+resource (`IncompleteBillingPlanError`). See
+[`vinta_billing/exception_handling.py`](vinta_billing/exception_handling.py) for the table,
+which is the contract: the shipped OpenAPI annotations are checked against it by
+the suite, so what you generate a client from is what the handler returns.
+
+The 503 family is the one worth a second's thought before you wire your own
+frontend to it. Nothing the caller sent is wrong and the same request will fail
+identically until an operator fixes the deployment, so a 4xx would be an
+invitation to retry something that cannot work — and a 5xx is what your error
+monitoring is already watching, which is the difference between noticing an
+unconfigured provider in an hour and filing it under "clients sending bad
+requests" for a week. Three annotations in 0.5.0 documented
+`PaymentProviderNotConfiguredError` as a `409`; they were wrong about what the
+handler did, and 0.6.0 corrected them rather than the handler.
 
 ### Who may manage billing
 
@@ -381,6 +397,14 @@ Passing a service to a viewset's constructor still wins over the container
 `dunning_service=`, `payment_provider_resolver=`), so a project that injects
 them by hand today is unaffected by `SERVICE_CONTAINER`.
 
+`SERVICE_CONTAINER` reaches the background jobs too, from 0.6.0 on — the four
+sweeps in [`vinta_billing/jobs.py`](vinta_billing/jobs.py) build their services through
+the same lookup the views use. Before that they imported this package's own
+factories directly, so a project running its own container got its services on
+the request path and a second, parallel set on the beat path. Each
+per-subscription job still takes its service as a keyword argument, and passing
+one still wins, exactly as it does for a viewset.
+
 The shipped viewsets throttle their write and unauthenticated endpoints through
 three `ScopedRateThrottle` scopes, and DRF raises `ImproperlyConfigured` for a
 scope with no configured rate — so all three need one, or those endpoints answer
@@ -406,6 +430,7 @@ uv sync --all-extras
 uv run pytest
 uv run tox              # the full matrix: py3.11–3.14 x Django 5.2/6.0/6.1
 uv run tox -e swapped   # the suite against a swapped ORGANIZATION_MODEL
+uv run tox -e postgres  # the suite against Postgres, for the row locks
 uv run pre-commit install
 ```
 
@@ -414,6 +439,17 @@ project-defined model instead of the one `vinta-django-orgs` ships. Under the
 default settings those are the same class, so a foreign key hardcoded to
 `vinta_orgs.Organization` passes the whole suite and only breaks in a project
 that actually swapped the model — this is what catches it.
+
+`tox -e postgres` runs it against a real database, for the same kind of reason.
+The suite is on SQLite by default, and SQLite has no row locks: Django notices
+and drops `SELECT ... FOR UPDATE` rather than raising, so cycle close's lock is
+silently not taken there and a concurrency test would pass against no lock at
+all. `tests/test_cycle_close_concurrency.py` skips itself unless the database
+really takes the lock. Point the environment at a server first:
+
+```bash
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 55432:5432 postgres:16-alpine
+```
 
 ## License
 
