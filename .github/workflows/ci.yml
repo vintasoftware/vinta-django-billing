@@ -66,6 +66,38 @@ jobs:
       # reference and the concrete model are the same class.
       - run: uv run --frozen tox -e swapped
 
+  postgres:
+    name: row locks (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # The cycle-close row lock is the one behaviour SQLite cannot exercise:
+      # it has no row locks, and Django drops SELECT ... FOR UPDATE there rather
+      # than raising. tests/test_cycle_close_concurrency.py skips itself on
+      # SQLite, so without this job the lock ships untested.
+      - run: uv run --frozen tox -e postgres
+
   lint:
     runs-on: ubuntu-latest
     steps:
