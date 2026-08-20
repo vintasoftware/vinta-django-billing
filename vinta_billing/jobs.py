@@ -34,6 +34,15 @@ through ``VINTA_BILLING['JOB_DISPATCHER']``, or pass one per call.
 Every per-subscription job is idempotent, because at-least-once delivery is the
 only guarantee a queue gives: the same arguments produce the same rows, and a
 redelivery writes nothing new.
+
+Each per-subscription job takes its service as an optional argument and, when
+none is passed, asks ``vinta_billing.services.container.resolve_service`` for
+one -- the same seam the shipped views and the admin use, so
+``VINTA_BILLING['SERVICE_CONTAINER']`` governs a beat tick exactly as it governs
+a request. A project running its own container therefore gets *its* services
+here without having to resolve each one itself and pass it in, which is what it
+had to do before 0.6.0 -- and which meant giving up ``JOB_DISPATCHER``, since
+the sweeps hand a job nothing but a subscription id.
 """
 
 from __future__ import annotations
@@ -48,12 +57,7 @@ from django.utils import timezone
 from vinta_billing.conf import get_object_from_setting
 from vinta_billing.constants import BillingState
 from vinta_billing.models import Subscription
-from vinta_billing.services.container import (
-    get_cycle_close_service,
-    get_dunning_service,
-    get_metering_service,
-    get_usage_warning_service,
-)
+from vinta_billing.services.container import resolve_service
 from vinta_billing.services.cycle_close_service import CycleCloseService
 from vinta_billing.services.dunning_service import DunningService
 from vinta_billing.services.metering_service import MeteringService
@@ -148,7 +152,7 @@ def meter_subscription_event_occurrences(
     rather than raising — a raising task is redelivered and fails identically
     forever, turning a benign race into a permanent stream of alerts.
     """
-    metering_service = metering_service or get_metering_service()
+    metering_service = metering_service or resolve_service("metering_service")
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(
@@ -225,7 +229,7 @@ def process_dunning_for_subscription(
     entire ladder (no further retry, no reminder, no final-warning email)
     while looking, from the outside, like nothing is wrong.
     """
-    dunning_service = dunning_service or get_dunning_service()
+    dunning_service = dunning_service or resolve_service("dunning_service")
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(
@@ -285,7 +289,7 @@ def close_subscription_billing_period(
     period does not double-charge), and one poison subscription never spins the
     task or blocks the rest of the sweep.
     """
-    cycle_close_service = cycle_close_service or get_cycle_close_service()
+    cycle_close_service = cycle_close_service or resolve_service("cycle_close_service")
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(
@@ -350,7 +354,7 @@ def check_approaching_limits_for_subscription(
     reasoning as ``meter_subscription_event_occurrences``/
     ``process_dunning_for_subscription``, above).
     """
-    usage_warning_service = usage_warning_service or get_usage_warning_service()
+    usage_warning_service = usage_warning_service or resolve_service("usage_warning_service")
     subscription = Subscription.objects.filter(pk=subscription_id).first()
     if subscription is None:
         logger.info(
