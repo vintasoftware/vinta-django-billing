@@ -71,6 +71,13 @@ test = [
     "freezegun>=1.5",
     "tox>=4.22",
     "tox-uv>=1.13",
+    # Not a runtime dependency -- the package supports whatever database the
+    # project runs. The suite defaults to SQLite, and `tests/settings.py`
+    # switches to Postgres when the environment names one, which is the only
+    # way to exercise `SELECT ... FOR UPDATE`: SQLite has no row locks and
+    # Django silently drops the clause there, so a concurrency test on SQLite
+    # would pass against a lock that was never taken.
+    "psycopg[binary]>=3.2",
 ]
 dev = [
     { include-group = "test" },

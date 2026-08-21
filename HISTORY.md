@@ -1,5 +1,123 @@
 # History
 
+## 0.6.0
+
+The host application's second pass over this package, and everything it found
+was either a seam that stopped at the edge of the request cycle or a behaviour
+documented at length and enforced nowhere. One item below changes what an
+endpoint returns, and it is the one to read first.
+
+- **The published OpenAPI schema said `409` for `PaymentProviderNotConfiguredError`
+  and the handler returned `503`. The `503` is what stayed.** The status table
+  has rendered that error `503` since it existed -- its own comment reasons it
+  out as a deployment fault, and the README said `503` too -- but the
+  `@extend_schema` annotations on `change-plan`, `cancel` and the add-on
+  purchase declared it a `409`, named the class, gave its `code`, and said it
+  was "mapped centrally by" the very handler they were contradicting. So the
+  document adopters generate their clients from described a status this API has
+  never returned, and the status it does return reached those clients as an
+  unexpected server error. Both sides were deliberate, which is why neither was
+  noticed. `503` won on three grounds: nothing the caller sent is wrong and the
+  same request will fail identically until an operator fixes the deployment, so
+  a 4xx would be an invitation to retry something that cannot work; the two
+  sibling deployment faults (`NoDefaultBillingPlanError`,
+  `IncompleteBillingPlanError`) already rendered `503`, and promoting one member
+  of that family to `409` would have split it -- `change-plan` can raise
+  `IncompleteBillingPlanError` too, so one endpoint would have answered two
+  different statuses for two equally operator-caused faults; and a 5xx is what
+  an adopter's error monitoring already watches, which is the difference between
+  noticing an unconfigured provider within the hour and filing it under "clients
+  are sending bad requests" for a week. **What an adopter must do:** regenerate
+  your client, and if you wrote a `409` branch for
+  `payment_provider_not_configured` against the 0.5.0 schema, move it to `503`.
+  Your deployment was already answering `503`; that branch was dead code. The
+  wire behaviour of those three endpoints is unchanged.
+- **`GET /billing/payment-provider/` really did answer `409`, and now answers
+  `503`.** This is the one genuine behaviour change in the release. That
+  endpoint caught `PaymentProviderNotConfiguredError` itself and returned a
+  hand-written `409`, while its unauthenticated sibling
+  `GET /billing/payment-provider/default/` caught the same error, three hundred
+  lines away in the same module, and returned `503`. If a frontend branches on
+  `409` there to mean "this deployment has no provider configured", move it to
+  `503`. The body is unchanged: that endpoint does not route through the central
+  handler, so it still carries DRF's `{"detail": ...}` and no machine-readable
+  `code`. Both endpoints are now asserted through real requests, and
+  `tests/test_exception_handling.py` generates the OpenAPI document and fails
+  when any status an annotation declares for a named error class contradicts
+  `BILLING_ERROR_STATUS` -- so this class of divergence cannot reappear quietly.
+  No other exception had the same disagreement: every other class the shipped
+  annotations name (`ChargeDeclinedError`, `OverLimitError`,
+  `UnconfirmedPlanChangeError`, `RetryPaymentNotApplicableError`,
+  `SubscriptionNotAttachedError`, `NoOutstandingBalanceError`,
+  `CollectionNotSupportedError`, `PaymentTokenRequiredError`,
+  `AddOnNotPurchasableError`, `UnknownPaymentProviderError`) was already
+  declared under the status the table renders it as.
+- **`VINTA_BILLING['SERVICE_CONTAINER']` reaches the background jobs.** 0.5.0
+  added the setting for the views and the admin; `vinta_billing/jobs.py`
+  imported this package's own factories directly and never consulted it, so a
+  project pointing the setting at its own container got its services on the
+  request path and a second, parallel set of this package's own on the beat
+  path. In the case that found this, that meant a Stripe adapter the project had
+  deliberately crippled with an empty API key -- so a stray real call would fail
+  loudly -- being silently replaced by one holding the real `STRIPE_SECRET_KEY`
+  from its environment. The test believed it was driving a fake. The workaround
+  that project reached for, resolving each service itself and passing it into
+  every job, works but costs `JOB_DISPATCHER`: a sweep hands its dispatcher
+  nothing but a job and a subscription id, so a queued job has no injected
+  service to carry with it. All four sweeps default through `resolve_service`
+  now, the same lookup the views use, and an explicitly passed service still
+  wins over it exactly as it does for a viewset. `vinta_billing/jobs.py` had no
+  tests at all before this release; `tests/test_jobs.py` covers the four sweeps,
+  the precedence rule, and the two seams composing.
+- **`SubscriptionService.retry_failed_charge` is tested, starting with the guard
+  that keeps it off the zero-dollar money path.** Its docstring runs to eighty
+  lines about four properties and enforced none of them: the package's own
+  dunning tests drive a `FakeSubscriptionService` whose `retry_failed_charge` is
+  a no-op recorder, and that fake was the only occurrence of the name anywhere
+  in `tests/`. The load-bearing property is the provider guard -- a
+  `CollectionNotSupportedError` raised for anything other than MercadoPago must
+  re-raise rather than fall back into `_ensure_provider_plan` +
+  `change_subscription_plan`, because that pair is the operation a live Stripe
+  probe proved collects nothing at all against a real past-due invoice while
+  flipping the provider-side subscription to `active`, with an `INFO` log the
+  only way to notice. Nothing raises that error for Stripe today, which is
+  precisely why it needed a test rather than an argument. Also pinned now:
+  MercadoPago's fallback ladder order and the provider it drives;
+  `NoOutstandingBalanceError` and a declined charge both being swallowed rather
+  than raised out of a beat tick that would otherwise be redelivered and fail
+  identically forever; a blank `external_id` being tolerated on that path; and
+  the deliberate asymmetry with `retry_payment`, which raises for the same
+  conditions because somebody is waiting on the answer. `retry_payment` gets its
+  own coverage of the two things only it can get wrong -- attaching the new
+  instrument before driving the charge, and namespacing its idempotency key away
+  from the dunning ladder's, so a payer's new card is never deduplicated against
+  the scheduled attempt that just failed on the old one.
+  `EntitlementService.has_payment_method` had no test in this package either,
+  and `DunningService.enter_grace` leaving `PaymentMethod` alone -- the thing
+  that keeps a GRACE organization accruing postpaid usage -- is now asserted
+  through the real transition rather than around it. Five of these were carried
+  up from the host, which had been holding them on this package's behalf and
+  said so in its module docstring. No behaviour changed.
+- **The cycle-close row lock has a concurrency test, and the suite can run
+  against a real database.** `CycleCloseService.close_subscription` takes a
+  `SELECT ... FOR UPDATE` on the subscription row, and its docstring leans on
+  that lock to promise a period is charged at most once under concurrency --
+  the highest-severity failure this service has, because getting it wrong means
+  charging a customer twice. There was no concurrency test in the package; a
+  repo-wide grep of `tests/` for `threading` returned nothing. There could not
+  usefully have been one, either, because the suite runs on SQLite, which has no
+  row locks: Django notices and drops the clause rather than raising, so the
+  lock is silently never taken there and a two-thread test would have passed
+  against nothing. `tests/settings.py` switches to Postgres when
+  `VINTA_BILLING_TEST_POSTGRES_HOST` is set, `tox -e postgres` sets it, CI runs
+  that environment against a service container, and the new test skips itself
+  wherever the database cannot take the lock. Two threads on two connections
+  close the same subscription at once; exactly one finds a period to close, and
+  the provider is asked to charge exactly once. With the lock patched out both
+  threads close it and the assertion reports `[1, 1]`. `psycopg` joins the test
+  dependency group -- nothing was added to the package's runtime dependencies,
+  and the default `pytest` run is unchanged.
+
 ## 0.5.0
 
 Another release driven by the host application migrating onto this package, and
