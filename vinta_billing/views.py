@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from django.db.models import QuerySet
 from django.shortcuts import get_object_or_404
 from django_virtual_models.generic_views import GenericVirtualModelViewMixin
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -39,6 +39,47 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+#: The two path segments the inbound webhooks carry, declared rather than inferred.
+#:
+#: `get_extra_patterns` binds both routes with `re_path` and a bare
+#: `(?P<name>[^/.]+)` group -- deliberately, because an `@action` can spell a
+#: parameterised segment either as a regex or as a path converter and whichever
+#: one it picks is emitted literally by half the routers mounting it (see that
+#: function's docstring). drf-spectacular has nothing to infer a type from as a
+#: result, and `PaymentsViewSet` is a plain `ViewSet` with no queryset to fall
+#: back on, so it warns twice per generation and defaults both to "string".
+#:
+#: That warning is not cosmetic for an adopter. drf-spectacular re-emits it as
+#: `drf_spectacular.W001` from its `--deploy` system check, so a project whose
+#: build runs `manage.py check --deploy --fail-level WARNING` -- the shape
+#: Render's and Heroku's Django buildpacks ship -- fails its deploy on two
+#: warnings it did not cause and cannot fix without annotating this class from
+#: the outside.
+#:
+#: `id` and not `pk`: DRF's `SCHEMA_COERCE_PATH_PK` (on by default) renames the
+#: segment before parameter resolution sees it. It is an integer because it is a
+#: `Payment` id and `Payment` inherits `BaseModel` under this app's
+#: `BigAutoField` default -- the type inference would have reached the same
+#: answer had a queryset been available to reach the model.
+WEBHOOK_PATH_PARAMETERS = [
+    OpenApiParameter(
+        name="id",
+        type=OpenApiTypes.INT,
+        location=OpenApiParameter.PATH,
+        description=(
+            "The `Payment` this delivery correlates to -- the id embedded in the "
+            "`notification_url` handed to the provider when the payment was created. "
+            "A correlation aid only: nothing here is looked up or authenticated by it."
+        ),
+    ),
+    OpenApiParameter(
+        name="provider",
+        type=OpenApiTypes.STR,
+        location=OpenApiParameter.PATH,
+        description="Slug of the payment provider posting the update, e.g. `stripe`.",
+    ),
+]
 
 
 def _coerce_payment_value(value: object) -> Decimal:
@@ -116,6 +157,7 @@ class PaymentsViewSet(ViewSet):
 
     @extend_schema(
         summary="Receive payment updates",
+        parameters=WEBHOOK_PATH_PARAMETERS,
         description="This endpoint is used to receive payment updates from a payment provider.",
         request=None,
         responses={
@@ -202,6 +244,7 @@ class PaymentsViewSet(ViewSet):
 
     @extend_schema(
         summary="Receive subscription payment updates",
+        parameters=WEBHOOK_PATH_PARAMETERS,
         description=(
             "This endpoint is used to receive subscription payment updates from a payment provider."
         ),
