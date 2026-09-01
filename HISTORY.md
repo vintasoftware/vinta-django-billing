@@ -1,5 +1,39 @@
 # History
 
+## 0.7.0
+
+- **The two inbound webhooks declare their path parameters, and an adopter's
+  `--deploy` check stops failing on them.** `get_extra_patterns` binds both
+  routes with `re_path` and a bare `(?P<name>[^/.]+)` group, deliberately: an
+  `@action` can spell a parameterised segment either as a regex or as a path
+  converter, and whichever one it picks is emitted literally by half the routers
+  mounting it. What that left behind was a segment drf-spectacular had no type
+  to infer -- and `PaymentsViewSet` is a plain `ViewSet`, so there was no
+  queryset to reach a model through either. It warned twice per generation and
+  defaulted both parameters to `string`. That is not cosmetic for an adopter:
+  drf-spectacular re-emits those warnings as `drf_spectacular.W001` from its
+  `--deploy` system check, so a project whose build runs
+  `manage.py check --deploy --fail-level WARNING` -- the shape both Render's and
+  Heroku's Django buildpacks ship -- failed its deploy on two warnings it did
+  not cause and could not fix without annotating this package's class from the
+  outside. Both parameters are now declared on the `@extend_schema` annotations
+  the two actions already carried. **What an adopter must do:** nothing, unless
+  you wrote that annotation yourself against 0.6.0, in which case it is now
+  redundant and can go. **What changes in the document:** `id` is `integer`
+  rather than `string`. That is what it always was -- it is a `Payment` id, and
+  `Payment` inherits `BaseModel` under this app's `BigAutoField` default -- so
+  the inference would have reached the same answer had a queryset been
+  available. Regenerate your client if you had a typed binding for that segment.
+  The wire behaviour of both endpoints is unchanged, and both keep accepting
+  whatever `[^/.]+` accepted: nothing about the route changed, only its
+  description.
+- `tests/test_openapi_schema.py` generates the schema and fails on any warning
+  the package raises, so the next one is caught here rather than in an adopter's
+  build. Two enum-naming warnings remain and are listed there explicitly rather
+  than silenced -- closing them means either naming those choice sets from
+  inside the serializers or documenting the `ENUM_NAME_OVERRIDES` entries an
+  adopter has to add, since nothing in a library can set a project setting.
+
 ## 0.6.0
 
 The host application's second pass over this package, and everything it found
