@@ -6,7 +6,6 @@ from decimal import Decimal
 from typing import Generic, TypeVar
 
 from django.db import transaction
-from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import (
     BillingInterval,
@@ -21,6 +20,7 @@ from vinta_billing.exceptions import (
     PaymentProviderNotConfiguredError,
     UnknownPaymentProviderError,
 )
+from vinta_billing.models import AbstractBillingScope, RefundStatusUpdate, SubscriptionStatusUpdate
 from vinta_billing.models import BillingAddress as BillingAddressModel
 from vinta_billing.models import BillingPlan as BillingPlanModel
 from vinta_billing.models import BillingProfile as BillingProfileModel
@@ -28,7 +28,6 @@ from vinta_billing.models import Payment as PaymentModel
 from vinta_billing.models import PaymentStatusUpdate as PaymentStatusUpdateModel
 from vinta_billing.models import ProviderWebhookEvent as ProviderWebhookEventModel
 from vinta_billing.models import Refund as RefundModel
-from vinta_billing.models import RefundStatusUpdate, SubscriptionStatusUpdate
 from vinta_billing.models import Subscription as SubscriptionModel
 from vinta_billing.services.dataclasses import (
     BillingAddress,
@@ -111,13 +110,13 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
     #   goes through `get_configured_*_adapter`.
     # * Registry membership is also all a *validation* caller wants (e.g.
     #   `SubscriptionService.set_payment_provider`'s staff repoint, which is
-    #   legitimately allowed to point an organization at a provider whose
+    #   legitimately allowed to point an scope at a provider whose
     #   credentials this environment has not been given yet).
     # ------------------------------------------------------------------
 
     def get_payment_adapter(self, provider: str) -> PaymentAdapter:
         """Resolve the payment adapter registered for *provider* -- a URL kwarg slug,
-        an existing row's ``payment_provider``, or an organization's resolved provider.
+        an existing row's ``payment_provider``, or an scope's resolved provider.
 
         Registry lookup **only**: this answers "is ``provider`` a provider this
         deployment knows how to build an adapter for?", never "does this
@@ -205,7 +204,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
 
     def create_payment(
         self,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         currency: str,
         amount: Decimal,
         description: str,
@@ -214,16 +213,16 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         idempotency_key: str = "",
     ) -> PaymentModel:
         try:
-            billing_profile = organization.billing_profile
+            billing_profile = scope.billing_profile
         except BillingProfileModel.DoesNotExist as e:
-            raise ValueError("AbstractOrganization does not have a billing profile") from e
+            raise ValueError("AbstractBillingScope does not have a billing profile") from e
 
-        # New row: resolve from the organization -- its pin when set, the system
+        # New row: resolve from the scope -- its pin when set, the system
         # default otherwise -- never from any existing row. Resolved (and the
         # adapter looked up) *before* the `Payment` row is created, so an org
         # pinned to an unknown/unconfigured provider fails loudly with no row
         # left behind, instead of a half-created `Payment` nothing can ever drive.
-        provider = self.payment_provider_resolver.resolve_for_organization(organization)
+        provider = self.payment_provider_resolver.resolve_for_scope(scope)
         adapter = self.get_configured_payment_adapter(provider)
 
         payment = PaymentModel.objects.create(
@@ -264,9 +263,9 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         )
 
     def _serialize_billing_profile(self, billing_profile: BillingProfileModel) -> BillingProfile:
-        # Billing is owned by the organization, not a person, but the gateway still
+        # Billing is owned by the scope, not a person, but the gateway still
         # requires a payer identity (MercadoPago hard-400s on a null payer email).
-        # `contact_*` on BillingProfile is the organization's designated billing
+        # `contact_*` on BillingProfile is the scope's designated billing
         # contact, sourced explicitly rather than left null.
         if not billing_profile.contact_email:
             raise BillingProfileContactEmailMissingError
@@ -305,7 +304,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
 
     def process_payment(self, payment: PaymentModel, card_token: str) -> PaymentModel:
         # Existing row: resolve from `payment`'s own stored provider, never from
-        # the organization's current pin -- a charge made through one provider
+        # the scope's current pin -- a charge made through one provider
         # must be driven through that same provider for the rest of its life.
         adapter = self.get_configured_payment_adapter(payment.payment_provider)
         external_payment_id = adapter.process(
@@ -325,7 +324,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         currency: str,
     ) -> RefundModel:
         # Existing row: resolve from the payment being refunded's own stored
-        # provider, never the organization's current pin -- and resolve (and look
+        # provider, never the scope's current pin -- and resolve (and look
         # up the adapter for) it *before* any `Refund` row exists, so an
         # unknown/unconfigured provider fails loudly with nothing left behind,
         # matching `create_payment`'s no-stray-row behavior.
@@ -394,7 +393,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
 
     def check_refund_status(self, refund: RefundModel) -> None:
         # Existing row: resolve from the refunded payment's own stored provider,
-        # never the organization's current pin.
+        # never the scope's current pin.
         adapter = self.get_configured_payment_adapter(refund.payment.payment_provider)
         refund.status = adapter.check_refund_status(
             Refund(
@@ -452,15 +451,12 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         payment_external_id = subscription_payment_data.external_id
         payment = self.get_payment_by_external_id(payment_external_id)
         if not payment:
-            billing_profile = BillingProfileModel.objects.filter(
-                organization=subscription.organization
-            ).first()
+            billing_profile = BillingProfileModel.objects.filter(scope=subscription.scope).first()
             if billing_profile is None:
                 logger.warning(
-                    "Cannot create payment for subscription %s: organization %s has no "
-                    "billing profile.",
+                    "Cannot create payment for subscription %s: scope %s has no billing profile.",
                     subscription.id,
-                    subscription.organization_id,
+                    subscription.scope_id,
                 )
                 return None
             payment = PaymentModel.objects.create(
@@ -591,14 +587,12 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         return result
 
     def _serialize_subscription(self, subscription: SubscriptionModel) -> Subscription:
-        organization_billing_profile = BillingProfileModel.objects.filter(
-            organization=subscription.organization
-        ).first()
-        if organization_billing_profile is None:
+        scope_billing_profile = BillingProfileModel.objects.filter(scope=subscription.scope).first()
+        if scope_billing_profile is None:
             logger.warning(
-                "Cannot serialize subscription %s: organization %s has no billing profile.",
+                "Cannot serialize subscription %s: scope %s has no billing profile.",
                 subscription.id,
-                subscription.organization_id,
+                subscription.scope_id,
             )
             raise MissingBillingProfileError
         return Subscription(
@@ -606,7 +600,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
             plan=self.subscription_plan_factory.make_plan_from_subscription(subscription),
             status=subscription.status,
             external_id=subscription.external_id,
-            billing_profile=self._serialize_billing_profile(organization_billing_profile),
+            billing_profile=self._serialize_billing_profile(scope_billing_profile),
             start_date=subscription.current_period_start.strftime("%Y-%m-%d"),
             end_date=subscription.current_period_end.strftime("%Y-%m-%d"),
         )
@@ -615,7 +609,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         """Create *plan*'s provider-side plan/price object at *provider*.
 
         ``provider`` is explicit rather than resolved here: this method takes a
-        bare ``Plan`` dataclass with no organization or subscription attached, so
+        bare ``Plan`` dataclass with no scope or subscription attached, so
         it has nothing of its own to resolve a provider from. Every caller
         already has a ``Subscription`` in hand and passes its own
         ``payment_provider`` -- an existing row's stored provider, the same rule
@@ -649,34 +643,34 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
 
     def create_subscription(
         self,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         plan: BillingPlanModel,
         current_period_start: datetime.datetime,
         current_period_end: datetime.datetime,
         billing_interval: str = BillingInterval.MONTHLY,
     ) -> SubscriptionModel:
         # NOTE: this is an unconditional ``SubscriptionModel.objects.create`` against
-        # a ``OneToOneField`` to ``organization``. Every billing-root organization
+        # a ``OneToOneField`` to ``scope``. Every billing-root scope
         # already has a ``Subscription`` (see
-        # ``SubscriptionService.create_subscription_for_organization``), so calling
+        # ``SubscriptionService.create_subscription_for_scope``), so calling
         # this against one raises ``IntegrityError``, and it does not create
         # ``SubscriptionPlanLimit`` / ``SubscriptionEntitlement`` rows even when it
         # succeeds. Currently exercised only by tests. Do not build new
         # subscription-creation flows on this path — use ``SubscriptionService``
         # instead; this needs reconciling with the "no plan-less state" rule before
         # it is used for real.
-        if not BillingProfileModel.objects.filter(organization=organization).exists():
+        if not BillingProfileModel.objects.filter(scope=scope).exists():
             raise MissingBillingProfileError
 
-        # New row: resolve from the organization, exactly like `create_payment` --
+        # New row: resolve from the scope, exactly like `create_payment` --
         # and, same as there, resolve (and look up the adapter for) it *before*
         # the `Subscription` row is created, so an org pinned to an
         # unknown/unconfigured provider fails loudly with no row left behind.
-        provider = self.payment_provider_resolver.resolve_for_organization(organization)
+        provider = self.payment_provider_resolver.resolve_for_scope(scope)
         self.assert_subscription_provider_configured(provider)
 
         subscription = SubscriptionModel.objects.create(
-            organization=organization,
+            scope=scope,
             plan=plan,
             billing_interval=billing_interval,
             current_period_start=current_period_start,
@@ -744,7 +738,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         exactly like `change_subscription_plan`/`cancel_subscription` above.
         Existing row: resolves from `subscription`'s own stored provider (Rule
         A) -- a subscription with live provider-side state must be driven at
-        the provider holding it, never the organization's current pin.
+        the provider holding it, never the scope's current pin.
 
         `SubscriptionService.retry_payment` is this method's first (and, as of
         this writing, only) caller: it calls this *before* `retry_failed_charge`
@@ -768,7 +762,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         it is not `change_subscription_plan`. Existing row: resolves from
         `subscription`'s own stored
         provider (Rule A) -- a subscription with live provider-side state must
-        be driven at the provider holding it, never the organization's current
+        be driven at the provider holding it, never the scope's current
         pin.
 
         `payment_token` is optional -- this method has two callers with two

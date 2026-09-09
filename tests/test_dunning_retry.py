@@ -25,7 +25,7 @@ went untested through 0.5.0. Four properties are documented at length on
 The first four classes below were carried up from the host application that
 found the gap, which had been holding this coverage on the package's behalf
 (``payments/tests/services/test_dunning_retry_tolerance.py``). Rewritten against
-this suite's own fixtures and the swappable organization model, so they hold
+this suite's own fixtures and the swappable scope model, so they hold
 under ``tests.settings_swapped`` too.
 """
 
@@ -236,9 +236,9 @@ class TestTheMoneyPathGuard:
     def test_the_fallback_drives_the_subscriptions_own_provider(
         self, subscription_service, payment_service, in_grace, billing_profile
     ):
-        """The provider comes off the *subscription*, never the organization's
+        """The provider comes off the *subscription*, never the scope's
         current pin. A subscription attached at MercadoPago keeps being driven
-        at MercadoPago after the organization repoints its default elsewhere --
+        at MercadoPago after the scope repoints its default elsewhere --
         otherwise the fallback would mint a plan at a provider this subscriber
         has no relationship with."""
         payment_service.raise_collection_not_supported = True
@@ -301,7 +301,7 @@ class TestTheBeatTickToleratesWhatItCannotFix:
         assert payment_service.calls == ["pay_outstanding_invoice"]
 
     def test_the_ladders_bookkeeping_still_advances_through_a_swallowed_outcome(
-        self, dunning_service, payment_service, in_grace, membership
+        self, dunning_service, payment_service, in_grace
     ):
         """The swallow is not "the tick did not happen". ``last_dunning_attempt_at``
         is stamped and the rung's reminder is sent regardless, which is what walks
@@ -333,31 +333,29 @@ class TestGraceLeavesTheCardAlone:
 
     A failed *charge* says nothing about whether the instrument is still
     attached, and ``has_payment_method`` is what the postpaid guard reads before
-    letting an organization keep accruing metered usage. If ``enter_grace``
-    deactivated the card, a GRACE organization would stop accruing the moment its
+    letting an scope keep accruing metered usage. If ``enter_grace``
+    deactivated the card, a GRACE scope would stop accruing the moment its
     renewal failed -- silently, and through a path nothing else in the suite
     covers, because every other test sets ``billing_state`` by hand rather than
     going through the transition.
     """
 
-    def test_a_card_on_file_survives_entering_grace(
-        self, dunning_service, subscription, organization, membership
-    ):
+    def test_a_card_on_file_survives_entering_grace(self, dunning_service, subscription, scope):
         entitlement_service = EntitlementService()
         PaymentMethod.objects.create(
-            organization=organization,
+            scope=scope,
             provider=PaymentProviders.STRIPE,
             external_id="card-on-file",
             is_active=True,
         )
-        assert entitlement_service.has_payment_method(organization) is True
+        assert entitlement_service.has_payment_method(scope) is True
 
         dunning_service.enter_grace(subscription)
 
         subscription.refresh_from_db()
         assert subscription.billing_state == BillingState.GRACE
-        assert entitlement_service.has_payment_method(organization) is True
-        assert PaymentMethod.objects.filter(organization=organization, is_active=True).count() == 1
+        assert entitlement_service.has_payment_method(scope) is True
+        assert PaymentMethod.objects.filter(scope=scope, is_active=True).count() == 1
 
 
 class TestHasPaymentMethod:
@@ -368,34 +366,34 @@ class TestHasPaymentMethod:
     pinning are the two that the old state-based proxy got wrong.
     """
 
-    def test_no_record_means_no_instrument(self, organization, entitlement_service):
-        assert entitlement_service.has_payment_method(organization) is False
+    def test_no_record_means_no_instrument(self, scope, entitlement_service):
+        assert entitlement_service.has_payment_method(scope) is False
 
-    def test_an_active_record_means_an_instrument(self, organization, entitlement_service):
+    def test_an_active_record_means_an_instrument(self, scope, entitlement_service):
         PaymentMethod.objects.create(
-            organization=organization,
+            scope=scope,
             provider=PaymentProviders.STRIPE,
             external_id="card-1",
             is_active=True,
         )
 
-        assert entitlement_service.has_payment_method(organization) is True
+        assert entitlement_service.has_payment_method(scope) is True
 
-    def test_a_deactivated_record_does_not_count(self, organization, entitlement_service):
+    def test_a_deactivated_record_does_not_count(self, scope, entitlement_service):
         """An admin removing the instrument leaves the row behind, deactivated.
-        An ``ACTIVE`` organization with no *current* card is exactly the case the
+        An ``ACTIVE`` scope with no *current* card is exactly the case the
         old ``billing_state`` proxy answered ``True`` for."""
         PaymentMethod.objects.create(
-            organization=organization,
+            scope=scope,
             provider=PaymentProviders.STRIPE,
             external_id="card-1",
             is_active=False,
         )
 
-        assert entitlement_service.has_payment_method(organization) is False
+        assert entitlement_service.has_payment_method(scope) is False
 
     def test_a_grace_organization_with_a_card_still_has_one(
-        self, organization, subscription, entitlement_service
+        self, scope, subscription, entitlement_service
     ):
         """The other case the proxy got wrong, and the one
         ``TestGraceLeavesTheCardAlone`` depends on: ``GRACE`` had to read
@@ -403,13 +401,13 @@ class TestHasPaymentMethod:
         subscription.billing_state = BillingState.GRACE
         subscription.save(update_fields=["billing_state"])
         PaymentMethod.objects.create(
-            organization=organization,
+            scope=scope,
             provider=PaymentProviders.STRIPE,
             external_id="card-1",
             is_active=True,
         )
 
-        assert entitlement_service.has_payment_method(organization) is True
+        assert entitlement_service.has_payment_method(scope) is True
 
 
 class TestRetryPaymentOrderingAndKeying:

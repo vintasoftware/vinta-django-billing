@@ -49,7 +49,7 @@ class TestEverySubclassRenderedByTheHandlerHasANonDefaultCode:
     """
 
     def test_payment_token_required_error(self):
-        error = PaymentTokenRequiredError(organization_id=1)
+        error = PaymentTokenRequiredError(scope_id=1)
 
         assert error.code == "payment_token_required"
         assert error.code != BillingError.code
@@ -61,7 +61,7 @@ class TestEverySubclassRenderedByTheHandlerHasANonDefaultCode:
         assert error.code != BillingError.code
 
     def test_unconfirmed_plan_change_error(self):
-        error = UnconfirmedPlanChangeError(organization_id=1)
+        error = UnconfirmedPlanChangeError(scope_id=1)
 
         assert error.code == "unconfirmed_plan_change"
         assert error.code != BillingError.code
@@ -101,7 +101,7 @@ class TestNewSubclassesInheritTheBaseErrorBody:
     ``OverLimitError`` -- must render through the inherited two-key contract."""
 
     def test_payment_token_required_error_renders_the_shared_two_key_body(self):
-        error = PaymentTokenRequiredError(organization_id=42)
+        error = PaymentTokenRequiredError(scope_id=42)
 
         assert error.as_error_body() == {
             "code": "payment_token_required",
@@ -117,7 +117,7 @@ class TestNewSubclassesInheritTheBaseErrorBody:
         }
 
     def test_unconfirmed_plan_change_error_renders_the_shared_two_key_body(self):
-        error = UnconfirmedPlanChangeError(organization_id=42)
+        error = UnconfirmedPlanChangeError(scope_id=42)
 
         assert error.as_error_body() == {
             "code": "unconfirmed_plan_change",
@@ -169,7 +169,7 @@ class TestOverLimitErrorIsFrozen:
         )
 
         assert error.as_error_body() == {
-            "detail": "Organization is at its limit for widgets.",
+            "detail": "You are at your limit for widgets.",
             "code": "limit_exceeded",
             "resource": "widgets",
             "current_usage": 10,
@@ -191,6 +191,4 @@ class TestOverLimitErrorIsFrozen:
             remedy="upgrade_plan",
         )
 
-        assert error.as_error_body()["detail"] == (
-            "Organization is at its limit for never_registered."
-        )
+        assert error.as_error_body()["detail"] == ("You are at your limit for never_registered.")

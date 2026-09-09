@@ -112,7 +112,7 @@ def get_routes() -> list[RouteDict]:
 def get_extra_patterns(trailing_slash: bool = True) -> list[URLPattern]:
     """Endpoints bound directly rather than through the router.
 
-    The payment-provider endpoints are singletons -- one per organization, with
+    The payment-provider endpoints are singletons -- one per scope, with
     no list and no primary key -- so they are bound to explicit paths instead of
     being given a router prefix that implies a collection.
 

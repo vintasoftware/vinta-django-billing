@@ -61,7 +61,7 @@ class BillingPlanSerializer(v.VirtualModelSerializer):
             "slug",
             "name",
             "is_active",
-            "is_default_for_new_organizations",
+            "is_default_for_new_scopes",
             "monthly_price",
             "annual_price",
             "currency",
@@ -166,21 +166,21 @@ class AddOnPurchaseRequestSerializer(serializers.Serializer):
     payment_token = serializers.CharField(max_length=255, required=False, allow_blank=True)
 
 
-class UsageByOrganizationSerializer(serializers.Serializer):
-    """One organization's contribution to a pooled ``GET /billing/usage/`` figure.
+class UsageByScopeSerializer(serializers.Serializer):
+    """One scope's contribution to a pooled ``GET /billing/usage/`` figure.
 
     Sourced from ``EntitlementService.get_usage_breakdown`` / the ``usage_breakdown_for_root``
-    entry point it shares with ``CycleCloseService``. An organization in the pool
+    entry point it shares with ``CycleCloseService``. An scope in the pool
     that contributed **nothing** to this resource is **omitted from the list
     entirely** -- never present with ``usage: 0`` -- matching that breakdown's
     absent-not-zero contract.
     """
 
-    organization_id = serializers.IntegerField(
-        help_text="pk of the contributing organization, within the caller's pooled billing subtree."
+    scope_id = serializers.IntegerField(
+        help_text="pk of the contributing scope, within the caller's pooled billing subtree."
     )
-    name = serializers.CharField(help_text="The contributing organization's name.")
-    usage = serializers.IntegerField(help_text="This organization's share of the resource's usage.")
+    name = serializers.CharField(help_text="The contributing scope's name.")
+    usage = serializers.IntegerField(help_text="This scope's share of the resource's usage.")
 
 
 class BillingPlanSnapshotSerializer(serializers.Serializer):
@@ -232,19 +232,19 @@ class EffectiveLimitUsageSerializer(serializers.Serializer):
             "non-null -- these two fields decompose limit_value, they do not redefine it."
         )
     )
-    by_organization = UsageByOrganizationSerializer(
+    by_scope = UsageByScopeSerializer(
         many=True,
         help_text=(
-            "Per-organization attribution of current_usage across the caller's pooled "
-            "billing subtree. An organization that contributed nothing is omitted, "
-            "never present with usage: 0. Ordered by organization_id ascending."
+            "Per-scope attribution of current_usage across the caller's pooled "
+            "billing subtree. An scope that contributed nothing is omitted, "
+            "never present with usage: 0. Ordered by scope_id ascending."
         ),
     )
 
 
 class UsageResponseSerializer(serializers.Serializer):
     billing_state = serializers.CharField()
-    billing_root_organization_id = serializers.IntegerField(
+    billing_root_scope_id = serializers.IntegerField(
         help_text="pk of the billing root this response was resolved against."
     )
     plan = BillingPlanSnapshotSerializer(
@@ -317,18 +317,18 @@ class BillingPeriodResourceUsageSerializer(serializers.ModelSerializer):
             "resource, or when no single stamped price applies to this period."
         ),
     )
-    by_organization = UsageByOrganizationSerializer(
+    by_scope = UsageByScopeSerializer(
         many=True,
-        source="_by_organization_rows",
+        source="_by_scope_rows",
         help_text=(
-            "Per-organization contribution to total, across the pooled subtree at "
-            "close time. An organization that contributed nothing is omitted, "
-            "never present with usage: 0. Ordered by organization_id ascending -- "
-            "the identical shape GET /billing/usage/'s by_organization uses. "
-            "Names are resolved at **read time** against the organizations table, "
-            "so they reflect each organization's current name, not its name as of "
+            "Per-scope contribution to total, across the pooled subtree at "
+            "close time. An scope that contributed nothing is omitted, "
+            "never present with usage: 0. Ordered by scope_id ascending -- "
+            "the identical shape GET /billing/usage/'s by_scope uses. "
+            "Names are resolved at **read time** against the scopes table, "
+            "so they reflect each scope's current name, not its name as of "
             "when this period closed -- this row has no name snapshot. An "
-            'organization that no longer exists renders with name: "" rather '
+            'scope that no longer exists renders with name: "" rather '
             "than being dropped from the list; its count still counts toward total."
         ),
     )
@@ -341,25 +341,25 @@ class BillingPeriodResourceUsageSerializer(serializers.ModelSerializer):
             "total",
             "limit_value",
             "overage_unit_price",
-            "by_organization",
+            "by_scope",
         )
         read_only_fields = fields
 
     def to_representation(self, instance):
-        """Build the ``UsageByOrganizationSerializer``-shaped rows from the
-        model's persisted ``{str(organization_id): count}`` blob plus the
-        ``organization_names`` map the view resolves once per request and
+        """Build the ``UsageByScopeSerializer``-shaped rows from the
+        model's persisted ``{str(scope_id): count}`` blob plus the
+        ``scope_labels`` map the view resolves once per request and
         threads through ``context`` -- see ``BillingPeriodViewSet.retrieve``.
         """
-        organization_names: dict[int, str] = self.context.get("organization_names", {})
-        instance._by_organization_rows = [
+        scope_labels: dict[int, str] = self.context.get("scope_labels", {})
+        instance._by_scope_rows = [
             {
-                "organization_id": organization_id,
-                "name": organization_names.get(organization_id, ""),
+                "scope_id": scope_id,
+                "name": scope_labels.get(scope_id, ""),
                 "usage": usage,
             }
-            for organization_id, usage in sorted(
-                (int(pk), usage) for pk, usage in instance.by_organization.items()
+            for scope_id, usage in sorted(
+                (int(pk), usage) for pk, usage in instance.by_scope.items()
             )
         ]
         return super().to_representation(instance)
@@ -476,7 +476,7 @@ class BillingProfileSerializer(v.VirtualModelSerializer):
     Serializer for BillingProfile virtual model.
     """
 
-    id = serializers.IntegerField(source="organization_id", read_only=True)
+    id = serializers.IntegerField(source="scope_id", read_only=True)
     billing_address = BillingAddressSerializer()
     document_type = serializers.ChoiceField(choices=DocumentTypes.choices)
 
@@ -505,16 +505,14 @@ class BillingProfileSerializer(v.VirtualModelSerializer):
         """
         Create a new BillingProfile and its related BillingAddress.
         """
-        organization = self.context["request"].organization
-        if organization is None:
-            raise PermissionDenied(
-                "An active organization is required to create a billing profile."
-            )
+        scope = self.context["request"].scope
+        if scope is None:
+            raise PermissionDenied("An active scope is required to create a billing profile.")
 
         billing_address_data = validated_data.pop("billing_address")
         billing_address = BillingAddress.objects.create(**billing_address_data)
         billing_profile = BillingProfile.objects.create(
-            organization=organization,
+            scope=scope,
             billing_address=billing_address,
             **validated_data,
         )
@@ -584,14 +582,14 @@ class PaymentProviderSerializer(serializers.Serializer):
         }
 
 
-class MeteredOccurrenceOrganizationSerializer(serializers.Serializer):
-    """The organization a ledger row is attributed to -- ``GET
-    /billing/usage/occurrences/``'s ``organization`` field. Names are batch
+class MeteredOccurrenceScopeSerializer(serializers.Serializer):
+    """The scope a ledger row is attributed to -- ``GET
+    /billing/usage/occurrences/``'s ``scope`` field. Names are batch
     resolved by the view (``MeteredOccurrenceViewSet``) once per page, the
-    same pattern ``UsageByOrganizationSerializer`` uses."""
+    same pattern ``UsageByScopeSerializer`` uses."""
 
-    id = serializers.IntegerField(help_text="pk of the attributed organization.")
-    name = serializers.CharField(help_text="The attributed organization's name.")
+    id = serializers.IntegerField(help_text="pk of the attributed scope.")
+    name = serializers.CharField(help_text="The attributed scope's name.")
 
 
 class LedgerEventSerializer(serializers.Serializer):
@@ -620,16 +618,16 @@ class MeteredOccurrenceSerializer(serializers.ModelSerializer):
     behind an overage charge, so a customer disputing an invoice can tie every
     unit of money to a specific occurrence.
 
-    ``event``/``organization`` are not model relations on ``MeteredOccurrence``
-    (``event_id`` is a soft reference; ``organization`` has no name of its own
+    ``event``/``scope`` are not model relations on ``MeteredOccurrence``
+    (``event_id`` is a soft reference; ``scope`` has no name of its own
     here) -- both are built in ``to_representation`` from maps the view
     resolves once per page and threads through ``context`` (``event_map``,
-    ``organization_names``), never a per-row query.
+    ``scope_labels``), never a per-row query.
     """
 
-    organization = MeteredOccurrenceOrganizationSerializer(
-        source="_organization_row",
-        help_text="The organization this occurrence is attributed to.",
+    scope = MeteredOccurrenceScopeSerializer(
+        source="_scope_row",
+        help_text="The scope this occurrence is attributed to.",
     )
     event = LedgerEventSerializer(
         source="_event_row",
@@ -646,7 +644,7 @@ class MeteredOccurrenceSerializer(serializers.ModelSerializer):
         model = MeteredOccurrence
         fields = (
             "id",
-            "organization",
+            "scope",
             "event",
             "occurrence_start",
             "billing_period_start",
@@ -656,12 +654,12 @@ class MeteredOccurrenceSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
     def to_representation(self, instance: MeteredOccurrence):
-        organization_names: dict[int, str] = self.context.get("organization_names", {})
+        scope_labels: dict[int, str] = self.context.get("scope_labels", {})
         event_map: dict[int, dict] = self.context.get("event_map", {})
 
-        instance._organization_row = {  # type: ignore[attr-defined]
-            "id": instance.organization_id,
-            "name": organization_names.get(instance.organization_id, ""),
+        instance._scope_row = {  # type: ignore[attr-defined]
+            "id": instance.scope_id,
+            "name": scope_labels.get(instance.scope_id, ""),
         }
 
         detail = event_map.get(instance.event_id)

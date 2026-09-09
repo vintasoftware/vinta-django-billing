@@ -1,14 +1,14 @@
 """Proactive approaching-limit / limit-reached warnings.
 
 ``GET /billing/usage/`` (``vinta_billing/billing_views.py``) is the *pull* side of
-"an organization can see where it stands"; this is the *push* side -- an
-organization is warned before it is blocked rather than by being blocked.
+"an scope can see where it stands"; this is the *push* side -- an
+scope is warned before it is blocked rather than by being blocked.
 
 Both sides -- and the enforcement checks themselves
 (``EntitlementService.check_limit`` / ``check_postpaid_allowance``) -- read
 the *same* ceiling: ``EntitlementService.get_effective_limit`` /
 ``get_current_usage``. There is deliberately no second "how close is this
-organization to its limit" computation in this module; ``_ratio`` below is
+scope to its limit" computation in this module; ``_ratio`` below is
 the *only* place "approaching" is defined, so an org can never be told it has
 headroom a guard then denies, or vice versa.
 """
@@ -18,10 +18,9 @@ import logging
 from decimal import Decimal
 
 from django.db import transaction
-from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import BillingState, LimitWarningLevel
-from vinta_billing.models import LimitWarningNotification, Subscription
+from vinta_billing.models import AbstractBillingScope, LimitWarningNotification, Subscription
 from vinta_billing.notifications import NotificationTypes, Notifier, get_notifier
 from vinta_billing.recipients import get_billing_recipients
 from vinta_billing.registry import resources
@@ -31,7 +30,7 @@ from vinta_billing.services.subscription_service import current_billing_period_s
 
 logger = logging.getLogger(__name__)
 
-#: Usage/limit ratio at which an organization is warned it is *approaching* its
+#: Usage/limit ratio at which an scope is warned it is *approaching* its
 #: effective limit, before it is ever blocked. The default threshold is 80%.
 #: This is the *only* definition of
 #: "approaching" in this codebase: ``UsageWarningService`` is the sole reader,
@@ -69,13 +68,13 @@ class UsageWarningService:
         )
 
     def check_subscription(self, subscription: Subscription) -> None:
-        """Check every registered resource on ``subscription``'s organization
+        """Check every registered resource on ``subscription``'s scope
         against its effective limit and send an approaching-limit or
         limit-reached in-app notification -- at most once per resource per
         level per billing cycle (see ``LimitWarningNotification``).
 
         A no-op for a subscription whose billing root is already ``RESTRICTED``
-        or ``CANCELLED``: a ``RESTRICTED`` organization already knows it is
+        or ``CANCELLED``: a ``RESTRICTED`` scope already knows it is
         blocked (from the restricted notification), and warning it that it is
         "approaching" a limit it is already over adds nothing; ``CANCELLED``
         is running out the clock to ``FREE``, not accruing toward anything
@@ -96,11 +95,11 @@ class UsageWarningService:
         if subscription.billing_state in (BillingState.RESTRICTED, BillingState.CANCELLED):
             return
 
-        organization = subscription.organization
+        scope = subscription.scope
         billing_period_start = current_billing_period_start(subscription)
         for resource_key in resources.keys():
             try:
-                self._check_resource(subscription, organization, resource_key, billing_period_start)
+                self._check_resource(subscription, scope, resource_key, billing_period_start)
             except Exception:
                 logger.exception(
                     "Approaching-limit check failed for subscription %s, resource %s; "
@@ -112,11 +111,11 @@ class UsageWarningService:
     def _check_resource(
         self,
         subscription: Subscription,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         resource_key: str,
         billing_period_start: datetime.datetime,
     ) -> None:
-        effective_limit = self.entitlement_service.get_effective_limit(organization, resource_key)
+        effective_limit = self.entitlement_service.get_effective_limit(scope, resource_key)
         if effective_limit.is_unlimited:
             return  # No ceiling -- nothing to approach. limit_value is None here.
 
@@ -125,7 +124,7 @@ class UsageWarningService:
         # mirrors `EntitlementService.check_limit`'s identical `ceiling =
         # effective_limit.limit_value or 0`.
         limit_value = effective_limit.limit_value or 0
-        current_usage = self.entitlement_service.get_current_usage(organization, resource_key)
+        current_usage = self.entitlement_service.get_current_usage(scope, resource_key)
         level = self._level_for(current_usage, limit_value)
         if level is None:
             return
@@ -169,7 +168,7 @@ class UsageWarningService:
         dividing by zero. Any usage at all against a zero ceiling already *is*
         the ceiling (ratio 1, i.e. ``REACHED``); zero usage against a zero
         ceiling has nothing to warn about (ratio 0) -- a resource an
-        organization has never touched should never generate a notification.
+        scope has never touched should never generate a notification.
         """
         if limit_value <= 0:
             return Decimal(1) if current_usage > 0 else Decimal(0)
@@ -185,9 +184,9 @@ class UsageWarningService:
     ) -> None:
         if self.notification_service is None:
             return
-        organization = subscription.organization
+        scope = subscription.scope
         context_kwargs = {
-            "organization_name": organization.name,
+            "scope_name": scope.label,
             "resource_key": resource_key,
             "current_usage": current_usage,
             "limit_value": limit_value,
@@ -212,8 +211,8 @@ class UsageWarningService:
             )
 
     def _recipient_user_ids(self, subscription: Subscription) -> list[int]:
-        """Admins and billing owners of ``subscription.organization`` --
+        """Admins and billing owners of ``subscription.scope`` --
         mirrors ``DunningService._recipient_user_ids``. Resolved on the
-        subscription's own organization (the billing root), never the pooled
+        subscription's own scope (the billing root), never the pooled
         subtree -- one commercial relationship per reseller tree."""
-        return list(get_billing_recipients(subscription.organization))
+        return list(get_billing_recipients(subscription.scope))

@@ -1,7 +1,7 @@
 """Approaching-limit and limit-reached warnings.
 
 Debouncing is the whole point of this service: the beat sweep re-checks every
-subscription on every tick, so without the marker an organization sitting at 85%
+subscription on every tick, so without the marker an scope sitting at 85%
 of its seat limit would be told so every few minutes for a month.
 """
 
@@ -41,9 +41,9 @@ def service(notifier):
     return UsageWarningService(notification_service=notifier)
 
 
-def make_widgets(organization, count):
+def make_widgets(scope, count):
     for index in range(count):
-        Widget.objects.create(organization=organization, name="w%d" % index)
+        Widget.objects.create(scope=scope, name="w%d" % index)
 
 
 class TestLevelThresholds:
@@ -64,7 +64,7 @@ class TestLevelThresholds:
         assert UsageWarningService._level_for(1, 0) == LimitWarningLevel.REACHED
 
     def test_no_usage_against_a_zero_ceiling_is_silent(self):
-        """A resource the organization has never touched must not be warned
+        """A resource the scope has never touched must not be warned
         about."""
         assert UsageWarningService._level_for(0, 0) is None
 
@@ -75,29 +75,25 @@ class TestLevelThresholds:
 
 
 class TestCheckSubscription:
-    def test_warns_when_usage_crosses_the_threshold(
-        self, service, notifier, organization, subscription, membership
-    ):
-        make_widgets(organization, 3)  # ceiling 3 -> reached
+    def test_warns_when_usage_crosses_the_threshold(self, service, notifier, scope, subscription):
+        make_widgets(scope, 3)  # ceiling 3 -> reached
 
         service.check_subscription(subscription)
 
         assert len(notifier.calls) == 1
         assert notifier.calls[0]["context_kwargs"]["resource_key"] == "widgets"
 
-    def test_stays_silent_below_the_threshold(
-        self, service, notifier, organization, subscription, membership
-    ):
-        make_widgets(organization, 1)  # 1/3 = 33%
+    def test_stays_silent_below_the_threshold(self, service, notifier, scope, subscription):
+        make_widgets(scope, 1)  # 1/3 = 33%
 
         service.check_subscription(subscription)
 
         assert notifier.calls == []
 
     def test_writes_a_marker_so_the_next_tick_is_debounced(
-        self, service, notifier, organization, subscription, membership
+        self, service, notifier, scope, subscription
     ):
-        make_widgets(organization, 3)
+        make_widgets(scope, 3)
 
         service.check_subscription(subscription)
         service.check_subscription(subscription)
@@ -111,9 +107,9 @@ class TestCheckSubscription:
         )
 
     def test_approaching_and_reached_debounce_independently(
-        self, service, notifier, organization, plan, make_subscription, membership
+        self, service, notifier, scope, plan, make_subscription
     ):
-        """An organization gets exactly one "you're close" and, separately, one
+        """An scope gets exactly one "you're close" and, separately, one
         "you're at your limit" per resource per cycle -- not one or the other.
 
         Needs a ceiling of 10: with a ceiling of 3 the approaching band
@@ -121,13 +117,13 @@ class TestCheckSubscription:
         so usage jumps straight from silent to reached.
         """
         plan.limits.filter(resource_key="widgets").update(limit_value=10)
-        subscription = make_subscription(organization, plan)
-        make_widgets(organization, 8)
+        subscription = make_subscription(scope, plan)
+        make_widgets(scope, 8)
 
         service.check_subscription(subscription)
         approaching = list(notifier.calls)
 
-        make_widgets(organization, 2)
+        make_widgets(scope, 2)
         service.check_subscription(subscription)
 
         levels = set(
@@ -140,31 +136,31 @@ class TestCheckSubscription:
         assert len(notifier.calls) == 2
 
     def test_a_second_tick_at_the_same_level_stays_silent(
-        self, service, notifier, organization, plan, make_subscription, membership
+        self, service, notifier, scope, plan, make_subscription
     ):
         """The marker is per (resource, level, cycle), so re-checking while still
         approaching sends nothing further."""
         plan.limits.filter(resource_key="widgets").update(limit_value=10)
-        subscription = make_subscription(organization, plan)
-        make_widgets(organization, 8)
+        subscription = make_subscription(scope, plan)
+        make_widgets(scope, 8)
 
         service.check_subscription(subscription)
-        make_widgets(organization, 1)  # still approaching, 9/10
+        make_widgets(scope, 1)  # still approaching, 9/10
         service.check_subscription(subscription)
 
         assert len(notifier.calls) == 1
 
     def test_a_new_billing_period_warns_again(
-        self, service, notifier, organization, plan, make_subscription, membership
+        self, service, notifier, scope, plan, make_subscription
     ):
         """The debounce is per cycle, not forever."""
         subscription = make_subscription(
-            organization,
+            scope,
             plan,
             current_period_start=datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC),
             current_period_end=datetime.datetime(2026, 4, 1, tzinfo=datetime.UTC),
         )
-        make_widgets(organization, 3)
+        make_widgets(scope, 3)
 
         with freeze_time("2026-03-15T00:00:00Z"):
             service.check_subscription(subscription)
@@ -174,10 +170,10 @@ class TestCheckSubscription:
         assert len(notifier.calls) == 2
 
     def test_an_unlimited_resource_never_warns(
-        self, service, notifier, organization, unlimited_plan, make_subscription, membership
+        self, service, notifier, scope, unlimited_plan, make_subscription
     ):
-        subscription = make_subscription(organization, unlimited_plan)
-        make_widgets(organization, 50)
+        subscription = make_subscription(scope, unlimited_plan)
+        make_widgets(scope, 50)
 
         service.check_subscription(subscription)
 
@@ -185,11 +181,11 @@ class TestCheckSubscription:
 
     @pytest.mark.parametrize("state", [BillingState.RESTRICTED, BillingState.CANCELLED])
     def test_restricted_and_cancelled_subscriptions_are_skipped(
-        self, service, notifier, organization, subscription, membership, state
+        self, service, notifier, scope, subscription, state
     ):
-        """A restricted organization already knows it is blocked; a cancelled one
+        """A restricted scope already knows it is blocked; a cancelled one
         is running out the clock, not accruing toward anything."""
-        make_widgets(organization, 3)
+        make_widgets(scope, 3)
         subscription.billing_state = state
         subscription.save(update_fields=["billing_state"])
 
@@ -198,10 +194,10 @@ class TestCheckSubscription:
         assert notifier.calls == []
 
     def test_one_resource_failing_does_not_stop_the_others(
-        self, notifier, organization, subscription, membership, monkeypatch
+        self, notifier, scope, subscription, monkeypatch
     ):
         """The sweep is best-effort per resource: a failure on one must not cost
-        the organization its warnings on every other."""
+        the scope its warnings on every other."""
         service = UsageWarningService(notification_service=notifier)
         original = service.entitlement_service.get_effective_limit
 
@@ -211,16 +207,16 @@ class TestCheckSubscription:
             return original(org, resource_key, *args, **kwargs)
 
         monkeypatch.setattr(service.entitlement_service, "get_effective_limit", explode_on_seats)
-        make_widgets(organization, 3)
+        make_widgets(scope, 3)
 
         service.check_subscription(subscription)
 
         assert len(notifier.calls) == 1
 
     def test_the_notification_carries_the_usage_and_the_ceiling(
-        self, service, notifier, organization, subscription, membership
+        self, service, notifier, scope, subscription
     ):
-        make_widgets(organization, 3)
+        make_widgets(scope, 3)
 
         service.check_subscription(subscription)
 
@@ -229,20 +225,23 @@ class TestCheckSubscription:
         assert context["limit_value"] == 3
 
     def test_it_goes_to_the_configured_recipients(
-        self, service, notifier, organization, subscription, user, membership
+        self, service, notifier, scope, subscription, user
     ):
-        make_widgets(organization, 3)
+        make_widgets(scope, 3)
 
         service.check_subscription(subscription)
 
         assert notifier.calls[0]["user_id"] == user.pk
 
     def test_no_recipients_means_no_send_but_still_a_marker(
-        self, service, notifier, organization, subscription
+        self, service, notifier, scope, subscription
     ):
-        """Nobody is a member, so there is nobody to tell -- but the threshold
-        was still crossed, and re-checking every tick should not re-run."""
-        make_widgets(organization, 3)
+        """The scope has no owner, so there is nobody to tell -- but the
+        threshold was still crossed, and re-checking every tick should not
+        re-run."""
+        scope.owner = None
+        scope.save(update_fields=["owner", "modified"])
+        make_widgets(scope, 3)
 
         service.check_subscription(subscription)
 

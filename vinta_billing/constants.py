@@ -13,7 +13,7 @@ from vinta_billing.provider_slugs import MERCADOPAGO, STRIPE
 
 
 class BillingState(TextChoices):
-    """Billing lifecycle state of an organization's ``Subscription``.
+    """Billing lifecycle state of a scope's ``Subscription``.
 
     The billing state machine's transition table is the authority on the
     transitions between these states.
@@ -97,7 +97,7 @@ class LimitWarningLevel(TextChoices):
     ``UsageWarningService``.
 
     Two distinct notifications, each debounced independently (see
-    ``LimitWarningNotification``'s unique constraint) so an organization gets
+    ``LimitWarningNotification``'s unique constraint) so a scope gets
     exactly one "you're close" and, separately, exactly one "you're at your
     limit" per resource per billing cycle -- never a rising flood of duplicate
     warnings as the checker re-runs on every beat tick.
@@ -155,3 +155,21 @@ class PaymentProviders(TextChoices):
 
     MERCADOPAGO = (MERCADOPAGO, "MercadoPago")
     STRIPE = (STRIPE, "Stripe")
+
+
+class ScopeType(TextChoices):
+    """The two kinds of payer this package itself knows how to name.
+
+    Deliberately *not* passed as ``choices`` to ``AbstractBillingScope.scope_type``,
+    and the reason is the whole point of the scope model. A project's kinds of
+    payer are its own -- a workspace, a project, a household, a franchise -- and
+    it must be able to store one without a migration or a fork. These are the two
+    values the shipped code writes; the column accepts any string.
+
+    ``ORGANIZATION`` is the default because it is what every installation of this
+    package did before scopes existed, so a project that never thinks about
+    ``scope_type`` keeps the vocabulary it already had.
+    """
+
+    USER = ("user", _("User"))
+    ORGANIZATION = ("organization", _("Organization"))

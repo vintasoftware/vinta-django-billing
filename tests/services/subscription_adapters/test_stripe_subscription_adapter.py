@@ -1072,7 +1072,7 @@ def test_create_subscription_payment_from_payment_payload(adapter):
     `billing_profile` is now always an explicitly empty `BillingProfile` — see
     `_billing_profile_from_payment_intent_payload`'s docstring.
     `PaymentService.receive_subscription_payment_update` never reads it (it
-    sources billing info from the subscription's own organization), so this is
+    sources billing info from the subscription's own scope), so this is
     a shape requirement, not a functional regression.
     """
     payment_payload = {

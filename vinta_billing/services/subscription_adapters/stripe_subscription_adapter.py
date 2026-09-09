@@ -72,7 +72,7 @@ def _billing_profile_from_payment_intent_payload(payment_payload: dict) -> Billi
 
     `PaymentService.receive_subscription_payment_update` never actually reads
     `SubscriptionPayment.billing_profile` — it sources the persisted payment's
-    billing profile from the subscription's own organization instead — so this
+    billing profile from the subscription's own scope instead — so this
     exists purely to satisfy the dataclass's shape, not because anything
     downstream depends on its accuracy.
 

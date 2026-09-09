@@ -5,11 +5,11 @@ easy to break by accident:
 
 1. **NULL is unlimited, never zero.** A ``SubscriptionPlanLimit.limit_value`` of
    ``None`` means no ceiling. So does the *absence* of a row for a resource. Both
-   fail open — a missing seed row must never lock an organization out of
+   fail open — a missing seed row must never lock an scope out of
    something it could do yesterday.
 2. **Usage pools at the billing root.** A reseller child holds no
    ``Subscription``; its usage counts against its root's ceiling together with
-   every other organization in the subtree. The subtree stops at any nested
+   every other scope in the subtree. The subtree stops at any nested
    billing root, which pays for its own subtree (see
    ``vinta_billing.services.subscription_service.is_billing_root`` — the single
    definition of that predicate, deliberately not restated here).
@@ -25,13 +25,13 @@ from typing import Any
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Sum
-from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing.constants import BillingState, LimitKind, LimitRemedy
-from vinta_billing.counting import UsageContext, count_by_organization
+from vinta_billing.counting import UsageContext, count_by_scope
 from vinta_billing.exceptions import InapplicableUsageExtraError, OverLimitError
 from vinta_billing.hierarchy import get_hierarchy, resolve_billing_root
 from vinta_billing.models import (
+    AbstractBillingScope,
     MeteredOccurrence,
     PaymentMethod,
     Subscription,
@@ -93,10 +93,10 @@ def count_metered_occurrences(context: UsageContext) -> dict[int, int]:
     subscription = context.subscription
     if subscription is None:
         return {}
-    return count_by_organization(
+    return count_by_scope(
         MeteredOccurrence.objects.for_billing_period(
             subscription.pk, current_billing_period_start(subscription)
-        ).for_organizations(context.organization_ids)
+        ).for_scopes(context.scope_ids)
     )
 
 
@@ -126,17 +126,15 @@ def _validate_usage_extra(resource_key: str, usage_extra: dict[str, Any] | None)
 
 class EntitlementService:
     """Answers "what is the ceiling?", "how much is in use?", and "may I create one
-    more?" for any organization and limited resource.
+    more?" for any scope and limited resource.
 
     Stateless; built by ``vinta_billing.services.container``. Read-only — nothing here
     writes, so it is safe to call from inside a caller's transaction (and
     ``check_limit(lock=True)`` requires exactly that).
     """
 
-    def get_effective_limit(
-        self, organization: AbstractOrganization, resource_key: str
-    ) -> EffectiveLimit:
-        """Resolve ``organization``'s ceiling for ``resource_key``.
+    def get_effective_limit(self, scope: AbstractBillingScope, resource_key: str) -> EffectiveLimit:
+        """Resolve ``scope``'s ceiling for ``resource_key``.
 
         The value is the billing root's ``SubscriptionPlanLimit.limit_value`` plus
         the quantity of every active ``SubscriptionAddOn`` on the same resource.
@@ -146,12 +144,12 @@ class EntitlementService:
         ``limit_value=None`` (unlimited). Treating any of them as zero would turn a
         data gap into a total lockout, which the rollout explicitly forbids.
         """
-        root = resolve_billing_root(organization)
+        root = resolve_billing_root(scope)
         return self._effective_limit_for_subscription(
             self._get_subscription_for_root(root),
             resource_key,
             root.pk,
-            asked_for_organization_pk=organization.pk,
+            asked_for_scope_pk=scope.pk,
         )
 
     def _effective_limit_for_subscription(
@@ -159,7 +157,7 @@ class EntitlementService:
         subscription: Subscription | None,
         resource_key: str,
         root_pk: int | None = None,
-        asked_for_organization_pk: int | None = None,
+        asked_for_scope_pk: int | None = None,
     ) -> EffectiveLimit:
         """``get_effective_limit`` given an already-resolved subscription.
 
@@ -176,23 +174,23 @@ class EntitlementService:
         subscription at all, and no limit row for the resource.
 
         :param root_pk: The **billing root**'s pk — always the root, never the
-            organization that was asked about, so the warning below means one thing
+            scope that was asked about, so the warning below means one thing
             regardless of which entry point produced it. The subscription that is
             missing belongs to the root; logging a child's pk there would send
             whoever reads it looking for a subscription that was never supposed to
             exist.
-        :param asked_for_organization_pk: The organization the caller actually asked
+        :param asked_for_scope_pk: The scope the caller actually asked
             about, when it differs from the root. Context only.
         """
         if subscription is None:
             logger.warning(
                 "No subscription resolved for billing root %s (resource %s, asked for "
-                "organization %s); treating the limit as unlimited. Every billing root is "
+                "scope %s); treating the limit as unlimited. Every billing root is "
                 "expected to hold exactly one Subscription — this indicates a broken "
                 "invariant, not a normal state.",
                 root_pk,
                 resource_key,
-                asked_for_organization_pk if asked_for_organization_pk is not None else root_pk,
+                asked_for_scope_pk if asked_for_scope_pk is not None else root_pk,
             )
             return self.effective_limit_from_resolved(resource_key, plan_limit=None)
 
@@ -229,7 +227,7 @@ class EntitlementService:
         return self.effective_limit_from_resolved(resource_key, limit, add_on_quantity)
 
     def effective_limit_for_subscription(
-        self, subscription: Subscription | None, resource_key: str, root: AbstractOrganization
+        self, subscription: Subscription | None, resource_key: str, root: AbstractBillingScope
     ) -> EffectiveLimit:
         """Public entry point onto ``_effective_limit_for_subscription`` for a
         caller that already holds both ``root`` and ``subscription`` (e.g.
@@ -241,7 +239,7 @@ class EntitlementService:
         signal.
         """
         return self._effective_limit_for_subscription(
-            subscription, resource_key, root_pk=root.pk, asked_for_organization_pk=root.pk
+            subscription, resource_key, root_pk=root.pk, asked_for_scope_pk=root.pk
         )
 
     def effective_limit_from_resolved(
@@ -297,20 +295,20 @@ class EntitlementService:
 
     def get_current_usage(
         self,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         resource_key: str,
         usage_extra: dict[str, Any] | None = None,
     ) -> int:
         """Point-in-time usage of ``resource_key``, summed across the whole pooled
-        subtree that ``organization`` belongs to.
+        subtree that ``scope`` belongs to.
 
-        The subtree is every organization that resolves to the same billing root:
+        The subtree is every scope that resolves to the same billing root:
         the root itself plus all descendants, stopping at any nested billing root
         (which pays for its own subtree separately).
 
         The total is not counted directly — it is ``sum(get_usage_breakdown(...))``,
         by construction (see ``_count_usage``): there is exactly one definition of
-        "how much usage", and the per-organization breakdown and this scalar can
+        "how much usage", and the per-scope breakdown and this scalar can
         never disagree because the scalar is derived from the breakdown, not
         computed alongside it.
 
@@ -319,7 +317,7 @@ class EntitlementService:
             only checks its keys against what the resource declared -- see
             ``check_limit``.
         """
-        root = resolve_billing_root(organization)
+        root = resolve_billing_root(scope)
         return self._count_usage(
             root,
             resource_key,
@@ -329,19 +327,19 @@ class EntitlementService:
 
     def get_usage_breakdown(
         self,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         resource_key: str,
         usage_extra: dict[str, Any] | None = None,
     ) -> dict[int, int]:
-        """Per-organization usage of ``resource_key`` across the whole pooled
-        subtree that ``organization`` belongs to.
+        """Per-scope usage of ``resource_key`` across the whole pooled
+        subtree that ``scope`` belongs to.
 
-        ``get_current_usage``'s per-organization twin — same root resolution, same
+        ``get_current_usage``'s per-scope twin — same root resolution, same
         subscription lookup, same ``exclude_invitation_id`` rule. Required by the
-        usage-reporting read surface (per-organization attribution across a pooled
+        usage-reporting read surface (per-scope attribution across a pooled
         reseller subtree); enforcement itself only ever needs the scalar.
 
-        An organization that contributed nothing to ``resource_key`` is **absent**
+        An scope that contributed nothing to ``resource_key`` is **absent**
         from the returned dict, never present with ``0`` — the read layer decides
         whether a non-contributor is worth rendering.
 
@@ -350,7 +348,7 @@ class EntitlementService:
             only checks its keys against what the resource declared -- see
             ``check_limit``.
         """
-        root = resolve_billing_root(organization)
+        root = resolve_billing_root(scope)
         return self._usage_breakdown(
             root,
             resource_key,
@@ -360,17 +358,17 @@ class EntitlementService:
 
     def usage_breakdown_for_root(
         self,
-        root: AbstractOrganization,
+        root: AbstractBillingScope,
         resource_key: str,
         subscription: Subscription | None,
-        pooled_organization_ids: list[int] | None = None,
+        pooled_scope_ids: list[int] | None = None,
     ) -> dict[int, int]:
         """Public entry point onto ``_usage_breakdown`` for a caller that already
         holds ``root`` and ``subscription``. Same rationale as
         ``effective_limit_for_subscription``.
 
-        :param pooled_organization_ids: the subtree ``root`` pools with, when the
-            caller already resolved it (via ``get_pooled_organization_ids``) and
+        :param pooled_scope_ids: the subtree ``root`` pools with, when the
+            caller already resolved it (via ``get_pooled_scope_ids``) and
             wants to reuse it across several resources instead of paying for the
             subtree BFS again on every call -- the case ``CycleCloseService`` hits
             once per registered resource while holding the subscription
@@ -381,12 +379,12 @@ class EntitlementService:
             root,
             resource_key,
             subscription,
-            pooled_organization_ids=pooled_organization_ids,
+            pooled_scope_ids=pooled_scope_ids,
         )
 
     def _count_usage(
         self,
-        root: AbstractOrganization,
+        root: AbstractBillingScope,
         resource_key: str,
         subscription: Subscription | None,
         usage_extra: dict[str, Any] | None = None,
@@ -394,7 +392,7 @@ class EntitlementService:
         """``get_current_usage`` given an already-resolved root and subscription.
 
         Structurally ``sum(breakdown.values())`` — never a second, independent
-        count — so this scalar and ``_usage_breakdown``'s per-organization dict
+        count — so this scalar and ``_usage_breakdown``'s per-scope dict
         are incapable of disagreeing about the total.
         """
         return sum(
@@ -405,17 +403,17 @@ class EntitlementService:
 
     def _usage_breakdown(
         self,
-        root: AbstractOrganization,
+        root: AbstractBillingScope,
         resource_key: str,
         subscription: Subscription | None,
         usage_extra: dict[str, Any] | None = None,
-        pooled_organization_ids: list[int] | None = None,
+        pooled_scope_ids: list[int] | None = None,
     ) -> dict[int, int]:
         """``get_usage_breakdown`` given an already-resolved root and subscription.
 
-        :param pooled_organization_ids: pre-resolved pool, when the caller already
+        :param pooled_scope_ids: pre-resolved pool, when the caller already
             has it (see ``usage_breakdown_for_root``). Resolved via
-            ``_get_pooled_organization_ids`` when omitted -- the behavior every
+            ``_get_pooled_scope_ids`` when omitted -- the behavior every
             existing caller keeps unchanged.
         :raises InapplicableUsageExtraError: if ``usage_extra`` carries a key
             ``resource_key`` declared it does not read. Checked here, at the one
@@ -440,10 +438,10 @@ class EntitlementService:
             return {}
         return resources.counter_for(resource_key)(
             UsageContext(
-                organization_ids=(
-                    pooled_organization_ids
-                    if pooled_organization_ids is not None
-                    else self._get_pooled_organization_ids(root)
+                scope_ids=(
+                    pooled_scope_ids
+                    if pooled_scope_ids is not None
+                    else self._get_pooled_scope_ids(root)
                 ),
                 subscription=subscription,
                 extra=usage_extra,
@@ -451,16 +449,16 @@ class EntitlementService:
         )
 
     @staticmethod
-    def _lock_billing_root_row(root: AbstractOrganization) -> None:
+    def _lock_billing_root_row(root: AbstractBillingScope) -> None:
         """Take ``SELECT ... FOR UPDATE`` on ``root``'s ``Subscription`` row.
 
         Discards the returned row: the point is the row lock, and every subsequent
         read in the caller's transaction goes through the same connection.
         """
-        Subscription.objects.select_for_update().filter(organization=root).first()
+        Subscription.objects.select_for_update().filter(scope=root).first()
 
-    def lock_billing_root(self, organization: AbstractOrganization) -> None:
-        """Acquire the guard lock for ``organization`` *before* computing a delta.
+    def lock_billing_root(self, scope: AbstractBillingScope) -> None:
+        """Acquire the guard lock for ``scope`` *before* computing a delta.
 
         ``check_limit(lock=True)`` locks and counts in one call, which is all a
         single-row create needs. A bulk writer that must first *read* the database to
@@ -474,10 +472,10 @@ class EntitlementService:
         until the caller's transaction commits; requires an open transaction, exactly
         like ``check_limit(lock=True)``.
         """
-        self._lock_billing_root_row(resolve_billing_root(organization))
+        self._lock_billing_root_row(resolve_billing_root(scope))
 
-    def is_billing_root_restricted(self, organization: AbstractOrganization) -> bool:
-        """The single check for "must this organization's writes be blocked and
+    def is_billing_root_restricted(self, scope: AbstractBillingScope) -> bool:
+        """The single check for "must this scope's writes be blocked and
         its calendar sync paused?" -- ``True`` only when the *billing root*'s
         ``Subscription.billing_state`` is ``RESTRICTED``.
 
@@ -490,7 +488,7 @@ class EntitlementService:
         This is the **one** semantic definition of "restricted", and every
         consumer of the notion must route through it: the write block (every
         explicit ``check_not_restricted`` call site on an update/delete path) and
-        whatever else a project pauses while an organization is restricted -- a
+        whatever else a project pauses while an scope is restricted -- a
         background sync, an outbound integration, a scheduled export. Two
         *independently derived* answers to "is this org restricted" is exactly the
         recurring two-predicates defect; the definition here is the only one, and
@@ -508,38 +506,38 @@ class EntitlementService:
         carries a comment pointing back here.
 
         **``GRACE`` is not restricted.** Only ``RESTRICTED`` blocks -- a ``GRACE``
-        organization stays fully writable and its sync keeps running; escalation is
+        scope stays fully writable and its sync keeps running; escalation is
         the dunning ladder (``DunningService``), never a write/sync block. Do not
         widen this to any other ``BillingState``.
 
         A missing subscription reads as **not restricted** (``False``), never
         restricted -- ``billing_state`` only exists on a real row, and an
-        organization with no billing set up at all (a broken invariant, not a
+        scope with no billing set up at all (a broken invariant, not a
         restricted one) must not be caught by this check; that would conflate "we
         don't know" with "we know, and the answer is blocked", which the fail-open
         convention the rest of this service follows forbids.
         """
-        root = resolve_billing_root(organization)
+        root = resolve_billing_root(scope)
         subscription = self._get_subscription_for_root(root)
         return subscription is not None and subscription.billing_state == BillingState.RESTRICTED
 
-    def check_not_restricted(self, organization: AbstractOrganization) -> None:
+    def check_not_restricted(self, scope: AbstractBillingScope) -> None:
         """Raise ``OverLimitError`` (``remedy=resolve_billing``) when
-        ``organization``'s billing root is ``RESTRICTED``; otherwise a no-op.
+        ``scope``'s billing root is ``RESTRICTED``; otherwise a no-op.
 
         The entry point every guarded create/update/delete method that does not
         already route through ``check_limit`` / ``check_postpaid_allowance``
         (which fold ``is_billing_root_restricted`` in directly, see their
-        docstrings) calls before writing an ``OrganizationModel`` row on a guarded
+        docstrings) calls before writing an ``ScopeModel`` row on a guarded
         resource. See ``is_billing_root_restricted`` for what "restricted" means
         and why it is defined exactly once.
         """
-        if self.is_billing_root_restricted(organization):
-            raise OverLimitError.from_restricted_organization()
+        if self.is_billing_root_restricted(scope):
+            raise OverLimitError.from_restricted_scope()
 
     def check_limit(
         self,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         resource_key: str,
         delta: int = 1,
         lock: bool = False,
@@ -554,7 +552,7 @@ class EntitlementService:
         subscription several times on what is a guarded create path.
 
         On the unlimited path usage is **not counted at all** — the answer cannot
-        depend on it, and every organization is on the ``unlimited`` plan for the
+        depend on it, and every scope is on the ``unlimited`` plan for the
         whole rollout, so counting there would make every guarded create pay for a
         value nobody reads. ``LimitCheckResult.current_usage`` is ``None`` in that
         case, not ``0``: reporting a number nobody measured would be a lie a caller
@@ -591,7 +589,7 @@ class EntitlementService:
             caller whose per-call data is itself a query -- the seat-accept case,
             where working out which invitation to exclude costs a lookup. Called
             at most once, and **only after the ceiling is known to be finite**,
-            so an ``unlimited`` organization never pays for it; on the unlimited
+            so an ``unlimited`` scope never pays for it; on the unlimited
             path usage is not counted at all, so there would be nothing to hand
             the result to. Its return value is merged into ``UsageContext.extra``
             exactly as an eager ``usage_extra`` would be, and validated the same
@@ -610,20 +608,20 @@ class EntitlementService:
                 "one of the two would be silently discarded."
             )
         # Validated before the unlimited short-circuit below, not alongside the
-        # count. A misrouted key on an organization with no ceiling would
-        # otherwise never be reported, and "every organization is unlimited" is
+        # count. A misrouted key on an scope with no ceiling would
+        # otherwise never be reported, and "every scope is unlimited" is
         # the ordinary state of a rollout -- exactly when a call site is new and
         # most likely to be wrong.
         _validate_usage_extra(resource_key, usage_extra)
 
-        root = resolve_billing_root(organization)
+        root = resolve_billing_root(scope)
         if lock:
             self._lock_billing_root_row(root)
 
         subscription = self._get_subscription_for_root(root)
         # RESTRICTED blocks every write outright, independent of the
-        # numeric ceiling below -- an organization whose plan carries no ceiling at
-        # all (``unlimited``, every organization's actual plan for this whole
+        # numeric ceiling below -- an scope whose plan carries no ceiling at
+        # all (``unlimited``, every scope's actual plan for this whole
         # rollout) could otherwise create freely while RESTRICTED, since the
         # ``is_unlimited`` branch below never even looks at ``billing_state``.
         # This is the identical test ``is_billing_root_restricted`` performs,
@@ -646,7 +644,7 @@ class EntitlementService:
             )
 
         effective_limit = self._effective_limit_for_subscription(
-            subscription, resource_key, root.pk, asked_for_organization_pk=organization.pk
+            subscription, resource_key, root.pk, asked_for_scope_pk=scope.pk
         )
         if effective_limit.is_unlimited:
             return LimitCheckResult(
@@ -673,7 +671,7 @@ class EntitlementService:
             remedy=(None if allowed else self._resolve_remedy_for(subscription, effective_limit)),
         )
 
-    def has_payment_method(self, organization: AbstractOrganization) -> bool:
+    def has_payment_method(self, scope: AbstractBillingScope) -> bool:
         """Does the billing root have a chargeable payment method on file, right now?
 
         Resolved at the billing root, like every other check in this service, so a
@@ -686,72 +684,70 @@ class EntitlementService:
         webhook path once a charge against an instrument is confirmed, and this
         method reads that record instead of inferring from billing states: once an
         instrument is actually persisted, ``billing_state`` stops being evidence of
-        whether one is on file at all. An organization can be ``ACTIVE`` from a past
+        whether one is on file at all. An scope can be ``ACTIVE`` from a past
         cycle with no *current* instrument (e.g. after an admin removed it), or hold
         a valid card on file while ``GRACE`` — a failed charge moves
         ``ACTIVE -> GRACE`` but says nothing about whether the card itself is still
-        attached, and a ``GRACE`` organization stays fully operational (only
+        attached, and a ``GRACE`` scope stays fully operational (only
         ``RESTRICTED`` blocks writes). Under the old proxy ``GRACE`` had to read
-        ``False`` categorically, even for an organization whose card is fine and
+        ``False`` categorically, even for an scope whose card is fine and
         whose *next* retry will succeed; the real record answers that case correctly
         instead of by state-based inference.
 
-        A missing subscription's organization has no billing root ``PaymentMethod``
+        A missing subscription's scope has no billing root ``PaymentMethod``
         row either, so this still reads ``False`` for it — nothing to charge.
         Note that on the postpaid path this rarely decides anything — a
         subscription-less pool resolves to an unlimited ceiling and returns before
         this is ever consulted (see ``check_postpaid_allowance``).
         """
-        root = resolve_billing_root(organization)
-        return self._has_payment_method_for_organization_id(root.pk)
+        root = resolve_billing_root(scope)
+        return self._has_payment_method_for_scope_id(root.pk)
 
     @classmethod
     def _has_payment_method_for_subscription(cls, subscription: Subscription | None) -> bool:
         if subscription is None:
             return False
-        return cls._has_payment_method_for_organization_id(subscription.organization_id)
+        return cls._has_payment_method_for_scope_id(subscription.scope_id)
 
     @staticmethod
-    def _has_payment_method_for_organization_id(organization_id: int) -> bool:
-        return PaymentMethod.objects.filter(
-            organization_id=organization_id, is_active=True
-        ).exists()
+    def _has_payment_method_for_scope_id(scope_id: int) -> bool:
+        return PaymentMethod.objects.filter(scope_id=scope_id, is_active=True).exists()
 
     def check_postpaid_allowance(
         self,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         delta: int = 1,
         lock: bool = False,
         delta_resolver: Callable[[Subscription], int] | None = None,
     ) -> LimitCheckResult:
         """Would creating ``delta`` more ``event_occurrences`` need a payment method
-        this organization does not have?
+        this scope does not have?
 
         The only postpaid registered resource, so unlike ``check_limit`` this
         never takes a ``resource_key`` — there is only one to ask about.
 
-        Unlike a prepaid ceiling, the allowance is not a hard cap. An organization
+        Unlike a prepaid ceiling, the allowance is not a hard cap. An scope
         **with** a payment method is let straight through even past it — the
         excess accrues as overage (billed at ``PlanLimit.overage_unit_price`` when
         ``MeteringService`` later meters it; this method never writes, it only
-        decides whether creation may proceed). An organization **without** one is
+        decides whether creation may proceed). An scope **without** one is
         blocked the moment ``delta`` would take it to or past the allowance,
         because there is nothing to charge the overage to. This matches the rule:
-        an organization with a payment method accrues past its included allowance
+        an scope with a payment method accrues past its included allowance
         and is never interrupted; one without a payment method is blocked at the
         allowance.
 
         On the unlimited path (``limit_value is None``), usage is not counted at
         all and ``current_usage``/``ceiling`` are ``None`` — identical to
         ``check_limit``'s unlimited branch, and for the same reason: every
-        organization is on the ``unlimited`` plan for this whole rollout, so this
+        scope is on the ``unlimited`` plan for this whole rollout, so this
         method can never block anybody today. See the tests for that inertness
         guarantee on every guarded path.
 
         **Exception to all of the above: a ``RESTRICTED`` billing root
         blocks unconditionally**, before the unlimited check, before counting
         usage, and regardless of whether a payment method is on file — a
-        ``RESTRICTED`` organization may not create more events even if it could
+        ``RESTRICTED`` scope may not create more events even if it could
         technically pay for them; the only way out is resolving the restriction
         (``remedy=resolve_billing``), not adding a card. See
         ``is_billing_root_restricted``.
@@ -778,8 +774,8 @@ class EntitlementService:
             expansion, so the guard and the meter cannot disagree). Receives the
             resolved billing-root ``Subscription`` so it can bound its window with
             ``resolve_billing_period``. Called at most once, and **only after the
-            ceiling is known to be finite**, so an ``unlimited`` organization — i.e.
-            every organization for this whole rollout — never pays for the expansion.
+            ceiling is known to be finite**, so an ``unlimited`` scope — i.e.
+            every scope for this whole rollout — never pays for the expansion.
             Takes precedence over ``delta`` when both are given.
         :param lock: Same contract as ``check_limit``'s ``lock`` — ``SELECT ... FOR
             UPDATE`` on the billing root's ``Subscription`` row before counting, so
@@ -791,18 +787,18 @@ class EntitlementService:
             ``check_limit``, which locks before resolving anything. That ordering
             difference is deliberate and load-bearing. Every event-creation path
             passes ``lock=True``, ``create_event`` is ``@transaction.atomic`` with an
-            external provider round-trip inside it, and every organization is on
-            ``unlimited`` — so locking first would put an organization-wide row lock
+            external provider round-trip inside it, and every scope is on
+            ``unlimited`` — so locking first would put an scope-wide row lock
             on the hottest write path in the product, held across a network call, in
             service of a NULL ceiling that cannot block anybody. Two users booking
-            different calendars of the same organization would serialize.
+            different calendars of the same scope would serialize.
 
             Nothing is lost by locking later: the ceiling is not the racing quantity.
             ``_count_usage`` — the read the lock actually exists to serialize — still
             runs after the lock is acquired, and under READ COMMITTED it therefore
             still sees a racing transaction's committed inserts.
         """
-        root = resolve_billing_root(organization)
+        root = resolve_billing_root(scope)
         subscription = self._get_subscription_for_root(root)
         # RESTRICTED blocks outright, ahead of the unlimited check and
         # the payment-method check both. The identical test
@@ -824,7 +820,7 @@ class EntitlementService:
             subscription,
             metered_resource_key(),
             root.pk,
-            asked_for_organization_pk=organization.pk,
+            asked_for_scope_pk=scope.pk,
         )
         if effective_limit.is_unlimited:
             return LimitCheckResult(
@@ -866,8 +862,8 @@ class EntitlementService:
             remedy=LimitRemedy.ADD_PAYMENT_METHOD,
         )
 
-    def has_entitlement(self, organization: AbstractOrganization, entitlement_key: str) -> bool:
-        """Is the boolean feature gate ``entitlement_key`` granted to ``organization``?
+    def has_entitlement(self, scope: AbstractBillingScope, entitlement_key: str) -> bool:
+        """Is the boolean feature gate ``entitlement_key`` granted to ``scope``?
 
         Resolved at the billing root, like limits. **Unlike limits, this fails
         closed**: an absent ``SubscriptionEntitlement`` row means "not granted",
@@ -875,59 +871,57 @@ class EntitlementService:
         ``SubscriptionService._sync_entitlements`` *deletes* rows for entitlements
         the current plan does not carry, so absence is how a revoked grant is
         represented. Failing open here would hand every feature to every
-        organization whose plan omits it, whereas failing open on a limit only
+        scope whose plan omits it, whereas failing open on a limit only
         risks under-charging.
         """
-        subscription = self._get_root_subscription(organization)
+        subscription = self._get_root_subscription(scope)
         if subscription is None:
             logger.warning(
-                "No subscription resolved for organization %s; denying entitlement %s. "
+                "No subscription resolved for scope %s; denying entitlement %s. "
                 "Every billing root is expected to hold exactly one Subscription.",
-                organization.pk,
+                scope.pk,
                 entitlement_key,
             )
             return False
         entitlement = subscription.entitlements.filter(entitlement_key=entitlement_key).first()
         return entitlement is not None and entitlement.is_enabled
 
-    def has_entitlement_for_organizations(
-        self, organizations: Sequence[AbstractOrganization], entitlement_key: str
+    def has_entitlement_for_scopes(
+        self, scopes: Sequence[AbstractBillingScope], entitlement_key: str
     ) -> dict[int, bool]:
         """Bulk ``has_entitlement``: the same fail-closed boolean gate for many
-        organizations, in two queries total instead of two per organization.
+        scopes, in two queries total instead of two per scope.
 
         Built for list endpoints that compute a per-row entitlement-derived field
         (e.g. ``MyMembershipSerializer.get_can_manage_branding`` across a
         caller's memberships) — calling ``has_entitlement`` once per row would
         pay a full subscription fetch plus entitlement-row fetch per distinct
-        organization.
+        scope.
 
-        Billing-root resolution stays per-organization (``resolve_billing_root``,
+        Billing-root resolution stays per-scope (``resolve_billing_root``,
         unchanged): it is a ``parent``-chain walk, not something that batches
         into a single query, and it costs nothing extra for a parentless
-        organization (the common case for callers that already filtered to
-        roots, like ``is_branding_eligible_organization``) — only a genuinely
+        scope (the common case for callers that already filtered to
+        roots, like ``is_branding_eligible_scope``) — only a genuinely
         nested chain triggers a query. What this method batches is the
         subscription fetch and the entitlement-row fetch, which
-        ``has_entitlement`` otherwise repeats per organization.
+        ``has_entitlement`` otherwise repeats per scope.
 
-        Returns ``{organization.pk: bool}`` for every organization passed in.
-        An organization whose billing root has no resolvable subscription reads
+        Returns ``{scope.pk: bool}`` for every scope passed in.
+        An scope whose billing root has no resolvable subscription reads
         ``False`` (same fail-closed behavior as ``has_entitlement``), but unlike
-        ``has_entitlement`` this does not log a warning per organization — doing
+        ``has_entitlement`` this does not log a warning per scope — doing
         so would make a list endpoint log once per row for a state that is
         normal at this call site, not the broken-invariant signal the warning
-        is meant to be on the single-organization path.
+        is meant to be on the single-scope path.
         """
-        roots_by_organization_pk = {
-            organization.pk: resolve_billing_root(organization) for organization in organizations
-        }
-        root_ids = {root.pk for root in roots_by_organization_pk.values()}
+        roots_by_scope_pk = {scope.pk: resolve_billing_root(scope) for scope in scopes}
+        root_ids = {root.pk for root in roots_by_scope_pk.values()}
         if not root_ids:
             return {}
         subscription_by_root_id = {
-            subscription.organization_id: subscription
-            for subscription in Subscription.objects.filter(organization_id__in=root_ids)
+            subscription.scope_id: subscription
+            for subscription in Subscription.objects.filter(scope_id__in=root_ids)
         }
         granted_subscription_ids = set(
             SubscriptionEntitlement.objects.filter(
@@ -939,9 +933,9 @@ class EntitlementService:
             ).values_list("subscription_id", flat=True)
         )
         result: dict[int, bool] = {}
-        for organization_pk, root in roots_by_organization_pk.items():
+        for scope_pk, root in roots_by_scope_pk.items():
             subscription = subscription_by_root_id.get(root.pk)
-            result[organization_pk] = (
+            result[scope_pk] = (
                 subscription is not None and subscription.pk in granted_subscription_ids
             )
         return result
@@ -951,7 +945,7 @@ class EntitlementService:
     ) -> str:
         """Pick the ``LimitRemedy`` that will actually unblock this caller.
 
-        An organization in grace (or, defensively, restricted) has a payment
+        An scope in grace (or, defensively, restricted) has a payment
         problem in front of any capacity problem, so it is pointed at billing
         first. Otherwise a pre-paid ceiling is liftable by buying capacity, while
         a post-paid allowance is not — only a bigger plan raises it.
@@ -976,35 +970,35 @@ class EntitlementService:
             return LimitRemedy.UPGRADE_PLAN
         return LimitRemedy.PURCHASE_ADD_ON
 
-    def _get_root_subscription(self, organization: AbstractOrganization) -> Subscription | None:
-        return self._get_subscription_for_root(resolve_billing_root(organization))
+    def _get_root_subscription(self, scope: AbstractBillingScope) -> Subscription | None:
+        return self._get_subscription_for_root(resolve_billing_root(scope))
 
-    def _get_subscription_for_root(self, root: AbstractOrganization) -> Subscription | None:
+    def _get_subscription_for_root(self, root: AbstractBillingScope) -> Subscription | None:
         """Fetch ``root``'s subscription without raising when it is missing.
 
-        ``Subscription.organization`` is a ``OneToOneField``, so the reverse
+        ``Subscription.scope`` is a ``OneToOneField``, so the reverse
         accessor raises ``RelatedObjectDoesNotExist`` rather than returning
         ``None``; every caller here wants the ``None``.
         """
-        return Subscription.objects.filter(organization=root).first()
+        return Subscription.objects.filter(scope=root).first()
 
-    def get_pooled_organization_ids(self, organization: AbstractOrganization) -> list[int]:
-        """Every organization whose usage pools with ``organization``'s.
+    def get_pooled_scope_ids(self, scope: AbstractBillingScope) -> list[int]:
+        """Every scope whose usage pools with ``scope``'s.
 
         Public entry point onto the same subtree walk every usage counter runs on,
         for callers that need the pool itself rather than a count —
         ``MeteringService`` sweeps calendar events across exactly this set, and it
         must be the *same* set the ``event_occurrences`` counter later reads back,
-        or the meter and the counter would be looking at different organizations.
+        or the meter and the counter would be looking at different scopes.
         """
-        return self._get_pooled_organization_ids(resolve_billing_root(organization))
+        return self._get_pooled_scope_ids(resolve_billing_root(scope))
 
-    def _get_pooled_organization_ids(self, root: AbstractOrganization) -> list[int]:
-        """Every organization whose usage counts against ``root``'s ceiling.
+    def _get_pooled_scope_ids(self, root: AbstractBillingScope) -> list[int]:
+        """Every scope whose usage counts against ``root``'s ceiling.
 
-        Delegated to the configured hierarchy strategy: whether organizations
+        Delegated to the configured hierarchy strategy: whether scopes
         nest at all, and where a subtree stops, is a project's answer and not
-        something this package can read off ``vinta-django-orgs``' organization
+        something this package can read off ``vinta-django-orgs``' scope
         model. See :mod:`vinta_billing.hierarchy`.
 
         Sorted so the pool is a stable, comparable list -- the meter and the
@@ -1012,4 +1006,4 @@ class EntitlementService:
         deterministic order makes a disagreement visible in a diff rather than
         intermittent.
         """
-        return sorted(get_hierarchy().pooled_organization_ids(root))
+        return sorted(get_hierarchy().pooled_scope_ids(root))

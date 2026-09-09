@@ -94,7 +94,7 @@ class TestIllegalTransitions:
             # Cancelled is terminal until cycle close returns it to FREE.
             (BillingState.CANCELLED, BillingState.ACTIVE),
             (BillingState.CANCELLED, BillingState.GRACE),
-            # A free organization has nothing to restrict or grace-recover.
+            # A free scope has nothing to restrict or grace-recover.
             (BillingState.FREE, BillingState.RESTRICTED),
         ],
     )

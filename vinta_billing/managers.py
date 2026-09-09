@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from django.db.models import Manager
+from django.db.models import Manager, Model
 from django.utils import timezone
 
+from vinta_billing.constants import ScopeType
 from vinta_billing.querysets import (
     BillingPeriodSummaryQuerySet,
     MeteredOccurrenceQuerySet,
@@ -15,16 +16,100 @@ from vinta_billing.querysets import (
 
 
 if TYPE_CHECKING:
-    from vinta_billing.models import ProviderWebhookEvent
+    from vinta_billing.models import BillingScope, ProviderWebhookEvent
+
+
+class BillingScopeManager(Manager["BillingScope"]):
+    """Manager for the shipped, generic-key ``BillingScope``.
+
+    Only :meth:`get_or_create_for` is specific to the generic key, and it is the
+    reason this manager exists: without it, every caller would have to reach for
+    ``ContentType.objects.get_for_model`` itself to name a payer, which is
+    exactly the ceremony the scope model is supposed to absorb. A project that
+    swaps in a scope model with typed foreign keys does not need it and does not
+    get it.
+    """
+
+    def scope_for(self, obj: Model) -> BillingScope | None:
+        """The scope that bills ``obj``, or ``None`` if there is not one yet.
+
+        The read-only half of :meth:`get_or_create_for`, and the hook
+        :func:`vinta_billing.utils.default_scope_resolver` looks for: resolving
+        a request must never create a row as a side effect. Optional by
+        convention -- a project that swaps the scope model out and wants the
+        default resolver to keep working defines a ``scope_for`` of its own on
+        its manager; one that does not simply configures ``SCOPE_RESOLVER``.
+        """
+        from django.contrib.contenttypes.models import ContentType
+
+        return self.filter(
+            content_type=ContentType.objects.get_for_model(obj, for_concrete_model=False),
+            object_id=str(obj.pk),
+        ).first()
+
+    def get_or_create_for(
+        self,
+        obj: Model,
+        *,
+        scope_type: str | None = None,
+        label: str | None = None,
+        owner: Any = None,
+        parent: BillingScope | None = None,
+    ) -> tuple[BillingScope, bool]:
+        """The scope that bills ``obj``, creating it on first sight.
+
+        ``obj`` is whatever the project bills -- a user, an organization, a
+        workspace. Everything else is inferred and can be overridden:
+
+        * ``scope_type`` is ``USER`` when ``obj`` is an instance of
+          ``AUTH_USER_MODEL`` and ``ORGANIZATION`` otherwise. A project with a
+          third kind of payer passes its own string.
+        * ``label`` is ``obj.name`` when there is one, else ``str(obj)``.
+        * ``owner`` is ``obj`` itself for a user scope, and ``None`` otherwise
+          -- this package cannot know which member of an organization owns its
+          billing, which is what ``BILLING_MANAGER_PREDICATE`` is for.
+
+        Idempotent on ``(content_type, object_id)`` rather than on
+        ``scope_key``: the key is derived from those two, so matching on the
+        source columns is the same question asked without a string round-trip.
+        An existing scope is returned untouched -- a second call must not
+        silently overwrite a label or an owner a project has since curated.
+        """
+        from django.contrib.auth import get_user_model
+        from django.contrib.contenttypes.models import ContentType
+
+        if scope_type is None:
+            scope_type = (
+                ScopeType.USER if isinstance(obj, get_user_model()) else ScopeType.ORGANIZATION
+            )
+        if label is None:
+            # ``name`` first: it is what a tenant model almost always calls its
+            # display field, and ``str()`` on an arbitrary project model can
+            # dereference related rows.
+            label = str(getattr(obj, "name", None) or obj)
+        if owner is None and scope_type == ScopeType.USER:
+            owner = obj
+
+        scope, created = self.get_or_create(
+            content_type=ContentType.objects.get_for_model(obj, for_concrete_model=False),
+            object_id=str(obj.pk),
+            defaults={
+                "scope_type": scope_type,
+                "label": label,
+                "owner": owner,
+                "parent": parent,
+            },
+        )
+        return scope, created
 
 
 class ProviderWebhookEventManager(Manager):
     """Manager for the webhook-delivery idempotency ledger.
 
     ``ProviderWebhookEvent`` is not tenant-scoped — a webhook notification arrives
-    before we know which organization it resolves to (see the billing plans and
+    before we know which scope it resolves to (see the billing plans and
     limits plan's Data Model Changes) — so this is a plain ``Manager`` rather than
-    the tenant-aware ``OrganizationManager``.
+    a tenant-aware, scope-filtering one.
 
     Uses an explicit ``get_queryset()`` override (instead of
     ``Manager.from_queryset(...)`` as a base class) because inlining
@@ -81,8 +166,8 @@ class MeteredOccurrenceManager(Manager):
     """Manager for the post-paid occurrence ledger.
 
     A plain ``Manager`` for the same reason as ``ProviderWebhookEventManager``:
-    ``MeteredOccurrence`` is not an ``OrganizationModel``, because billing reads
-    legitimately cross organizations (summing a reseller subtree's usage, sweeping
+    ``MeteredOccurrence`` carries no scope-filtering default manager, because billing
+    reads legitimately cross scopes (summing a reseller subtree's usage, sweeping
     every subscription at cycle close). See the model docstring.
     """
 
@@ -94,16 +179,16 @@ class MeteredOccurrenceManager(Manager):
     ) -> MeteredOccurrenceQuerySet:
         return self.get_queryset().for_billing_period(subscription_id, billing_period_start)
 
-    def for_organizations(self, organization_ids: Sequence[int]) -> MeteredOccurrenceQuerySet:
-        return self.get_queryset().for_organizations(organization_ids)
+    def for_scopes(self, scope_ids: Sequence[int]) -> MeteredOccurrenceQuerySet:
+        return self.get_queryset().for_scopes(scope_ids)
 
 
 class BillingPeriodSummaryManager(Manager):
     """Manager for ``BillingPeriodSummary``, the closed-period statement ledger.
 
     A plain ``Manager`` for the same reason as ``MeteredOccurrenceManager``:
-    ``BillingPeriodSummary`` is not an ``OrganizationModel``, because billing reads
-    legitimately cross organizations (a reseller root reading its whole subtree's
+    ``BillingPeriodSummary`` carries no scope-filtering default manager, because billing
+    reads legitimately cross scopes (a reseller root reading its whole subtree's
     statement history). See the model docstring.
 
     Uses an explicit ``get_queryset()`` override rather than
@@ -115,8 +200,8 @@ class BillingPeriodSummaryManager(Manager):
     def get_queryset(self) -> BillingPeriodSummaryQuerySet:
         return BillingPeriodSummaryQuerySet(self.model, using=self._db)
 
-    def for_organizations(self, organization_ids: Sequence[int]) -> BillingPeriodSummaryQuerySet:
-        return self.get_queryset().for_organizations(organization_ids)
+    def for_scopes(self, scope_ids: Sequence[int]) -> BillingPeriodSummaryQuerySet:
+        return self.get_queryset().for_scopes(scope_ids)
 
 
 class LimitWarningNotificationManager(Manager):

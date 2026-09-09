@@ -63,13 +63,13 @@ def service(payment_service):
 
 
 @pytest.fixture
-def closable(organization, plan, make_subscription):
+def closable(scope, plan, make_subscription):
     """A subscription whose stored period ended on 1 April 2026."""
     plan.limits.filter(resource_key="event_occurrences").update(
         limit_value=1, overage_unit_price=Decimal("0.50")
     )
     return make_subscription(
-        organization,
+        scope,
         plan,
         billing_interval=BillingInterval.MONTHLY,
         billing_state=BillingState.ACTIVE,
@@ -78,10 +78,10 @@ def closable(organization, plan, make_subscription):
     )
 
 
-def record_occurrences(subscription, organization, count, *, period_start, within_allowance=False):
+def record_occurrences(subscription, scope, count, *, period_start, within_allowance=False):
     for index in range(count):
         MeteredOccurrence.objects.create(
-            organization=organization,
+            scope=scope,
             subscription=subscription,
             event_id=index + 1,
             occurrence_start=period_start + datetime.timedelta(days=index + 1),
@@ -133,11 +133,11 @@ class TestRolling:
             utc(2026, 6, 1),
         ]
 
-    def test_catch_up_is_bounded(self, service, organization, plan, make_subscription):
+    def test_catch_up_is_bounded(self, service, scope, plan, make_subscription):
         """A corrupt period far in the past must not spin forever; the run stops
         at the cap and the next run continues from there."""
         subscription = make_subscription(
-            organization,
+            scope,
             plan,
             current_period_start=utc(1990, 1, 1),
             current_period_end=utc(1990, 2, 1),
@@ -156,18 +156,16 @@ class TestStatements:
         assert summary.billing_period_start == utc(2026, 3, 1)
         assert summary.billing_period_end == utc(2026, 4, 1)
 
-    def test_the_statement_records_the_overage_total(self, service, closable, organization):
-        record_occurrences(closable, organization, 4, period_start=utc(2026, 3, 1))
+    def test_the_statement_records_the_overage_total(self, service, closable, scope):
+        record_occurrences(closable, scope, 4, period_start=utc(2026, 3, 1))
 
         service.close_subscription(closable, now=utc(2026, 4, 2))
 
         summary = BillingPeriodSummary.objects.get()
         assert summary.overage_total == Decimal("2.00")
 
-    def test_allowance_occurrences_cost_nothing(self, service, closable, organization):
-        record_occurrences(
-            closable, organization, 3, period_start=utc(2026, 3, 1), within_allowance=True
-        )
+    def test_allowance_occurrences_cost_nothing(self, service, closable, scope):
+        record_occurrences(closable, scope, 3, period_start=utc(2026, 3, 1), within_allowance=True)
 
         service.close_subscription(closable, now=utc(2026, 4, 2))
 
@@ -192,10 +190,8 @@ class TestOverageCharging:
 
         assert payment_service.charges == []
 
-    def test_accrued_overage_is_charged_once(
-        self, service, payment_service, closable, organization
-    ):
-        record_occurrences(closable, organization, 3, period_start=utc(2026, 3, 1))
+    def test_accrued_overage_is_charged_once(self, service, payment_service, closable, scope):
+        record_occurrences(closable, scope, 3, period_start=utc(2026, 3, 1))
 
         service.close_subscription(closable, now=utc(2026, 4, 2))
 
@@ -203,36 +199,36 @@ class TestOverageCharging:
         assert payment_service.charges[0]["amount"] == Decimal("1.50")
 
     def test_the_charge_carries_a_period_scoped_idempotency_key(
-        self, service, payment_service, closable, organization
+        self, service, payment_service, closable, scope
     ):
         """Re-running a close that crashed after charging must not charge again;
         the provider dedups on this key."""
-        record_occurrences(closable, organization, 3, period_start=utc(2026, 3, 1))
+        record_occurrences(closable, scope, 3, period_start=utc(2026, 3, 1))
 
         service.close_subscription(closable, now=utc(2026, 4, 2))
 
         assert "2026-03-01" in payment_service.charges[0]["idempotency_key"]
 
     def test_an_unlimited_allowance_charges_nothing(
-        self, service, payment_service, organization, plan, make_subscription
+        self, service, payment_service, scope, plan, make_subscription
     ):
-        """Every organization is on an unlimited allowance during a rollout, so
+        """Every scope is on an unlimited allowance during a rollout, so
         this is the branch that actually runs in production today."""
         plan.limits.filter(resource_key="event_occurrences").update(limit_value=None)
         subscription = make_subscription(
-            organization,
+            scope,
             plan,
             current_period_start=utc(2026, 3, 1),
             current_period_end=utc(2026, 4, 1),
         )
-        record_occurrences(subscription, organization, 5, period_start=utc(2026, 3, 1))
+        record_occurrences(subscription, scope, 5, period_start=utc(2026, 3, 1))
 
         service.close_subscription(subscription, now=utc(2026, 4, 2))
 
         assert payment_service.charges == []
 
-    def test_the_closed_period_reports_whether_it_charged(self, service, closable, organization):
-        record_occurrences(closable, organization, 2, period_start=utc(2026, 3, 1))
+    def test_the_closed_period_reports_whether_it_charged(self, service, closable, scope):
+        record_occurrences(closable, scope, 2, period_start=utc(2026, 3, 1))
 
         closed = service.close_subscription(closable, now=utc(2026, 4, 2))
 
@@ -285,12 +281,12 @@ class TestDefaultCollaborators:
 
 class TestPostpaidPlanShape:
     def test_a_plan_with_no_postpaid_limit_still_closes(
-        self, service, organization, plan, make_subscription
+        self, service, scope, plan, make_subscription
     ):
         """Not every project meters anything; close must not require it."""
         plan.limits.filter(kind=LimitKind.POSTPAID).delete()
         subscription = make_subscription(
-            organization,
+            scope,
             plan,
             current_period_start=utc(2026, 3, 1),
             current_period_end=utc(2026, 4, 1),

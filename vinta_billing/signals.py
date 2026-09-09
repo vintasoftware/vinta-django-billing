@@ -37,20 +37,20 @@ payment_status_changed = Signal()
 #: kwargs: ``refund``, ``from_status``, ``to_status``
 refund_status_changed = Signal()
 
-#: An organization crossed a warning threshold on a limited resource.
-#: kwargs: ``organization``, ``resource_key``, ``level``, ``usage``, ``limit``
+#: An scope crossed a warning threshold on a limited resource.
+#: kwargs: ``scope``, ``resource_key``, ``level``, ``usage``, ``limit``
 limit_warning_raised = Signal()
 
 #: A billing period was closed and its summary written.
 #: kwargs: ``subscription``, ``period_start``, ``period_end``, ``summary``
 billing_period_closed = Signal()
 
-#: An organization's billing profile was pinned to a different payment provider.
-#: kwargs: ``billing_profile``, ``organization``, ``actor``, ``from_provider``,
+#: An scope's billing profile was pinned to a different payment provider.
+#: kwargs: ``billing_profile``, ``scope``, ``actor``, ``from_provider``,
 #: ``to_provider``
 payment_provider_repointed = Signal()
 
 #: A subscription left ``restricted``. Projects that paused work while an
-#: organization was restricted resume it here.
-#: kwargs: ``subscription``, ``organization_ids`` (the pooled subtree)
+#: scope was restricted resume it here.
+#: kwargs: ``subscription``, ``scope_ids`` (the pooled subtree)
 billing_restriction_lifted = Signal()

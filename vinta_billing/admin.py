@@ -111,7 +111,7 @@ class BillingPlanAdminForm(forms.ModelForm):
             "slug",
             "name",
             "is_active",
-            "is_default_for_new_organizations",
+            "is_default_for_new_scopes",
             "monthly_price",
             "annual_price",
             "currency",
@@ -135,11 +135,11 @@ class BillingPlanAdmin(admin.ModelAdmin):
         "slug",
         "name",
         "is_active",
-        "is_default_for_new_organizations",
+        "is_default_for_new_scopes",
         "monthly_price",
         "currency",
     )
-    list_filter = ("is_active", "is_default_for_new_organizations", "currency")
+    list_filter = ("is_active", "is_default_for_new_scopes", "currency")
     search_fields = ("slug", "name")
     ordering = ("slug",)
     readonly_fields = ("created", "modified")
@@ -155,7 +155,7 @@ class BillingAddressAdmin(admin.ModelAdmin):
 
 @admin.register(BillingProfile)
 class BillingProfileAdmin(admin.ModelAdmin):
-    """Admin for the one-per-organization billing root.
+    """Admin for the one-per-scope billing root.
 
     ``payment_provider`` is editable here, but an edit to it is routed through
     ``SubscriptionService.set_payment_provider`` (see ``save_model``) rather than
@@ -164,9 +164,9 @@ class BillingProfileAdmin(admin.ModelAdmin):
     plan's Pin mutability guiding decision.
     """
 
-    list_display = ("organization", "document_type", "document_number", "payment_provider")
+    list_display = ("scope", "document_type", "document_number", "payment_provider")
     list_filter = ("payment_provider",)
-    search_fields = ("organization__name", "document_number")
+    search_fields = ("scope__label", "document_number")
     readonly_fields = ("created", "modified")
 
     def save_model(
@@ -182,7 +182,7 @@ class BillingProfileAdmin(admin.ModelAdmin):
         trail with the pre-repoint provider recorded.
 
         Only takes this path on an edit to an *already-existing* profile:
-        ``set_payment_provider`` reads ``organization.billing_profile`` to find
+        ``set_payment_provider`` reads ``scope.billing_profile`` to find
         the value it is overwriting, and that reverse relation does not resolve
         yet for a profile being created for the first time in this same request.
         Runs before ``super().save_model()`` so the "previous" value it reads
@@ -212,15 +212,13 @@ class BillingProfileAdmin(admin.ModelAdmin):
             if subscription_service is None:
                 subscription_service = resolve_service("subscription_service")
             actor = request.user if request.user.is_authenticated else None
-            subscription_service.set_payment_provider(
-                obj.organization, obj.payment_provider, actor=actor
-            )
+            subscription_service.set_payment_provider(obj.scope, obj.payment_provider, actor=actor)
         super().save_model(request, obj, form, change)
 
 
 class SubscriptionPlanLimitInline(admin.TabularInline):
     """Editable per-subscription limit copy — the support lever for a stuck
-    organization. A row an admin edits here is stamped ``is_overridden=True`` on
+    scope. A row an admin edits here is stamped ``is_overridden=True`` on
     save (see ``SubscriptionAdmin.save_formset``) so it survives the next plan
     change untouched, which is what makes this the intended enforcement bypass
     instead of a code-level one.
@@ -274,7 +272,7 @@ class SubscriptionAddOnInline(admin.TabularInline):
 class SubscriptionAdmin(admin.ModelAdmin):
     list_display = (
         "id",
-        "organization",
+        "scope",
         "plan",
         "status",
         "billing_state",
@@ -283,7 +281,7 @@ class SubscriptionAdmin(admin.ModelAdmin):
         "current_period_end",
     )
     list_filter = ("status", "billing_state", "billing_interval", "payment_provider")
-    search_fields = ("organization__name", "external_id")
+    search_fields = ("scope__label", "external_id")
     readonly_fields = ("created", "modified")
     inlines = (SubscriptionPlanLimitInline, SubscriptionEntitlementInline, SubscriptionAddOnInline)
 
@@ -332,7 +330,7 @@ class PaymentAdmin(admin.ModelAdmin):
         "status",
     )
     list_filter = ("status", "payment_provider")
-    search_fields = ("external_id", "billing_profile__organization__name")
+    search_fields = ("external_id", "billing_profile__scope__label")
     readonly_fields = ("created", "modified")
 
 
@@ -372,10 +370,10 @@ class PaymentMethodAdmin(admin.ModelAdmin):
     webhook path (``SubscriptionService.record_payment_method``); nothing
     here supports creating one by hand, so there is no meaningful "add" form."""
 
-    list_display = ("id", "organization", "provider", "external_id", "is_active", "created")
+    list_display = ("id", "scope", "provider", "external_id", "is_active", "created")
     list_filter = ("provider", "is_active")
-    search_fields = ("organization__name", "external_id")
-    readonly_fields = ("created", "modified", "organization", "provider", "external_id")
+    search_fields = ("scope__label", "external_id")
+    readonly_fields = ("created", "modified", "scope", "provider", "external_id")
 
 
 @admin.register(ProviderWebhookEvent)
@@ -402,7 +400,7 @@ class BillingPeriodResourceUsageInline(admin.TabularInline):
         "total",
         "limit_value",
         "overage_unit_price",
-        "by_organization",
+        "by_scope",
     )
     readonly_fields = fields
 
@@ -429,7 +427,7 @@ class BillingPeriodSummaryAdmin(admin.ModelAdmin):
 
     list_display = (
         "id",
-        "organization",
+        "scope",
         "subscription",
         "billing_period_start",
         "billing_period_end",
@@ -441,12 +439,12 @@ class BillingPeriodSummaryAdmin(admin.ModelAdmin):
         "reconciliation_orphaned",
     )
     list_filter = ("charged", "billing_interval", "currency")
-    search_fields = ("organization__name", "subscription__id", "plan_slug")
+    search_fields = ("scope__label", "subscription__id", "plan_slug")
     readonly_fields = (
         "created",
         "modified",
         "subscription",
-        "organization",
+        "scope",
         "billing_period_start",
         "billing_period_end",
         "plan_slug",
@@ -488,7 +486,7 @@ class BillingPeriodResourceUsageAdmin(admin.ModelAdmin):
         "overage_unit_price",
     )
     list_filter = ("resource_key", "kind")
-    search_fields = ("summary__organization__name",)
+    search_fields = ("summary__scope__label",)
     readonly_fields = (
         "created",
         "modified",
@@ -498,7 +496,7 @@ class BillingPeriodResourceUsageAdmin(admin.ModelAdmin):
         "total",
         "limit_value",
         "overage_unit_price",
-        "by_organization",
+        "by_scope",
     )
 
     def has_add_permission(self, request: HttpRequest) -> bool:

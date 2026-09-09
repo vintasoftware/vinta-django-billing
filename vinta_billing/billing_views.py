@@ -1,4 +1,4 @@
-"""The self-serve billing surface -- an organization on the free plan
+"""The self-serve billing surface -- an scope on the free plan
 chooses a paid plan, pays, and sees its limits lift with no support or
 engineering intervention.
 
@@ -29,9 +29,8 @@ from rest_framework.response import Response
 from rest_framework.serializers import BaseSerializer
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.viewsets import GenericViewSet, ViewSet
-from vinta_orgs.conf import get_organization_model
-from vinta_orgs.models import AbstractOrganization
 
+from vinta_billing.conf import get_scope_model
 from vinta_billing.constants import BillingState
 from vinta_billing.filtersets import (
     BillingPeriodSummaryFilterSet,
@@ -41,6 +40,7 @@ from vinta_billing.filtersets import (
 )
 from vinta_billing.metering import get_occurrence_source
 from vinta_billing.models import (
+    AbstractBillingScope,
     BillingPeriodSummary,
     BillingPlan,
     MeteredOccurrence,
@@ -93,13 +93,13 @@ BILLING_ERROR_BODY_SERIALIZER = inline_serializer(
 )
 
 
-def _require_organization(request) -> AbstractOrganization:
-    """``request.organization``, or ``PermissionDenied`` -- every action in this
-    module needs an active organization to resolve a billing root against."""
-    organization = getattr(request, "organization", None)
-    if organization is None:
-        raise PermissionDenied("An active organization is required to manage billing.")
-    return organization
+def _require_scope(request) -> AbstractBillingScope:
+    """``request.scope``, or ``PermissionDenied`` -- every action in this
+    module needs an active scope to resolve a billing root against."""
+    scope = getattr(request, "scope", None)
+    if scope is None:
+        raise PermissionDenied("An active scope is required to manage billing.")
+    return scope
 
 
 class BillingPlanViewSet(mixins.ListModelMixin, GenericVirtualModelViewMixin, GenericViewSet):
@@ -119,12 +119,12 @@ class BillingPlanViewSet(mixins.ListModelMixin, GenericVirtualModelViewMixin, Ge
 class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
     """``GET /billing/usage/`` -- current usage against effective limits, per
     resource, plus ``billing_state``, the plan snapshot, the current billing
-    period's bounds, the plan/add-on split of each ceiling, per-organization
+    period's bounds, the plan/add-on split of each ceiling, per-scope
     attribution across the caller's pooled subtree, and the overage accrued so
     far this cycle. Resolved at the billing root, same as every other read in
     this app.
 
-    The "pull" half of "an organization can see where it stands". It reads
+    The "pull" half of "an scope can see where it stands". It reads
     usage through ``EntitlementService.effective_limit_from_resolved`` /
     ``usage_breakdown_for_root`` -- pre-resolved entry points onto the
     identical ``get_effective_limit`` / ``get_current_usage`` implementation
@@ -135,9 +135,9 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
     warning can never disagree about a number.
 
     No permission beyond ``IsAuthenticated``, deliberately -- a read never
-    blocks, including for a ``RESTRICTED`` organization (a RESTRICTED
-    organization has its writes blocked and sync paused, never its reads; an
-    organization must be able to see exactly what it needs to resolve before it
+    blocks, including for a ``RESTRICTED`` scope (a RESTRICTED
+    scope has its writes blocked and sync paused, never its reads; an
+    scope must be able to see exactly what it needs to resolve before it
     can act on it).
     """
 
@@ -183,25 +183,23 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
         # reader of this method, not customer-facing API documentation, and
         # drf-spectacular would otherwise pull it into the schema in place of the
         # class docstring above.
-        organization = _require_organization(request)
-        root = resolve_billing_root(organization)
+        scope = _require_scope(request)
+        root = resolve_billing_root(scope)
         # `select_related("plan")` folds the plan-snapshot lookup into this one
         # query instead of a second round trip when a subscription exists.
-        subscription = Subscription.objects.select_related("plan").filter(organization=root).first()
+        subscription = Subscription.objects.select_related("plan").filter(scope=root).first()
         billing_state = (
             subscription.billing_state if subscription is not None else BillingState.FREE
         )
 
         # `root` is already a billing root by construction, so resolving the pool
-        # from it (rather than from `organization`) costs `resolve_billing_root`
+        # from it (rather than from `scope`) costs `resolve_billing_root`
         # nothing further -- `is_billing_root(root)` short-circuits before any
         # `parent` access -- and this is the pool's *only* resolution for the
         # whole response.
-        pooled_organization_ids = self.entitlement_service.get_pooled_organization_ids(root)
-        organization_names = dict(
-            get_organization_model()
-            .objects.filter(pk__in=pooled_organization_ids)
-            .values_list("pk", "name")
+        pooled_scope_ids = self.entitlement_service.get_pooled_scope_ids(root)
+        scope_labels = dict(
+            get_scope_model().objects.filter(pk__in=pooled_scope_ids).values_list("pk", "label")
         )
 
         plan: dict[str, str] | None = None
@@ -236,7 +234,7 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
             billing_period = {"start": period_start, "end": period_end}
             estimated_overage_total = (
                 MeteredOccurrence.objects.for_billing_period(subscription.pk, period_start)
-                .for_organizations(pooled_organization_ids)
+                .for_scopes(pooled_scope_ids)
                 .overage_total()
             )
             plan_limit_by_resource = {
@@ -261,7 +259,7 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
                 resource_key, plan_limit_row, add_on_quantity_for_ceiling
             )
             usage_breakdown = self.entitlement_service.usage_breakdown_for_root(
-                root, resource_key, subscription, pooled_organization_ids=pooled_organization_ids
+                root, resource_key, subscription, pooled_scope_ids=pooled_scope_ids
             )
             # Structurally the same sum `_count_usage` performs -- derived from the
             # breakdown just fetched rather than a second, independent count.
@@ -285,13 +283,13 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
                 included_in_plan = plan_limit_row.limit_value
                 add_on_quantity = add_on_quantity_by_resource.get(resource_key, 0)
 
-            by_organization = [
+            by_scope = [
                 {
-                    "organization_id": organization_id,
-                    "name": organization_names.get(organization_id, ""),
+                    "scope_id": scope_id,
+                    "name": scope_labels.get(scope_id, ""),
                     "usage": usage,
                 }
-                for organization_id, usage in sorted(usage_breakdown.items())
+                for scope_id, usage in sorted(usage_breakdown.items())
             ]
 
             limits.append(
@@ -303,14 +301,14 @@ class BillingUsageViewSet(TenantScopedViewMixin, ViewSet):
                     "overage_unit_price": effective_limit.overage_unit_price,
                     "included_in_plan": included_in_plan,
                     "add_on_quantity": add_on_quantity,
-                    "by_organization": by_organization,
+                    "by_scope": by_scope,
                 }
             )
 
         serializer = UsageResponseSerializer(
             {
                 "billing_state": billing_state,
-                "billing_root_organization_id": root.pk,
+                "billing_root_scope_id": root.pk,
                 "plan": plan,
                 "billing_period": billing_period,
                 "estimated_overage_total": estimated_overage_total,
@@ -331,7 +329,7 @@ class BillingPeriodViewSet(
     lines.
 
     Scoped to the caller's resolved pool exactly like ``BillingUsageViewSet``:
-    ``resolve_billing_root`` then ``get_pooled_organization_ids``, both
+    ``resolve_billing_root`` then ``get_pooled_scope_ids``, both
     resolved once in ``get_queryset()``. A pk outside that pool is filtered out
     of the queryset before ``get_object()`` ever runs, so it 404s -- never
     403 -- and this endpoint never confirms the existence of another tenant's
@@ -339,16 +337,16 @@ class BillingPeriodViewSet(
 
     ``IsAuthenticated`` only, matching ``GET /billing/usage/``'s
     read-never-blocks rule: a closed statement is exactly the kind of read an
-    organization needs in order to resolve billing, including while
+    scope needs in order to resolve billing, including while
     ``RESTRICTED``.
 
     History is forward-only:
-    an organization with no closed periods yet gets ``200`` with an empty list,
-    never a ``404`` -- there is nothing wrong with that organization, cycle
+    an scope with no closed periods yet gets ``200`` with an empty list,
+    never a ``404`` -- there is nothing wrong with that scope, cycle
     close simply has not run for it yet. A caller with **no active
-    organization** (``request.organization is None``) is a different state --
+    scope** (``request.scope is None``) is a different state --
     there is no pool to resolve a billing root against at all -- and gets
-    ``403``, matching ``GET /billing/usage/``'s ``_require_organization`` rule
+    ``403``, matching ``GET /billing/usage/``'s ``_require_scope`` rule
     rather than the empty-list state above.
     """
 
@@ -381,10 +379,10 @@ class BillingPeriodViewSet(
         return BillingPeriodSummarySerializer
 
     def get_queryset(self) -> QuerySet[BillingPeriodSummary]:
-        organization = _require_organization(self.request)
-        root = resolve_billing_root(organization)
-        pooled_organization_ids = self.entitlement_service.get_pooled_organization_ids(root)
-        queryset = BillingPeriodSummary.objects.for_organizations(pooled_organization_ids)
+        scope = _require_scope(self.request)
+        root = resolve_billing_root(scope)
+        pooled_scope_ids = self.entitlement_service.get_pooled_scope_ids(root)
+        queryset = BillingPeriodSummary.objects.for_scopes(pooled_scope_ids)
         if self.action == "retrieve":
             # Bounded query count for the detail action: one query for the
             # statement plus one for its resources, not one per resource row.
@@ -408,21 +406,17 @@ class BillingPeriodViewSet(
         # the retrieve action, so this walks the prefetch cache rather than
         # issuing a query per resource row. Bounded by pool size, not by
         # resource-row count: one extra query total, resolving every
-        # organization pk referenced across all resource rows in one batch --
+        # scope pk referenced across all resource rows in one batch --
         # the same pattern `BillingUsageViewSet.retrieve_usage` already uses
-        # for `organization_names`.
-        organization_ids = {
-            int(organization_id)
-            for resource in instance.resources.all()
-            for organization_id in resource.by_organization
+        # for `scope_labels`.
+        scope_ids = {
+            int(scope_id) for resource in instance.resources.all() for scope_id in resource.by_scope
         }
-        organization_names = dict(
-            get_organization_model()
-            .objects.filter(pk__in=organization_ids)
-            .values_list("pk", "name")
+        scope_labels = dict(
+            get_scope_model().objects.filter(pk__in=scope_ids).values_list("pk", "label")
         )
         context = self.get_serializer_context()
-        context["organization_names"] = organization_names
+        context["scope_labels"] = scope_labels
         serializer = self.get_serializer(instance, context=context)
         return Response(serializer.data)
 
@@ -431,7 +425,7 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
     """``GET /billing/usage/occurrences/`` -- the line-item ledger behind
     post-paid charges: every ``MeteredOccurrence`` row in the caller's pooled
     billing subtree, paginated and filterable by period, allowance side,
-    organization, and occurrence-start range, so a customer disputing an
+    scope, and occurrence-start range, so a customer disputing an
     invoice can tie every unit of money to a specific occurrence.
 
     **Stricter than every other read in this module.** ``BillingUsageViewSet``
@@ -446,8 +440,8 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
     resolved billing root -- the same two-step dance
     ``SubscriptionViewSet.get_subscription`` and ``AddOnViewSet.create`` already
     perform, and for the same reason their comments document:
-    ``has_permission`` cannot know *which* organization this read is for,
-    because ``request.organization`` is not resolved yet at that point in
+    ``has_permission`` cannot know *which* scope this read is for,
+    because ``request.scope`` is not resolved yet at that point in
     ``TenantScopedViewMixin.initial()``'s ordering (see
     ``IsBillingManager``'s docstring).
     """
@@ -478,17 +472,17 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
         self.entitlement_service = entitlement_service or resolve_service("entitlement_service")
 
     def get_queryset(self) -> QuerySet[MeteredOccurrence]:
-        organization = _require_organization(self.request)
-        root = resolve_billing_root(organization)
+        scope = _require_scope(self.request)
+        root = resolve_billing_root(scope)
         # The call below re-resolves root internally; passing the
         # already-resolved root is a deliberate no-op.
-        pooled_organization_ids = self.entitlement_service.get_pooled_organization_ids(root)
-        # Stashed on the request so `MeteredOccurrenceFilterSet.filter_organization`
-        # can validate the `organization` filter value against the caller's pool
+        pooled_scope_ids = self.entitlement_service.get_pooled_scope_ids(root)
+        # Stashed on the request so `MeteredOccurrenceFilterSet.filter_scope`
+        # can validate the `scope` filter value against the caller's pool
         # without re-resolving it or reaching into DI itself.
-        self.request.pooled_organization_ids = pooled_organization_ids  # type: ignore[attr-defined]
+        self.request.pooled_scope_ids = pooled_scope_ids  # type: ignore[attr-defined]
 
-        queryset = MeteredOccurrence.objects.for_organizations(pooled_organization_ids).order_by(
+        queryset = MeteredOccurrence.objects.for_scopes(pooled_scope_ids).order_by(
             "-occurrence_start"
         )
         if "billing_period_start" in self.request.query_params:
@@ -496,7 +490,7 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
             # narrow it below rather than also constraining by the current period.
             return queryset
 
-        subscription = Subscription.objects.filter(organization=root).first()
+        subscription = Subscription.objects.filter(scope=root).first()
         if subscription is None:
             return queryset.none()
         period_start = current_billing_period_start(subscription)
@@ -507,8 +501,8 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
         responses={200: MeteredOccurrenceSerializer},
     )
     def list(self, request: Request, *args: object, **kwargs: object) -> Response:
-        organization = _require_organization(request)
-        root = resolve_billing_root(organization)
+        scope = _require_scope(request)
+        root = resolve_billing_root(scope)
         # The real, object-level gate -- see the class docstring and
         # `IsBillingManager`'s docstring for why this cannot live in
         # `has_permission`.
@@ -518,19 +512,17 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
         page = self.paginate_queryset(queryset)
         occurrences = page if page is not None else list(queryset)
 
-        # Batched once per page/response, never once per row: organization
+        # Batched once per page/response, never once per row: scope
         # names (mirrors `BillingUsageViewSet`/`BillingPeriodViewSet`'s
-        # `organization_names` pattern) and event/calendar/owner enrichment
+        # `scope_labels` pattern) and event/calendar/owner enrichment
         # (see `_resolve_events`). Stashed on `self` rather than passed as an
         # explicit `context=` kwarg to `get_serializer` below, because
         # `GenericAPIView.get_serializer` builds its own `context` via
         # `get_serializer_context()` and passing both raises a duplicate-kwarg
         # `TypeError`.
-        organization_ids = {occurrence.organization_id for occurrence in occurrences}
-        self._organization_names = dict(
-            get_organization_model()
-            .objects.filter(pk__in=organization_ids)
-            .values_list("pk", "name")
+        scope_ids = {occurrence.scope_id for occurrence in occurrences}
+        self._scope_labels = dict(
+            get_scope_model().objects.filter(pk__in=scope_ids).values_list("pk", "label")
         )
         self._event_map = self._resolve_events(occurrences)
 
@@ -543,7 +535,7 @@ class MeteredOccurrenceViewSet(TenantScopedViewMixin, mixins.ListModelMixin, Gen
         # `GenericAPIView.get_serializer_context` is typed `Mapping[str, Any]`
         # (read-only) -- copy into a plain `dict` before adding keys.
         context: dict[str, object] = dict(super().get_serializer_context())
-        context["organization_names"] = getattr(self, "_organization_names", {})
+        context["scope_labels"] = getattr(self, "_scope_labels", {})
         context["event_map"] = getattr(self, "_event_map", {})
         return context
 
@@ -607,26 +599,26 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
         return super().get_throttles()
 
     def get_queryset(self) -> QuerySet[Subscription]:
-        # Chain the organization filter on top of the virtual-model-optimized base
+        # Chain the scope filter on top of the virtual-model-optimized base
         # queryset, mirroring BillingProfileViewSet.get_queryset().
         queryset = super().get_queryset()
-        organization = getattr(self.request, "organization", None)
-        if organization is None:
+        scope = getattr(self.request, "scope", None)
+        if scope is None:
             return queryset.none()
-        return queryset.filter(organization=resolve_billing_root(organization))
+        return queryset.filter(scope=resolve_billing_root(scope))
 
     def get_subscription(self, *, check_object_perms: bool = False) -> Subscription:
-        organization = _require_organization(self.request)
+        scope = _require_scope(self.request)
         subscription = self.get_queryset().first()
         if subscription is None:
-            raise NotFound("This organization has no subscription.")
+            raise NotFound("This scope has no subscription.")
         if check_object_perms:
-            # `has_permission` alone cannot decide *which* organization a write
-            # is for -- `request.organization` is not resolved yet at that
+            # `has_permission` alone cannot decide *which* scope a write
+            # is for -- `request.scope` is not resolved yet at that
             # point in `TenantScopedViewMixin.initial()`'s ordering (see
             # `IsBillingManager`'s docstring). This is the object-level
             # check against the actually-resolved billing root.
-            self.check_object_permissions(self.request, resolve_billing_root(organization))
+            self.check_object_permissions(self.request, resolve_billing_root(scope))
         return subscription
 
     @extend_schema(
@@ -662,7 +654,7 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
                 description=(
                     "A deployment fault, not a bad request -- the same call will fail "
                     "identically until an operator fixes the deployment, so do not retry "
-                    "with different input. Either the provider this organization resolves "
+                    "with different input. Either the provider this scope resolves "
                     "to is not configured in this deployment "
                     '(`code: "payment_provider_not_configured"`, '
                     "`PaymentProviderNotConfiguredError`), or the target plan is missing a "
@@ -765,7 +757,7 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
                     'GRACE/RESTRICTED (`code: "retry_payment_not_applicable"`, '
                     "`RetryPaymentNotApplicableError`); it has never attached a payment "
                     'instrument at the provider (`code: "subscription_not_attached"`, '
-                    "`SubscriptionNotAttachedError` -- such an organization has never paid and "
+                    "`SubscriptionNotAttachedError` -- such an scope has never paid and "
                     "belongs on `change-plan`'s first-upgrade path instead); the provider "
                     "reports nothing actually owed for this subscription right now "
                     '(`code: "no_outstanding_balance"`, `NoOutstandingBalanceError`); or the '
@@ -838,17 +830,15 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
 
     def get_queryset(self) -> QuerySet[SubscriptionAddOn]:
         queryset = super().get_queryset()
-        organization = getattr(self.request, "organization", None)
-        if organization is None:
+        scope = getattr(self.request, "scope", None)
+        if scope is None:
             return queryset.none()
-        return queryset.filter(subscription__organization=resolve_billing_root(organization))
+        return queryset.filter(subscription__scope=resolve_billing_root(scope))
 
-    def _get_subscription(self, organization: AbstractOrganization) -> Subscription:
-        subscription = Subscription.objects.filter(
-            organization=resolve_billing_root(organization)
-        ).first()
+    def _get_subscription(self, scope: AbstractBillingScope) -> Subscription:
+        subscription = Subscription.objects.filter(scope=resolve_billing_root(scope)).first()
         if subscription is None:
-            raise NotFound("This organization has no subscription.")
+            raise NotFound("This scope has no subscription.")
         return subscription
 
     @extend_schema(
@@ -867,7 +857,7 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
             503: OpenApiResponse(
                 response=BILLING_ERROR_BODY_SERIALIZER,
                 description=(
-                    "The provider this organization resolves to is not configured in this "
+                    "The provider this scope resolves to is not configured in this "
                     "deployment, so the one-time charge cannot be driven "
                     '(`code: "payment_provider_not_configured"`, '
                     "`PaymentProviderNotConfiguredError`). A deployment fault, not a bad "
@@ -878,15 +868,15 @@ class AddOnViewSet(TenantScopedViewMixin, GenericViewSet):
         },
     )
     def create(self, request, *args, **kwargs):
-        organization = _require_organization(request)
-        billing_root = resolve_billing_root(organization)
+        scope = _require_scope(request)
+        billing_root = resolve_billing_root(scope)
         # See `SubscriptionViewSet.get_subscription`'s comment: `has_permission`
-        # cannot know *which* organization this write is for, since
-        # `request.organization` is not resolved yet at that point --
+        # cannot know *which* scope this write is for, since
+        # `request.scope` is not resolved yet at that point --
         # `has_object_permission` is the real gate, run here against the
         # resolved billing root.
         self.check_object_permissions(request, billing_root)
-        subscription = self._get_subscription(organization)
+        subscription = self._get_subscription(scope)
 
         request_serializer = AddOnPurchaseRequestSerializer(data=request.data)
         request_serializer.is_valid(raise_exception=True)

@@ -5,7 +5,7 @@ The billing engine shipped here is deliberately ignorant of what it is billing
 for. It knows how to resolve a ceiling, pool usage across a subtree, meter an
 occurrence and dun a failed charge; it does not know that a "resource calendar"
 exists, that a seat is a membership plus a pending invitation, or that a parent
-organization pays for its children. Every one of those is a project's answer,
+scope pays for its children. Every one of those is a project's answer,
 supplied through the settings below.
 
     # settings.py
@@ -32,6 +32,77 @@ from django.utils.module_loading import import_string
 
 SETTINGS_NAME = "VINTA_BILLING"
 
+#: The scope model, as ``"app_label.ModelName"``. Defaults to the one this app
+#: ships; a project with a real payer boundary points it at its own.
+#:
+#: **Top-level, not a** ``VINTA_BILLING`` **key**, unlike every other knob in
+#: this module -- see :func:`install_swappable_defaults` for why it has no
+#: choice.
+BILLING_SCOPE_MODEL = "BILLING_SCOPE_MODEL"
+DEFAULT_SCOPE_MODEL = "vinta_billing.BillingScope"
+
+
+def get(name: str, default: Any = None) -> Any:
+    """Read one *top-level* Django setting, falling back to ``default``.
+
+    Distinct from :func:`get_setting`, which reads a key out of the
+    ``VINTA_BILLING`` dictionary. Only the swappable model setting is read this
+    way, and only because it must be.
+    """
+    return getattr(settings, name, default)
+
+
+def install_swappable_defaults() -> None:
+    """Give ``BILLING_SCOPE_MODEL`` a default, if the project has not.
+
+    ``Meta.swappable`` is not like a normal setting lookup. Django's migration
+    autodetector reads the named setting with a bare ``getattr(settings, name)``
+    and lets the ``AttributeError`` escape, which is why ``AUTH_USER_MODEL`` --
+    the pattern this follows -- is declared in ``django.conf.global_settings``.
+    A third party app cannot add to that module, so the default has to be put
+    into the project's settings instead. It is also why this one setting cannot
+    live inside the ``VINTA_BILLING`` dictionary with the rest: ``swappable``
+    names a setting, not a path into one.
+
+    Timing is what makes this work and why it lives at import time in
+    ``apps.py`` rather than in ``AppConfig.ready``. ``apps.populate`` runs in two
+    phases: it creates every ``AppConfig`` first (importing each app module and
+    its ``apps`` module), and only then imports any models. So this has already
+    run by the time a field definition or the autodetector asks for the setting,
+    and ``ready()`` would be far too late.
+
+    A project that *has* set it is left alone, which is the whole point: this is
+    a default, not an override.
+
+    Copied, near-verbatim and deliberately, from
+    ``vinta_audit_logs.conf.install_swappable_defaults``. The two packages face
+    the identical problem and the reasoning is worth carrying in both.
+    """
+    if not hasattr(settings, BILLING_SCOPE_MODEL):
+        setattr(settings, BILLING_SCOPE_MODEL, DEFAULT_SCOPE_MODEL)
+
+
+def scope_model_string() -> str:
+    """``"app_label.ModelName"`` for the configured scope model.
+
+    What a ``ForeignKey`` target wants. Read at class-definition time by every
+    model in this app that points at a scope.
+    """
+    return str(get(BILLING_SCOPE_MODEL, DEFAULT_SCOPE_MODEL))
+
+
+def get_scope_model() -> Any:
+    """The configured scope model class.
+
+    Resolved through the app registry on every call rather than cached: a test
+    that points ``BILLING_SCOPE_MODEL`` somewhere else must not be served a
+    stale class, and the lookup is a dictionary hit.
+    """
+    from django.apps import apps
+
+    return apps.get_model(scope_model_string(), require_ready=False)
+
+
 # Resolved once and reused: ``get_setting`` is called from the enforcement path,
 # which runs on every create of every limited resource.
 _settings_cache: dict[str, Any] | None = None
@@ -42,19 +113,20 @@ _settings_cache: dict[str, Any] | None = None
 _settings_cache_source: Any = None
 
 _DEFAULTS: dict[str, Any] = {
-    # How to find the organization whose subscription pays for a given one, and
-    # which organizations pool their usage against it. The default treats every
-    # organization as its own billing root -- correct for a flat project, and
-    # the only thing that can be assumed of `vinta-django-orgs`' organization
-    # model, which has no parent field. A project with a reseller hierarchy
-    # points this at its own strategy; `vinta_billing.hierarchy.ParentFieldHierarchy`
-    # implements the usual parent-chain walk against configurable field names.
+    # How to find the scope whose subscription pays for a given one, and which
+    # scopes pool their usage against it. The default treats every scope as its
+    # own billing root, which is correct for a flat project and avoids the
+    # descendant query a parent walk would cost on an all-NULL `parent` column.
+    # A project with a reseller hierarchy points this at
+    # `vinta_billing.hierarchy.ParentFieldHierarchy`, which walks the `parent`
+    # every scope carries, or at its own strategy.
     "HIERARCHY": "vinta_billing.hierarchy.FlatHierarchy",
-    # ``(user, organization) -> bool``: may this user see and change this
-    # organization's billing? The default allows any member of the organization,
-    # which is the most permissive answer that is still tenant-safe. Projects
-    # with a billing-owner or admin role should narrow it.
-    "BILLING_MANAGER_PREDICATE": "vinta_billing.permissions.any_member_may_manage_billing",
+    # ``(user, scope) -> bool``: may this user see and change this scope's
+    # billing? The default is the scope's ``owner`` and nobody else -- least
+    # privilege, and already right for a personal plan, where
+    # ``get_or_create_for(user)`` has set the owner. Projects billing
+    # organizations point this at their own membership query.
+    "BILLING_MANAGER_PREDICATE": "vinta_billing.permissions.owner_may_manage_billing",
     # Where dunning and usage-warning messages go. The default logs them and
     # drops them, so nothing silently fails in a project that has not wired a
     # transport yet. No adapter for any specific transport ships here -- see
@@ -70,12 +142,13 @@ _DEFAULTS: dict[str, Any] = {
     # one, and refuses to guess if there are several -- billing the wrong
     # resource is worse than failing loudly.
     "METERED_RESOURCE_KEY": None,
-    # ``(organization) -> list[user_id]``: who is told when a charge fails or a
-    # limit is approached. The default is every member of the organization,
-    # since `vinta-django-orgs` has no notion of a billing owner. Projects with
-    # roles should narrow it -- an "your card failed" message to every member of
-    # a large organization is noise at best.
-    "BILLING_RECIPIENTS": "vinta_billing.recipients.all_members",
+    # ``(scope) -> list[user_id]``: who is told when a charge fails or a limit
+    # is approached. The default is the scope's ``owner``, the same column the
+    # permission predicate reads, so that "who may change billing" and "who
+    # hears when it breaks" cannot drift apart. Empty for a scope with no owner
+    # -- see `vinta_billing.recipients.scope_owner` for why that is worth
+    # knowing.
+    "BILLING_RECIPIENTS": "vinta_billing.recipients.scope_owner",
     # URL namespace the shipped routes are mounted under. The provider
     # adapters `reverse()` their own webhook callback URLs through it, so it has
     # to match wherever the project actually included them. Set to "" when they
@@ -125,12 +198,27 @@ _DEFAULTS: dict[str, Any] = {
     # False, so every outbound call site refuses it loudly instead of
     # authenticating with an empty credential.
     "PROVIDERS": {},
+    # Read by migration 0005 only, and only by an installation upgrading from
+    # 0.7 or earlier. Names the model that installation's `ORGANIZATION_MODEL`
+    # pointed at, so the scopes the backfill creates name the right
+    # content type -- `"vinta_orgs.Organization"`, or whatever the project
+    # swapped in.
+    # Unset is correct for a fresh install, where 0005 has nothing to migrate.
+    "LEGACY_SCOPE_MODEL": None,
+    # ``(request) -> scope | None``: which scope is this request acting on?
+    # A project's answer is genuinely its own -- a header, a URL segment, a
+    # tenant middleware it already runs -- so it is a seam rather than a guess.
+    # The default takes whatever already set ``request.scope`` and otherwise
+    # falls back to the authenticated caller's own scope, which is what makes a
+    # personal plan work with nothing configured. See
+    # `vinta_billing.utils.default_scope_resolver`.
+    "SCOPE_RESOLVER": "vinta_billing.utils.default_scope_resolver",
     # Mixed in front of every tenant-scoped viewset this package mounts. The
     # default is this package's own mixin, which every one of those viewsets
     # already inherits -- so the default changes nothing and `get_routes()`
     # hands back the very classes it always did.
     #
-    # A project whose DRF surface resolves the acting organization its own way
+    # A project whose DRF surface resolves the acting scope its own way
     # (a header its clients already send, a URL segment, a membership lookup
     # its own refusal bodies are written against) points this at its mixin
     # instead, and mounts the shipped routes as they are rather than
@@ -152,10 +240,10 @@ _DEFAULTS: dict[str, Any] = {
     # overrode on them -- are what the shipped views build. Passing a service
     # to a viewset's constructor still wins over both.
     "SERVICE_CONTAINER": "vinta_billing.services.container",
-    # Which provider governs an organization's charges when its billing profile
+    # Which provider governs a scope's charges when its billing profile
     # carries no pin of its own. Empty rather than a guess at "stripe": a
     # library must not pick which payment processor a project charges through.
-    # Empty is also the correct state for a project whose organizations are all
+    # Empty is also the correct state for a project whose scopes are all
     # on a free plan -- the pin is written on the first confirmed charge, not
     # before.
     "DEFAULT_PROVIDER": "",

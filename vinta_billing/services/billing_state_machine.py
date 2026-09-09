@@ -20,7 +20,7 @@ state-machine check.
 
 The one edge from the diagram this module does **not** encode is
 ``[*] --> Free`` -- that is subscription *creation*
-(``SubscriptionService.create_subscription_for_organization``), not a
+(``SubscriptionService.create_subscription_for_scope``), not a
 transition of an existing row, so it has no ``from_state`` to validate against.
 """
 
@@ -46,7 +46,7 @@ LEGAL_BILLING_STATE_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
         (BillingState.ACTIVE, BillingState.ACTIVE),  # renewal succeeds
         # Two drivers reach this edge: a failed recurring charge
         # (DunningService.enter_grace) and a downgrade that leaves the
-        # organization over its new (lower) limits
+        # scope over its new (lower) limits
         # (SubscriptionService._schedule_downgrade). Both stamp
         # grace_period_ends_at and drive billing_state through this same
         # transition, so process_dunning's GRACE/RESTRICTED sweep (vinta_billing/jobs.py)
@@ -57,7 +57,7 @@ LEGAL_BILLING_STATE_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
         (BillingState.ACTIVE, BillingState.GRACE),
         # Same two drivers as (ACTIVE, GRACE) above, from FREE: a failed
         # first-upgrade charge (DunningService.enter_grace), or a downgrade
-        # requested while still FREE that leaves the organization over the new
+        # requested while still FREE that leaves the scope over the new
         # plan's limits (SubscriptionService._schedule_downgrade).
         (BillingState.FREE, BillingState.GRACE),
         (BillingState.GRACE, BillingState.ACTIVE),  # payment succeeds

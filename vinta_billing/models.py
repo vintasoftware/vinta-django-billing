@@ -1,10 +1,12 @@
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from django.conf import settings
+from django.contrib.contenttypes.fields import GenericForeignKey
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q, UniqueConstraint
-from vinta_orgs.conf import organization_model_string
 
+from vinta_billing import conf
 from vinta_billing.base_models import BaseModel
 from vinta_billing.constants import (
     BillingInterval,
@@ -16,10 +18,12 @@ from vinta_billing.constants import (
     PaymentStatuses,
     ProviderWebhookRoute,
     RefundStatuses,
+    ScopeType,
     SubscriptionStatuses,
 )
 from vinta_billing.managers import (
     BillingPeriodSummaryManager,
+    BillingScopeManager,
     LimitWarningNotificationManager,
     MeteredOccurrenceManager,
     ProviderWebhookEventManager,
@@ -29,6 +33,224 @@ from vinta_billing.registry import entitlement_choices, resource_choices, resour
 
 if TYPE_CHECKING:
     from django_stubs_ext.db.models.manager import RelatedManager
+
+
+#: The model every scope foreign key in this app points at, resolved at import
+#: time because a field definition needs a target now. Defaults to the model
+#: this app ships, so an installation that has not overridden it still works --
+#: the swappable machinery reads the same setting and simply finds nothing to
+#: swap.
+SCOPE_MODEL = conf.scope_model_string()
+
+
+class AbstractBillingScope(BaseModel):
+    """Who is being billed.
+
+    Every table in this app hangs off one of these rows. The indirection is the
+    point: a foreign key straight to a project's tenant model resolves to
+    exactly one model per project, so a project could sell a plan to an
+    scope *or* to a user but never to both. A scope row can be either,
+    and ``scope_type`` says which.
+
+    Subclasses decide what a scope *is* by implementing :meth:`build_scope_key`
+    and the ``scope`` property over whatever columns suit them -- a generic key,
+    a nullable foreign key per kind, a composite. This class owns what every
+    such choice has in common: a portable string spelling of the value, a
+    display label, an owner, and a place in a hierarchy.
+
+    Three columns exist so that the shipped defaults work with no project code
+    at all:
+
+    ``label``
+        The display name, live rather than snapshotted -- a payer is a thing
+        that still exists. Replaces every ``organization.name`` read this
+        package used to do, and stops it assuming the payer has a ``name``.
+    ``owner``
+        Who may change this scope's billing and who hears when a charge fails,
+        under the shipped :func:`~vinta_billing.permissions.owner_may_manage_billing`
+        and :func:`~vinta_billing.recipients.scope_owner` defaults. ``SET_NULL``:
+        deleting a user must not delete their payment history.
+    ``parent``
+        A reseller chain, on a table this package owns, so
+        :class:`~vinta_billing.hierarchy.ParentFieldHierarchy` needs no field on
+        a model it does not control.
+
+    A project that swaps the scope model out and populates none of the three
+    pays one NULL each.
+    """
+
+    # One of ``ScopeType``, or a value the installing project defines. No
+    # ``choices``: see ``ScopeType``.
+    scope_type = models.CharField(max_length=32, default=ScopeType.ORGANIZATION)
+
+    # The portable spelling of the scope, maintained by ``save``. Stable for the
+    # life of the scope and unique among scopes of the same type: it is the
+    # idempotency key provisioning code reaches for and the handle the admin and
+    # the API address a scope by, so a key that changes strands both.
+    scope_key = models.CharField(max_length=255, db_index=True)
+
+    label = models.CharField(max_length=255, blank=True)
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    # ``PROTECT``, not ``CASCADE``: deleting a reseller must not silently delete
+    # every subscription underneath it. ``%(class)s`` in the related name
+    # because more than one concrete scope model can be *defined* in a project
+    # even though only one is ever active, and two bare ``children`` accessors
+    # on one target would clash.
+    #
+    # ``swappable=False`` is about how this field *deconstructs*, and it is not
+    # optional. A foreign key whose target is a swappable model normally
+    # deconstructs to the setting rather than to the model, so ``"self"`` here
+    # would come out as ``to=settings.BILLING_SCOPE_MODEL`` -- meaning "whatever
+    # scope model is configured" rather than "this one". The moment a project
+    # points that setting elsewhere, the shipped model's own ``parent`` reads as
+    # having changed and ``makemigrations`` asks for a migration nobody can
+    # sensibly write. A scope's parent is always its own concrete class, so say
+    # that instead.
+    parent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="%(app_label)s_%(class)s_children",
+        swappable=False,
+    )
+
+    class Meta(BaseModel.Meta):
+        abstract = True
+
+    def __str__(self) -> str:
+        return self.label or self.scope_key or str(self.pk)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.validate_scope()
+        self.scope_key = self.build_scope_key()
+        if (
+            update_fields := kwargs.get("update_fields")
+        ) is not None and "scope_key" not in update_fields:
+            # A partial update that moves the scope but leaves ``scope_key``
+            # behind would silently detach the scope from every billing row
+            # that found it by key, so add the column rather than let the write
+            # proceed.
+            kwargs["update_fields"] = [*update_fields, "scope_key"]
+        super().save(*args, **kwargs)
+
+    def clean(self) -> None:
+        super().clean()
+        self.validate_scope()
+
+    @property
+    def scope(self) -> Any:
+        """The thing being billed: a user, an scope, whatever."""
+        raise NotImplementedError("Needs to be implemented on subclass")
+
+    @scope.setter
+    def scope(self, value: Any) -> None:
+        raise NotImplementedError("Needs to be implemented on subclass")
+
+    def build_scope_key(self) -> str:
+        """Return the portable string form of this scope.
+
+        Must be stable for the life of the scope and unique among scopes of the
+        same ``scope_type``.
+        """
+        raise NotImplementedError("Needs to be implemented on subclass")
+
+    def validate_scope(self) -> None:
+        """Reject a scope that names nothing.
+
+        Unlike an audit scope, a billing scope has no "global" value: somebody
+        pays. A convenience check rather than the guarantee -- ``save`` is
+        bypassed by ``bulk_create`` and ``QuerySet.update``, so concrete
+        subclasses are expected to carry a CHECK constraint saying the same
+        thing.
+        """
+        if not self.build_scope_key():
+            raise ValidationError("A billing scope must name something to bill.")
+
+
+class BillingScope(AbstractBillingScope):
+    """The scope model this app ships: a generic key to anything.
+
+    A ``content_type``/``object_id`` pair rather than the opaque string
+    ``vinta-django-audit-logs`` uses for its scope, and the divergence is
+    deliberate. An audit scope is written on an append-only hot path where the
+    join is unaffordable; a billing scope is read about once per request. Paying
+    for the generic key buys the thing this model exists for -- both kinds of
+    payer, in one project, with no project code::
+
+        BillingScope.objects.get_or_create_for(request.user)          # personal
+        BillingScope.objects.get_or_create_for(request.scope)  # team
+
+    A project that wants real referential integrity, typed access and CHECK
+    constraints per kind subclasses :class:`AbstractBillingScope` with named
+    foreign keys instead and points ``BILLING_SCOPE_MODEL`` at that.
+
+    ``content_type`` is ``PROTECT``: ``remove_stale_contenttypes`` runs after
+    every migrate that drops a model, and a scope whose content type vanished
+    could no longer name what it bills. The *target row* is a different matter
+    -- nothing constrains it, so deleting an scope leaves the scope, its
+    label and its payment history intact, which is what an auditable billing
+    trail needs.
+    """
+
+    content_type = models.ForeignKey(
+        "contenttypes.ContentType",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    # A string, so it holds an integer pk, a UUID or a natural key equally well,
+    # and so the scope does not change shape when the payer model does.
+    object_id = models.CharField(max_length=255)
+    scope_object = GenericForeignKey("content_type", "object_id")
+
+    objects: ClassVar[BillingScopeManager] = BillingScopeManager()
+
+    class Meta(AbstractBillingScope.Meta):
+        abstract = False
+        swappable = "BILLING_SCOPE_MODEL"
+        constraints: ClassVar = [
+            # The invariant ``validate_scope`` checks, held where ``save``
+            # cannot reach: ``bulk_create`` and ``QuerySet.update`` never call
+            # it.
+            models.CheckConstraint(
+                condition=~Q(object_id=""),
+                name="billing_scope_names_a_payer",
+            ),
+            # ``scope_key`` is what provisioning code looks a scope up by, so it
+            # is the half that has to be unique. ``label`` is a display value
+            # and must stay free to change.
+            UniqueConstraint(
+                fields=["scope_type", "scope_key"],
+                name="billing_scope_unique_key_per_type",
+            ),
+        ]
+
+    @property
+    def scope(self) -> Any:
+        return self.scope_object
+
+    @scope.setter
+    def scope(self, value: Any) -> None:
+        self.scope_object = value
+
+    def build_scope_key(self) -> str:
+        """``"app_label.modelname:pk"``.
+
+        Readable in an export and meaningful without a join, which a bare
+        ``content_type_id`` is not -- content type ids differ between databases.
+        """
+        if self.content_type_id is None or not self.object_id:
+            return ""
+        content_type = self.content_type
+        return f"{content_type.app_label}.{content_type.model}:{self.object_id}"
 
 
 class BillingAddress(BaseModel):
@@ -45,13 +267,13 @@ class BillingAddress(BaseModel):
 
     def __str__(self):
         return (
-            f"{self.id} {self.organization} - {self.city} - {self.state} - "
+            f"{self.id} {self.scope} - {self.city} - {self.state} - "
             f"{self.country} - {self.zip_code}"
         )
 
     @property
-    def organization(self):
-        return getattr(self, "billing_profile", None) and self.billing_profile.organization
+    def scope(self):
+        return getattr(self, "billing_profile", None) and self.billing_profile.scope
 
 
 class BillingPlan(BaseModel):
@@ -67,7 +289,7 @@ class BillingPlan(BaseModel):
     slug = models.SlugField(max_length=100, unique=True)
     name = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True, db_index=True)
-    is_default_for_new_organizations = models.BooleanField(default=False)
+    is_default_for_new_scopes = models.BooleanField(default=False)
     monthly_price = models.DecimalField(max_digits=10, decimal_places=2)
     annual_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=3)
@@ -85,8 +307,8 @@ class BillingPlan(BaseModel):
     class Meta(BaseModel.Meta):
         constraints: ClassVar = [
             UniqueConstraint(
-                fields=["is_default_for_new_organizations"],
-                condition=Q(is_default_for_new_organizations=True),
+                fields=["is_default_for_new_scopes"],
+                condition=Q(is_default_for_new_scopes=True),
                 name="uniq_default_billing_plan",
             )
         ]
@@ -187,16 +409,23 @@ class PlanEntitlement(BaseModel):
 
 
 class BillingProfile(BaseModel):
-    organization = models.OneToOneField(
-        organization_model_string(),
-        primary_key=True,
+    # A surrogate primary key, where this used to *be* its payer
+    # (``organization`` was ``primary_key=True``). Two reasons it changed with
+    # the move to scopes. A profile's identity should not shift when its payer
+    # is re-scoped -- re-pointing a profile at a different scope would
+    # otherwise rewrite its pk and every ``Payment`` row hanging off it. And
+    # the values in that column are what ``Payment.billing_profile_id`` already
+    # holds, so keeping them under a surrogate ``id`` is what lets the upgrade
+    # leave dependent rows untouched; see migration 0006.
+    scope = models.OneToOneField(
+        SCOPE_MODEL,
         on_delete=models.CASCADE,
         related_name="billing_profile",
     )
     # Payer identity sent to the payment gateway. Distinct from the future
-    # `OrganizationMembership.is_billing_owner`, which is about who may *manage*
+    # a membership's `is_billing_owner`, which is about who may *manage*
     # billing — these fields are about what the gateway needs to charge the
-    # organization (e.g. MercadoPago rejects a payer with no email).
+    # scope (e.g. MercadoPago rejects a payer with no email).
     contact_first_name = models.CharField(max_length=255)
     contact_last_name = models.CharField(max_length=255, blank=True)
     contact_email = models.EmailField()
@@ -206,11 +435,11 @@ class BillingProfile(BaseModel):
     billing_address = models.OneToOneField(
         BillingAddress, on_delete=models.CASCADE, related_name="billing_profile"
     )
-    #: The payment provider this organization is pinned to, written once by
-    #: ``SubscriptionService.record_payment_method`` when the organization's
+    #: The payment provider this scope is pinned to, written once by
+    #: ``SubscriptionService.record_payment_method`` when the scope's
     #: first payment instrument is confirmed. Null means "never paid" and
     #: resolves to ``VINTA_BILLING['DEFAULT_PROVIDER']``. Once set, every new
-    #: charge and subscription for this organization goes through this
+    #: charge and subscription for this scope goes through this
     #: provider -- the instrument on file lives there and nowhere else.
     #: Repointing is a staff action (``SubscriptionService.set_payment_provider``),
     #: not something any API surface exposes.
@@ -219,11 +448,11 @@ class BillingProfile(BaseModel):
     )
 
     def __str__(self):
-        return f"{self.pk} {self.organization} - {self.document_type} - {self.document_number}"
+        return f"{self.pk} {self.scope} - {self.document_type} - {self.document_number}"
 
 
 class Subscription(BaseModel):
-    """An organization's subscription to a ``BillingPlan``.
+    """An scope's subscription to a ``BillingPlan``.
 
     Two status concepts coexist here and share member names (``active``,
     ``cancelled``, ``pending``) — do not conflate them:
@@ -236,9 +465,7 @@ class Subscription(BaseModel):
       access. It is derived from, but not identical to, ``status``.
     """
 
-    organization = models.OneToOneField(
-        organization_model_string(), on_delete=models.CASCADE, related_name="subscription"
-    )
+    scope = models.OneToOneField(SCOPE_MODEL, on_delete=models.CASCADE, related_name="subscription")
     plan = models.ForeignKey(BillingPlan, on_delete=models.PROTECT, related_name="subscriptions")
     status = models.CharField(
         max_length=50, choices=SubscriptionStatuses, default=SubscriptionStatuses.PENDING_SEND
@@ -298,13 +525,13 @@ class Subscription(BaseModel):
     payments: "RelatedManager[Payment]"
 
     class Meta(BaseModel.Meta):
-        # Declared on ``Subscription`` rather than on the organization model --
+        # Declared on ``Subscription`` rather than on the scope model --
         # which this package does not own and cannot add a permission to -- and
         # because the subscription is the object the capability acts on: changing
         # the plan, buying add-ons, managing the payment method.
         #
         # Nothing here grants it and nothing here requires it. It exists so a
-        # project that expresses roles as ``vinta-django-orgs`` organization
+        # project that expresses roles as ``vinta-django-orgs`` scope
         # permissions has a codename to grant, and so the two seams that ask "who
         # may manage billing" (``BILLING_MANAGER_PREDICATE``) and "who is told
         # about it" (``BILLING_RECIPIENTS``) can be answered from one grant --
@@ -312,7 +539,7 @@ class Subscription(BaseModel):
         # ``vinta_billing.recipients.members_holding_manage_billing``, neither of
         # which is the default.
         permissions: ClassVar = [
-            ("manage_billing", "Can manage the organization's billing"),
+            ("manage_billing", "Can manage the scope's billing"),
         ]
 
     def __str__(self):
@@ -322,12 +549,12 @@ class Subscription(BaseModel):
 
 
 class PaymentMethod(BaseModel):
-    """A payment instrument on file for an organization's billing root.
+    """A payment instrument on file for an scope's billing root.
 
     The real record ``EntitlementService.has_payment_method`` points at, replacing
     the earlier ``Subscription.billing_state`` allow-list proxy that was used
     before any instrument actually existed (see that method's docstring for the
-    full history). Deliberately decoupled from ``billing_state``: an organization
+    full history). Deliberately decoupled from ``billing_state``: an scope
     can be ``ACTIVE`` from a past cycle with no current instrument on file (e.g.
     after an admin edit), or have a valid card on file while ``GRACE`` (a failed
     *charge* moves ``ACTIVE -> GRACE``, which says nothing about whether the card
@@ -339,14 +566,12 @@ class PaymentMethod(BaseModel):
     (``PaymentsViewSet``) call ``SubscriptionService.record_payment_method`` once a
     charge against it is reported ``APPROVED`` — never synchronously from the
     request that merely *attempts* to attach one. Not tenant-scoped
-    (``OrganizationModel``) for the same reason as the other billing models in this
-    module: cross-organization billing reads would otherwise force an
+    (no scope-filtering default manager) for the same reason as the other models in this
+    module: cross-scope billing reads would otherwise force an
     ``original_manager`` escape at nearly every call site.
     """
 
-    organization = models.ForeignKey(
-        organization_model_string(), on_delete=models.CASCADE, related_name="payment_methods"
-    )
+    scope = models.ForeignKey(SCOPE_MODEL, on_delete=models.CASCADE, related_name="payment_methods")
     provider = models.CharField(max_length=50, choices=PaymentProviders)
     external_id = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True, db_index=True)
@@ -354,13 +579,13 @@ class PaymentMethod(BaseModel):
     class Meta(BaseModel.Meta):
         constraints: ClassVar = [
             UniqueConstraint(
-                fields=["organization", "provider", "external_id"],
+                fields=["scope", "provider", "external_id"],
                 name="uniq_payment_method",
             )
         ]
 
     def __str__(self):
-        return f"{self.organization_id} - {self.provider} - {self.external_id}"
+        return f"{self.scope_id} - {self.provider} - {self.external_id}"
 
 
 class SubscriptionPlanLimit(BaseModel):
@@ -368,12 +593,12 @@ class SubscriptionPlanLimit(BaseModel):
 
     Copied from the catalog ``PlanLimit`` on subscription creation and re-copied on
     plan change (``SubscriptionService.change_plan``). Catalog edits to ``PlanLimit``
-    never propagate here — an organization keeps what it was sold, and a catalog typo
+    never propagate here — an scope keeps what it was sold, and a catalog typo
     cannot silently lower limits for every subscriber at once.
 
     ``is_overridden=True`` marks a row an admin edited by hand in Django admin (see
     ``vinta_billing/admin.py``'s ``SubscriptionPlanLimitInline``) — this is the support
-    lever for a stuck organization, and it is why there is no support-facing
+    lever for a stuck scope, and it is why there is no support-facing
     enforcement bypass elsewhere. A plan change re-copies every non-overridden row
     from the new plan's ``PlanLimit`` set and leaves ``is_overridden=True`` rows
     untouched.
@@ -492,13 +717,13 @@ class Payment(BaseModel):
 
     def __str__(self):
         return (
-            f"{self.id} {self.organization} - {self.value} - "
+            f"{self.id} {self.scope} - {self.value} - "
             f"{self.payment_provider} - {self.status} - {self.created.isoformat()}"
         )
 
     @property
-    def organization(self):
-        return getattr(self, "billing_profile", None) and self.billing_profile.organization
+    def scope(self):
+        return getattr(self, "billing_profile", None) and self.billing_profile.scope
 
 
 class Refund(BaseModel):
@@ -553,9 +778,9 @@ class ProviderWebhookEvent(BaseModel):
     """Idempotency ledger for inbound payment-provider webhook notifications.
 
     Not tenant-scoped: a webhook notification arrives before we know which
-    organization it resolves to (see the billing plans and limits plan's Data Model
-    Changes — cross-organization billing reads are the reason these models stay
-    plain-FK rather than ``OrganizationModel``). ``(provider, route,
+    scope it resolves to (see the billing plans and limits plan's Data Model
+    Changes — cross-scope billing reads are the reason these models stay
+    plain FK, no scope-filtering manager). ``(provider, route,
     external_event_id)`` uniquely identifies one delivery attempt at the provider;
     ``processed_at`` is set only once the corresponding domain update
     (payment/subscription status) has actually been applied, so a row that exists
@@ -593,7 +818,7 @@ class MeteredOccurrence(BaseModel):
     scheduled sweep of elapsed time.
 
     **The unique constraint is the correctness mechanism, not the code path.**
-    ``(organization, event_id, occurrence_start)`` plus
+    ``(scope, event_id, occurrence_start)`` plus
     ``bulk_create(..., ignore_conflicts=True)`` is what makes re-running a window,
     or running two windows that overlap, harmless. The sweep window deliberately
     overlaps the previous one so that a missed run self-heals on the next pass;
@@ -624,15 +849,15 @@ class MeteredOccurrence(BaseModel):
     the allowance and overage price in force at that moment, so a later plan change
     or limit override cannot retroactively reprice usage that already happened.
 
-    Not an ``OrganizationModel``: billing legitimately reads across organizations
+    No scope-filtering default manager: billing legitimately reads across scopes
     (a reseller root's cycle close sums its whole subtree), and the tenant-safe
     queryset layer would force an ``original_manager`` escape at nearly every call
-    site. The ``organization`` FK is still present and every read goes through
-    ``MeteredOccurrenceQuerySet.for_organizations``.
+    site. The ``scope`` FK is still present and every read goes through
+    ``MeteredOccurrenceQuerySet.for_scopes``.
     """
 
-    organization = models.ForeignKey(
-        organization_model_string(),
+    scope = models.ForeignKey(
+        SCOPE_MODEL,
         on_delete=models.CASCADE,
         related_name="metered_occurrences",
     )
@@ -650,7 +875,7 @@ class MeteredOccurrence(BaseModel):
     class Meta(BaseModel.Meta):
         constraints: ClassVar = [
             UniqueConstraint(
-                fields=["organization", "event_id", "occurrence_start"],
+                fields=["scope", "event_id", "occurrence_start"],
                 name="uniq_metered_occurrence",
             )
         ]
@@ -662,7 +887,7 @@ class MeteredOccurrence(BaseModel):
         ]
 
     def __str__(self):
-        return f"{self.organization_id}/{self.event_id} @ {self.occurrence_start.isoformat()}"
+        return f"{self.scope_id}/{self.event_id} @ {self.occurrence_start.isoformat()}"
 
 
 class LimitWarningNotification(BaseModel):
@@ -677,7 +902,7 @@ class LimitWarningNotification(BaseModel):
     threshold. ``UsageWarningService.check_subscription`` claims the marker
     with ``get_or_create`` and sends inside the same ``transaction.atomic()``
     block -- the row existing after that transaction commits is the single
-    source of truth for "have we already told this organization about this?",
+    source of truth for "have we already told this scope about this?",
     not an in-memory flag, which would not survive a beat task being retried
     on a different worker. If the send raises, the transaction rolls back and
     un-claims the marker, so a transient failure is retried on the next beat
@@ -739,17 +964,17 @@ class BillingPeriodSummary(BaseModel):
     it, so the write must be a no-op on re-run rather than something the caller
     has to remember to check.
 
-    Not an ``OrganizationModel``, for the same reason ``MeteredOccurrence`` is
+    No scope-filtering default manager, for the same reason ``MeteredOccurrence`` has none,
     not: billing legitimately reads across a pooled subtree, and tenant-scoped
     managers would force an ``original_manager`` escape at nearly every call
-    site. ``organization`` is always the resolved **billing root**.
+    site. ``scope`` is always the resolved **billing root**.
     """
 
     subscription = models.ForeignKey(
         Subscription, on_delete=models.CASCADE, related_name="period_summaries"
     )
-    organization = models.ForeignKey(
-        organization_model_string(),
+    scope = models.ForeignKey(
+        SCOPE_MODEL,
         on_delete=models.CASCADE,
         related_name="billing_period_summaries",
     )
@@ -794,17 +1019,14 @@ class BillingPeriodSummary(BaseModel):
         ]
         indexes: ClassVar = [
             models.Index(
-                fields=["organization", "-billing_period_start"],
+                fields=["scope", "-billing_period_start"],
                 name="billing_period_org_idx",
             )
         ]
         ordering = ("-billing_period_start",)
 
     def __str__(self):
-        return (
-            f"{self.organization_id}/{self.subscription_id} @ "
-            f"{self.billing_period_start.isoformat()}"
-        )
+        return f"{self.scope_id}/{self.subscription_id} @ {self.billing_period_start.isoformat()}"
 
 
 class BillingPeriodResourceUsage(BaseModel):
@@ -816,15 +1038,15 @@ class BillingPeriodResourceUsage(BaseModel):
     Rendering "not recorded" as 0 would tell a customer they used none of
     something we simply never counted.
 
-    ``by_organization`` maps ``organization_id -> count`` across the pooled
+    ``by_scope`` maps ``scope_id -> count`` across the pooled
     subtree. A JSON blob rather than a third table because it is only ever read
     wholesale alongside its parent row; nothing filters or aggregates on it in
     SQL. Keys are written as **strings**
-    (``{str(organization_id): count, ...}``), not ``int``: ``JSONField``
+    (``{str(scope_id): count, ...}``), not ``int``: ``JSONField``
     serialises ``dict`` keys to strings on write regardless, so writing ``str``
     up front keeps the in-memory value ``CycleCloseService._persist_statement``
     builds identical to whatever a later read back from Postgres returns — a
-    reader must ``int()`` a key before comparing it to an ``organization_id``.
+    reader must ``int()`` a key before comparing it to an ``scope_id``.
 
     ``limit_value`` is read at **close time** for **all eight**
     registered resources, including ``event_occurrences`` — there is no
@@ -870,7 +1092,7 @@ class BillingPeriodResourceUsage(BaseModel):
     # means "had a price but no overage this period": that case falls back to the
     # live effective limit's price instead of writing null.
     overage_unit_price = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
-    by_organization = models.JSONField(default=dict)
+    by_scope = models.JSONField(default=dict)
 
     class Meta(BaseModel.Meta):
         constraints: ClassVar = [

@@ -1,12 +1,12 @@
 # vinta-django-billing
 
-Subscriptions, plan limits, entitlements, metered usage and dunning for
-multi-organization Django applications.
+Subscriptions, plan limits, entitlements, metered usage and dunning for Django
+applications — billed to a user, an organization, a workspace, or all three at
+once.
 
-Built on [vinta-django-orgs](https://github.com/vintasoftware/vinta-django-orgs):
-every table here is scoped to that library's swappable organization model, and
-the engine reads nothing from it beyond the swappable model reference and the
-tenancy mixin.
+Every table here hangs off a **billing scope**: a swappable row that names
+whoever is paying. The engine never learns what a payer is, so nothing stops one
+project selling a personal plan alongside a team plan.
 
 > **Status: alpha.** The API will change before 1.0.
 
@@ -14,7 +14,7 @@ tenancy mixin.
 
 A billing engine that does not know what it is billing for.
 
-It knows how to resolve an organization's ceiling for a resource, pool usage
+It knows how to resolve a scope's ceiling for a resource, pool usage
 across a reseller subtree, refuse a create that would exceed a limit, meter
 post-paid usage, run a dunning ladder over a failed charge, and close a billing
 period. It does not know what a "seat" is, or a "calendar", or an "API token" —
@@ -26,7 +26,7 @@ those are the host application's, and they come in through registries.
 | The limit / entitlement / pooling engine | Which resources exist, and how to count them |
 | Stripe and MercadoPago adapters | Provider credentials |
 | Dunning ladder and usage warnings | The notification transport |
-| The billing-root protocol | Whether your organizations even have a hierarchy |
+| The billing-root protocol | Whether your scopes even have a hierarchy |
 
 ## Install
 
@@ -35,7 +35,10 @@ pip install vinta-django-billing            # or: uv add vinta-django-billing
 pip install "vinta-django-billing[stripe]"  # provider SDKs are extras
 ```
 
-Extras: `stripe`, `mercadopago`, `openapi`.
+Extras: `stripe`, `mercadopago`, `openapi`, and `orgs` — the last only if your
+payers are [vinta-django-orgs](https://github.com/vintasoftware/vinta-django-orgs)
+organizations and you want the membership-backed policy this package used to
+default to. See [Who may manage billing](#who-may-manage-billing).
 
 The distribution is typed (PEP 561): it ships a `py.typed` marker from 0.5.0 on,
 so mypy reads the annotations instead of treating the package as `Any`. If you
@@ -47,21 +50,92 @@ nothing.
 ```python
 INSTALLED_APPS = [
     ...,
+    "django.contrib.contenttypes",
     "rest_framework",
-    "vinta_orgs.apps.OrganizationsConfig",  # vinta-django-orgs
     "vinta_billing.apps.BillingConfig",
 ]
-
-MIDDLEWARE = [
-    ...,
-    "django.contrib.auth.middleware.AuthenticationMiddleware",
-    # After `AuthenticationMiddleware`. `vinta-django-orgs` refuses an
-    # organization the caller holds no active membership in, and it needs
-    # `request.user` to do that; placed earlier the check silently does nothing.
-    # Its `vinta_orgs.W001` system check reports the wrong order.
-    "vinta_orgs.middleware.OrganizationMiddleware",
-]
 ```
+
+That is the whole install. No tenancy library to add, and no middleware to
+order.
+
+## What a scope is
+
+The one concept worth reading before anything else.
+
+A **scope** is the thing being billed. Every `Subscription`, `BillingProfile`,
+`PaymentMethod`, `MeteredOccurrence` and `BillingPeriodSummary` points at one.
+
+The shipped `BillingScope` names its payer with a generic key, so it can name
+anything you already have:
+
+```python
+from vinta_billing.models import BillingScope
+
+personal, _ = BillingScope.objects.get_or_create_for(request.user)
+team, _ = BillingScope.objects.get_or_create_for(organization)
+```
+
+Both rows live in one table, `scope_type` says which is which, and a
+subscription against either behaves identically. Nothing else has to change to
+start selling personal plans.
+
+A scope also carries three columns the engine reads, all optional:
+
+| Column | Read by | If you leave it empty |
+| --- | --- | --- |
+| `label` | The admin, and the per-scope usage breakdown in the API | Rows show as the scope key |
+| `owner` | The shipped permission and recipient defaults | Nobody may manage that scope's billing, and dunning reaches nobody |
+| `parent` | `ParentFieldHierarchy` | Every scope is its own billing root |
+
+### Bringing your own scope model
+
+Point `BILLING_SCOPE_MODEL` at an `AbstractBillingScope` subclass when you want
+real foreign keys, typed access, and constraints per kind of payer:
+
+```python
+# settings.py -- top-level, NOT inside VINTA_BILLING. `Meta.swappable` names a
+# setting, not a path into one, so this follows the AUTH_USER_MODEL pattern.
+BILLING_SCOPE_MODEL = "myproject.BillingScope"
+```
+
+```python
+class BillingScope(AbstractBillingScope):
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)
+
+    @property
+    def scope(self):
+        return self.workspace
+
+    def build_scope_key(self) -> str:
+        return f"workspace:{self.workspace_id}"
+```
+
+Give its manager a `get_or_create_for(payer)` and a `scope_for(payer)` and the
+shipped request resolver keeps working too.
+[`tests/swapped_scopes/models.py`](tests/swapped_scopes/models.py) has two
+worked examples, one of them billing users and companies from one table.
+
+### Which scope is this request acting on?
+
+`SCOPE_RESOLVER` answers it. The default takes whatever already set
+`request.scope`, then falls back to the caller's own scope — which is what makes
+a personal plan work with nothing configured.
+
+It deliberately stops there rather than picking among scopes a caller merely
+*owns*: choosing arbitrarily between tenants is how one customer ends up reading
+another's billing. A project with real tenancy points the seam at its own answer:
+
+```python
+VINTA_BILLING = {"SCOPE_RESOLVER": "myproject.billing.resolve_scope"}
+
+
+def resolve_scope(request):
+    return BillingScope.objects.scope_for(request.workspace)
+```
+
+Already on `vinta-django-orgs`? `vinta_billing.contrib.orgs.resolve_scope_from_organization`
+bridges its `request.organization` to the scope that names it.
 
 ## Register what you bill for
 
@@ -74,18 +148,16 @@ registry is populated and before anything serves a request.
 from django.utils.translation import gettext_lazy as _
 
 from vinta_billing.constants import LimitKind, LimitRemedy
-from vinta_billing.counting import count_by_organization, merge_breakdowns
+from vinta_billing.counting import count_by_scope, merge_breakdowns
 from vinta_billing.registry import entitlements, resources
 from vinta_billing.services.entitlement_service import count_metered_occurrences
 
 
 def count_seats(context):
-    """Memberships plus still-open invitations, per organization."""
+    """Memberships plus still-open invitations, per scope."""
     return merge_breakdowns(
-        count_by_organization(
-            Membership.objects.filter(organization_id__in=context.organization_ids)
-        ),
-        count_by_organization(Invitation.objects.pending(context.organization_ids)),
+        count_by_scope(Membership.objects.filter(scope_id__in=context.scope_ids)),
+        count_by_scope(Invitation.objects.pending(context.scope_ids)),
     )
 
 
@@ -111,15 +183,15 @@ entitlements.register("white_label", label=_("White-label branding"))
 ```
 
 A counter takes a [`UsageContext`](vinta_billing/counting.py) and returns
-`{organization_id: count}`. Organizations at zero must be **absent** from the
+`{scope_id: count}`. Scopes at zero must be **absent** from the
 mapping rather than present with a zero — `GROUP BY` never emits a row for them,
-and `count_by_organization` preserves that.
+and `count_by_scope` preserves that.
 
 > **Read unscoped.** On a model using `SingleOrganizationModelMixin`, count
 > through `Model.objects.unscoped()` or `Model.original_manager`, never the
 > scoped default manager. Usage pools across a whole billing subtree, so a
-> counter is asked about several organizations at once and must not be narrowed
-> to whichever one is bound to the current context — `organization_id__in` is
+> counter is asked about several scopes at once and must not be narrowed
+> to whichever one is bound to the current context — `scope_id__in` is
 > the tenant boundary here, and it is the counter's own filter.
 >
 > In a background sweep nothing is bound at all, and a scoped read then depends
@@ -153,7 +225,7 @@ passed nothing and no part of the answer says so.
 ```python
 from vinta_billing.services.container import get_entitlement_service
 
-result = get_entitlement_service().check_limit(organization, "seats", delta=1, lock=True)
+result = get_entitlement_service().check_limit(scope, "seats", delta=1, lock=True)
 if not result.allowed:
     raise OverLimitError.build(result)
 ```
@@ -167,7 +239,7 @@ Three rules the engine holds to, and which are easy to break by accident:
 1. **NULL is unlimited, never zero.** A missing limit row means the same. Both
    fail open — a data gap must never lock a customer out of something they could
    do yesterday.
-2. **Usage pools at the billing root.** A child organization's usage counts
+2. **Usage pools at the billing root.** A child scope's usage counts
    against its root's ceiling, together with the rest of the subtree.
 3. **Counting and checking are inseparable under concurrency.** See `lock`.
 
@@ -176,14 +248,14 @@ When the per-call data your counter needs is itself a query, pass
 
 ```python
 result = get_entitlement_service().check_limit(
-    organization,
+    scope,
     "seats",
     usage_extra_resolver=lambda: {"exclude_invitation_id": find_the_invitation()},
 )
 ```
 
 It is called at most once, and only once the ceiling is known to be finite — so
-an organization on an unlimited plan, which skips counting entirely, never pays
+a scope on an unlimited plan, which skips counting entirely, never pays
 for the query. Pass one or the other, never both. `check_postpaid_allowance`'s
 `delta_resolver` is the same idea for a delta that costs a query to work out.
 
@@ -194,12 +266,15 @@ that works, so a flat single-tenant project configures nothing.
 
 ```python
 VINTA_BILLING = {
-    # Who pays for whom. Default: every organization is its own billing root.
-    "HIERARCHY": "myproject.billing.ResellerHierarchy",
-    # Who may see and change billing. Default: any member of the organization.
+    # Who pays for whom. Default: every scope is its own billing root.
+    "HIERARCHY": "vinta_billing.hierarchy.ParentFieldHierarchy",
+    # Which scope a request is acting on. Default: whatever already set
+    # `request.scope`, then the caller's own scope.
+    "SCOPE_RESOLVER": "myproject.billing.resolve_scope",
+    # Who may see and change billing. Default: the scope's `owner`.
     "BILLING_MANAGER_PREDICATE": "myproject.billing.is_billing_owner",
-    # Who hears about a failed charge or an approaching limit. Default: every
-    # member of the organization.
+    # Who hears about a failed charge or an approaching limit. Default: the
+    # scope's `owner`.
     "BILLING_RECIPIENTS": "myproject.billing.owners_and_admins",
     # Where dunning and warning messages go. Default: log and drop.
     "NOTIFIER": "myproject.billing.Notifier",
@@ -210,10 +285,10 @@ VINTA_BILLING = {
     # The jobs the sweep hands over build their services through
     # `SERVICE_CONTAINER`, same as the views.
     "JOB_DISPATCHER": "myproject.billing.enqueue",
-    # How your DRF surface resolves the acting organization, and where the
-    # shipped views build their services. Defaults: this package's own mixin
-    # and its own container. See "Mounting the routes in a project that has its
-    # own tenancy and its own DI" below.
+    # How your DRF surface resolves the acting scope, and where the shipped
+    # views build their services. Defaults: this package's own mixin and its
+    # own container. See "Mounting the routes in a project that has its own
+    # tenancy and its own DI" below.
     "VIEW_MIXIN": "myproject.api.TenantScopedViewMixin",
     "SERVICE_CONTAINER": "myproject.di.container",
     # Per-provider credentials. A provider absent here stays registered -- its
@@ -268,57 +343,85 @@ handler did, and 0.6.0 corrected them rather than the handler.
 
 ### Who may manage billing
 
-Both seams above default to *every member*: the most permissive answer that is
-still tenant-safe, so the shipped endpoints work before anything is wired.
+Both seams above default to the scope's **`owner`**, and nobody else. Least
+privilege, and already the right answer for a personal plan —
+`get_or_create_for(user)` sets the owner, so the person who pays can manage
+their own billing with nothing configured.
 
-If your project expresses roles as `vinta-django-orgs` organization permissions,
-`Subscription` declares a codename to grant — `vinta_billing.manage_billing` —
-and this package ships both halves of the question already written against it:
+For an organization scope this is deliberately strict. Nothing here can know
+which member of an organization owns its billing, so the default returns `False`
+rather than opening the endpoint to every member. Either populate `scope.owner`
+with the billing contact, or configure the seams:
+
+```python
+VINTA_BILLING = {"BILLING_MANAGER_PREDICATE": "myproject.billing.is_billing_owner"}
+
+
+def is_billing_owner(user, scope):
+    return Membership.objects.filter(
+        user=user, workspace_id=scope.object_id, is_billing_owner=True
+    ).exists()
+```
+
+**Watch the recipient half.** A scope with no owner and no configured resolver
+tells *nobody* about a failed charge, which turns the dunning ladder into a
+suspension the payer was never warned about. The shipped `LoggingNotifier` at
+least records what it would have sent.
+
+#### Already on vinta-django-orgs?
+
+Install the `orgs` extra and two settings restore the pre-0.8 behaviour exactly:
 
 ```python
 VINTA_BILLING = {
-    "BILLING_MANAGER_PREDICATE": "vinta_billing.permissions.member_holding_manage_billing",
-    "BILLING_RECIPIENTS": "vinta_billing.recipients.members_holding_manage_billing",
+    "BILLING_MANAGER_PREDICATE": "vinta_billing.contrib.orgs.any_member_may_manage_billing",
+    "BILLING_RECIPIENTS": "vinta_billing.contrib.orgs.all_members",
 }
 ```
 
-Nothing here grants the permission, so **select these only once a group carries
-it**. Until then the predicate 403s every billing endpoint and, worse, the
-recipient resolver returns nobody — which turns the dunning ladder into a
-suspension the payer was never warned about.
-
-Both read the organization-scoped grant alone (`vinta_orgs.authorization`), never
-`user.has_perm`: billing is routinely read against a reseller **root** that is an
-ancestor of the bound organization, and `has_perm` would answer for the bound
-one, union in the user's global permissions, and say yes to every superuser.
+`vinta_billing.contrib.orgs` also carries the stricter pair keyed on the
+`vinta_billing.manage_billing` codename `Subscription` declares —
+`member_holding_manage_billing` and `members_holding_manage_billing`. Nothing
+grants that permission, so **select those only once a group carries it**. They
+read the organization-scoped grant alone, never `user.has_perm`: billing is
+routinely read against a reseller **root** that is an ancestor of the bound
+organization, and `has_perm` would answer for the bound one, union in the user's
+global permissions, and say yes to every superuser.
 
 Your predicate answers the object-level question too. `IsBillingManager` asks it
-about the request's organization for the coarse gate, and about the object for
-the object-level one — about that object's `organization` for a billing row, and
-about the object itself when it *is* an organization, which is what the write
-actions pass (the resolved billing root). So a predicate reading "a member of
-this organization holding the grant" is also what refuses a child
-organization's administrator on a reseller root's plan.
+about the request's scope for the coarse gate, and about the object for the
+object-level one — about that object's `scope` for a billing row, and about the
+object itself when it *is* a scope, which is what the write actions pass (the
+resolved billing root). So a predicate reading "this caller may act on this
+scope" is also what refuses a child scope's administrator on a reseller root's
+plan.
 
-### Organization hierarchies
+### Scope hierarchies
 
-`vinta-django-orgs`' organization model has a name and a slug and nothing else,
-so the library cannot assume a parent field exists. The default
-`FlatHierarchy` treats every organization as its own billing root. A project
-whose organizations nest subclasses the shipped parent-chain walk:
+Every scope carries a `parent`, so a reseller chain needs one setting and no
+project code:
 
 ```python
-from vinta_billing.hierarchy import ParentFieldHierarchy
+VINTA_BILLING = {"HIERARCHY": "vinta_billing.hierarchy.ParentFieldHierarchy"}
+```
 
+`FlatHierarchy` stays the default. On a table where every `parent_id` is NULL a
+parent walk reaches the same answer, but costs a descendant query per pooled
+read.
 
+Want a child to pay for its own subtree rather than pooling into a
+grandparent's ceiling? Subclass and name a flag — or point the walk at your own
+tree instead of the scope tree:
+
+```python
 class ResellerHierarchy(ParentFieldHierarchy):
     parent_field = "parent"
-    root_flag_field = "can_invite_organizations"  # a flagged child pays for itself
+    root_flag_field = "is_reseller"  # a flagged child pays for itself
 ```
 
 The walk is cycle-guarded: `parent` is user-mutable data, and returning an
-arbitrary node from a cycle would leave every organization on it billing against
-a different root depending on where the walk started.
+arbitrary node from a cycle would leave every scope on it billing against a
+different root depending on where the walk started.
 
 ### Audit
 
@@ -357,7 +460,7 @@ the router and cannot read the choice off it.
 ### Mounting the routes in a project that has its own tenancy and its own DI
 
 Two things a project usually owns are what stopped these routes from being
-mounted as they are: how a request says which organization it is acting on, and
+mounted as they are: how a request says which scope it is acting on, and
 where services come from. Both are settings now, and both default to what this
 package did before they existed — so a project that configures neither mounts
 exactly the classes, and builds them from exactly the container, that it always
@@ -385,10 +488,10 @@ the same for every caller, and the two inbound provider webhooks are
 authenticated by a provider signature rather than by a member of anything;
 neither takes your scoping.
 
-Your mixin may resolve the organization the way DRF mixins usually do — in
-`perform_authentication`, *assigning* `request.organization` and returning
+Your mixin may resolve the scope the way DRF mixins usually do — in
+`perform_authentication`, *assigning* `request.scope` and returning
 `None`, which is `vinta_orgs.drf.OrganizationScopedAPIViewMixin`'s shape. Both
-mixins then spell `resolve_organization` and yours wins on name resolution, so
+mixins then spell `resolve_scope` and yours wins on name resolution, so
 this package reads the request rather than taking that `None` at face value. No
 adapter of your own is needed for it.
 
@@ -428,17 +531,33 @@ REST_FRAMEWORK = {
 ```bash
 uv sync --all-extras
 uv run pytest
-uv run tox              # the full matrix: py3.11–3.14 x Django 5.2/6.0/6.1
-uv run tox -e swapped   # the suite against a swapped ORGANIZATION_MODEL
-uv run tox -e postgres  # the suite against Postgres, for the row locks
+uv run tox                  # the full matrix: py3.11–3.14 x Django 5.2/6.0/6.1
+uv run tox -e swapped       # the payer model swapped out
+uv run tox -e scopeswapped  # BILLING_SCOPE_MODEL swapped out
+uv run tox -e mixed         # users and companies billed from one table
+uv run tox -e noorgs        # installed without vinta-django-orgs at all
+uv run tox -e postgres      # against Postgres, for the row locks
 uv run pre-commit install
 ```
 
-`tox -e swapped` runs everything again with `ORGANIZATION_MODEL` pointed at a
-project-defined model instead of the one `vinta-django-orgs` ships. Under the
-default settings those are the same class, so a foreign key hardcoded to
-`vinta_orgs.Organization` passes the whole suite and only breaks in a project
-that actually swapped the model — this is what catches it.
+The suite runs against four scope configurations, because the interesting
+failures are invisible in three of them.
+
+Under the default settings the swappable reference and the concrete model are
+the same class, so a relation hardcoded to `vinta_billing.BillingScope` passes
+everything and breaks only in a project that swapped the model —
+`tox -e scopeswapped` is what catches it. `tox -e swapped` swaps the model a
+scope *names* instead. `tox -e mixed` points `BILLING_SCOPE_MODEL` at a scope
+model holding users and companies at once, which is the configuration the rest
+of the suite cannot exercise: everywhere else bills exactly one kind of payer,
+so "billing works" says nothing about whether two kinds stay out of each
+other's ceilings.
+
+`tox -e noorgs` installs the package with neither the `test` group nor the
+`orgs` extra and runs [`tests/no_orgs_smoke.py`](tests/no_orgs_smoke.py) from a
+process where `vinta_orgs` genuinely is not importable. It is the only place
+that claim can be checked — every other environment installs the test group,
+which still needs the package to exercise `vinta_billing.contrib.orgs`.
 
 `tox -e postgres` runs it against a real database, for the same kind of reason.
 The suite is on SQLite by default, and SQLite has no row locks: Django notices

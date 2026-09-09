@@ -20,6 +20,6 @@ routes: list[RouteDict] = get_routes()
 # Non-viewset routes (APIViews / manually-bound ViewSets) -- URL patterns registered
 # directly with the Django URL conf, bypassing the shared router. See
 # `get_extra_patterns`'s docstring for why the inbound provider webhooks and the
-# organization payment-provider endpoint are bound this way instead of through
+# scope payment-provider endpoint are bound this way instead of through
 # `router.register(...)`.
 extra_patterns = get_extra_patterns()

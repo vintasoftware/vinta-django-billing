@@ -38,10 +38,10 @@ def utc(year, month, day, hour=0):
 
 
 @pytest.fixture
-def monthly(organization, plan, make_subscription):
+def monthly(scope, plan, make_subscription):
     """A subscription whose stored period is March 2026."""
     return make_subscription(
-        organization,
+        scope,
         plan,
         billing_interval=BillingInterval.MONTHLY,
         current_period_start=utc(2026, 3, 1),
@@ -50,7 +50,7 @@ def monthly(organization, plan, make_subscription):
 
 
 @pytest.fixture
-def annual(organization, plan, make_subscription):
+def annual(scope, plan, make_subscription):
     """An annually-billed subscription, stored period one *month* long.
 
     That is not a mistake: subscriptions are created with a one-month stored
@@ -58,7 +58,7 @@ def annual(organization, plan, make_subscription):
     interval, because overage settles monthly for every plan.
     """
     return make_subscription(
-        organization,
+        scope,
         plan,
         billing_interval=BillingInterval.ANNUAL,
         current_period_start=utc(2026, 3, 1),
@@ -136,7 +136,7 @@ class TestResolveBillingPeriod:
         with pytest.raises(BillingPeriodResolutionError):
             resolve_billing_period(monthly, far_future)
 
-    def test_a_month_end_anchor_does_not_drift(self, organization, plan, make_subscription):
+    def test_a_month_end_anchor_does_not_drift(self, scope, plan, make_subscription):
         """A cycle anchored on the 31st must not walk backwards a day a month.
 
         `relativedelta` clamps into short months and restores the anchor after;
@@ -144,7 +144,7 @@ class TestResolveBillingPeriod:
         by nearly a week.
         """
         subscription = make_subscription(
-            organization,
+            scope,
             plan,
             current_period_start=utc(2026, 1, 31),
             current_period_end=utc(2026, 2, 28),

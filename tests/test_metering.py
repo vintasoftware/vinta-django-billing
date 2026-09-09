@@ -39,7 +39,7 @@ class ListSource:
 
     occurrences: ClassVar[list] = []
 
-    def iter_occurrences(self, organization_ids, window_start, window_end):
+    def iter_occurrences(self, scope_ids, window_start, window_end):
         return list(self.occurrences)
 
     def describe(self, external_ids):
@@ -60,13 +60,13 @@ def source():
 
 
 @pytest.fixture
-def metered_subscription(organization, plan, make_subscription):
+def metered_subscription(scope, plan, make_subscription):
     """A subscription with an allowance of 2 metered occurrences at $0.10 over."""
     plan.limits.filter(resource_key="event_occurrences").update(
         limit_value=2, overage_unit_price=Decimal("0.10")
     )
     return make_subscription(
-        organization,
+        scope,
         plan,
         billing_interval=BillingInterval.MONTHLY,
         current_period_start=WINDOW_START,
@@ -74,19 +74,19 @@ def metered_subscription(organization, plan, make_subscription):
     )
 
 
-def occurrence(organization, day, external_id):
+def occurrence(scope, day, external_id):
     return Occurrence(
         external_id=external_id,
-        organization_id=organization.pk,
+        scope_id=scope.pk,
         occurred_at=utc(2026, 3, day),
     )
 
 
 class TestWindowHandling:
     def test_an_inverted_window_is_refused_without_writing(
-        self, source, organization, metered_subscription
+        self, source, scope, metered_subscription
     ):
-        source.occurrences = [occurrence(organization, 5, 1)]
+        source.occurrences = [occurrence(scope, 5, 1)]
 
         result = get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_END, WINDOW_START
@@ -95,11 +95,9 @@ class TestWindowHandling:
         assert result.occurrences_recorded == 0
         assert not MeteredOccurrence.objects.exists()
 
-    def test_an_occurrence_before_the_window_is_ignored(
-        self, source, organization, metered_subscription
-    ):
+    def test_an_occurrence_before_the_window_is_ignored(self, source, scope, metered_subscription):
         source.occurrences = [
-            Occurrence(external_id=1, organization_id=organization.pk, occurred_at=utc(2026, 2, 20))
+            Occurrence(external_id=1, scope_id=scope.pk, occurred_at=utc(2026, 2, 20))
         ]
 
         result = get_metering_service().meter_occurrences_for_period(
@@ -108,12 +106,10 @@ class TestWindowHandling:
 
         assert result.occurrences_seen == 0
 
-    def test_the_window_end_is_exclusive(self, source, organization, metered_subscription):
+    def test_the_window_end_is_exclusive(self, source, scope, metered_subscription):
         """An occurrence exactly at the boundary belongs to the next window --
         billed once there, not twice and not never."""
-        source.occurrences = [
-            Occurrence(external_id=1, organization_id=organization.pk, occurred_at=WINDOW_END)
-        ]
+        source.occurrences = [Occurrence(external_id=1, scope_id=scope.pk, occurred_at=WINDOW_END)]
 
         result = get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -122,10 +118,10 @@ class TestWindowHandling:
         assert result.occurrences_seen == 0
 
     def test_an_occurrence_outside_the_pool_is_dropped(
-        self, source, other_organization, metered_subscription
+        self, source, other_scope, metered_subscription
     ):
         """Billing another tenant for it would be far worse than under-counting."""
-        source.occurrences = [occurrence(other_organization, 5, 1)]
+        source.occurrences = [occurrence(other_scope, 5, 1)]
 
         result = get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -135,8 +131,8 @@ class TestWindowHandling:
 
 
 class TestIdempotency:
-    def test_records_each_occurrence_once(self, source, organization, metered_subscription):
-        source.occurrences = [occurrence(organization, 5, 1), occurrence(organization, 6, 2)]
+    def test_records_each_occurrence_once(self, source, scope, metered_subscription):
+        source.occurrences = [occurrence(scope, 5, 1), occurrence(scope, 6, 2)]
 
         result = get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -145,9 +141,9 @@ class TestIdempotency:
         assert result.occurrences_recorded == 2
         assert MeteredOccurrence.objects.count() == 2
 
-    def test_a_repeated_sweep_records_nothing_new(self, source, organization, metered_subscription):
+    def test_a_repeated_sweep_records_nothing_new(self, source, scope, metered_subscription):
         """This is how a missed run heals: re-sweeping is always safe."""
-        source.occurrences = [occurrence(organization, 5, 1), occurrence(organization, 6, 2)]
+        source.occurrences = [occurrence(scope, 5, 1), occurrence(scope, 6, 2)]
         service = get_metering_service()
         service.meter_occurrences_for_period(metered_subscription, WINDOW_START, WINDOW_END)
 
@@ -158,13 +154,11 @@ class TestIdempotency:
         assert second.occurrences_recorded == 0
         assert MeteredOccurrence.objects.count() == 2
 
-    def test_a_duplicate_from_the_source_is_collapsed(
-        self, source, organization, metered_subscription
-    ):
+    def test_a_duplicate_from_the_source_is_collapsed(self, source, scope, metered_subscription):
         """Deduplicated on the identity tuple before insertion, so
         `occurrences_seen` counts distinct occurrences rather than source output.
         """
-        source.occurrences = [occurrence(organization, 5, 1), occurrence(organization, 5, 1)]
+        source.occurrences = [occurrence(scope, 5, 1), occurrence(scope, 5, 1)]
 
         result = get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -174,10 +168,10 @@ class TestIdempotency:
         assert MeteredOccurrence.objects.count() == 1
 
     def test_the_same_event_at_two_times_is_two_occurrences(
-        self, source, organization, metered_subscription
+        self, source, scope, metered_subscription
     ):
         """A recurring series shares one external id across its occurrences."""
-        source.occurrences = [occurrence(organization, 5, 1), occurrence(organization, 6, 1)]
+        source.occurrences = [occurrence(scope, 5, 1), occurrence(scope, 6, 1)]
 
         result = get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -187,10 +181,8 @@ class TestIdempotency:
 
 
 class TestAllowanceAndPricing:
-    def test_occurrences_inside_the_allowance_are_free(
-        self, source, organization, metered_subscription
-    ):
-        source.occurrences = [occurrence(organization, 5, 1), occurrence(organization, 6, 2)]
+    def test_occurrences_inside_the_allowance_are_free(self, source, scope, metered_subscription):
+        source.occurrences = [occurrence(scope, 5, 1), occurrence(scope, 6, 2)]
 
         get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -199,10 +191,8 @@ class TestAllowanceAndPricing:
         assert MeteredOccurrence.objects.filter(is_within_allowance=True).count() == 2
         assert set(MeteredOccurrence.objects.values_list("unit_price", flat=True)) == {Decimal("0")}
 
-    def test_occurrences_past_the_allowance_are_priced(
-        self, source, organization, metered_subscription
-    ):
-        source.occurrences = [occurrence(organization, day, day) for day in (5, 6, 7, 8)]
+    def test_occurrences_past_the_allowance_are_priced(self, source, scope, metered_subscription):
+        source.occurrences = [occurrence(scope, day, day) for day in (5, 6, 7, 8)]
 
         get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -212,12 +202,10 @@ class TestAllowanceAndPricing:
         assert overage.count() == 2
         assert all(row.unit_price == Decimal("0.10") for row in overage)
 
-    def test_the_allowance_is_consumed_chronologically(
-        self, source, organization, metered_subscription
-    ):
+    def test_the_allowance_is_consumed_chronologically(self, source, scope, metered_subscription):
         """The earliest two occurrences are the free ones, whatever order the
         source reported them in."""
-        source.occurrences = [occurrence(organization, day, day) for day in (8, 5, 7, 6)]
+        source.occurrences = [occurrence(scope, day, day) for day in (8, 5, 7, 6)]
 
         get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -230,51 +218,49 @@ class TestAllowanceAndPricing:
         assert free_days == [5, 6]
 
     def test_an_overlapping_sweep_does_not_re_consume_the_allowance(
-        self, source, organization, metered_subscription
+        self, source, scope, metered_subscription
     ):
         """The bug this guards: without filtering already-recorded identities
         before ranking, an occurrence from an earlier sweep would consume an
         allowance slot again and push a genuinely new one into overage.
         """
         service = get_metering_service()
-        source.occurrences = [occurrence(organization, 5, 5)]
+        source.occurrences = [occurrence(scope, 5, 5)]
         service.meter_occurrences_for_period(metered_subscription, WINDOW_START, WINDOW_END)
 
-        source.occurrences = [occurrence(organization, 5, 5), occurrence(organization, 6, 6)]
+        source.occurrences = [occurrence(scope, 5, 5), occurrence(scope, 6, 6)]
         service.meter_occurrences_for_period(metered_subscription, WINDOW_START, WINDOW_END)
 
         assert MeteredOccurrence.objects.filter(is_within_allowance=True).count() == 2
         assert MeteredOccurrence.objects.filter(is_within_allowance=False).count() == 0
 
     def test_an_unlimited_allowance_never_charges_overage(
-        self, source, organization, plan, make_subscription
+        self, source, scope, plan, make_subscription
     ):
         plan.limits.filter(resource_key="event_occurrences").update(limit_value=None)
         subscription = make_subscription(
-            organization,
+            scope,
             plan,
             current_period_start=WINDOW_START,
             current_period_end=WINDOW_END,
         )
-        source.occurrences = [occurrence(organization, day, day) for day in (5, 6, 7, 8)]
+        source.occurrences = [occurrence(scope, day, day) for day in (5, 6, 7, 8)]
 
         get_metering_service().meter_occurrences_for_period(subscription, WINDOW_START, WINDOW_END)
 
         assert MeteredOccurrence.objects.filter(is_within_allowance=False).count() == 0
 
-    def test_a_zero_allowance_prices_everything(
-        self, source, organization, plan, make_subscription
-    ):
+    def test_a_zero_allowance_prices_everything(self, source, scope, plan, make_subscription):
         plan.limits.filter(resource_key="event_occurrences").update(
             limit_value=0, overage_unit_price=Decimal("0.25")
         )
         subscription = make_subscription(
-            organization,
+            scope,
             plan,
             current_period_start=WINDOW_START,
             current_period_end=WINDOW_END,
         )
-        source.occurrences = [occurrence(organization, 5, 1)]
+        source.occurrences = [occurrence(scope, 5, 1)]
 
         get_metering_service().meter_occurrences_for_period(subscription, WINDOW_START, WINDOW_END)
 
@@ -285,9 +271,9 @@ class TestAllowanceAndPricing:
 
 class TestPeriodStamping:
     def test_rows_are_stamped_with_the_period_they_happened_in(
-        self, source, organization, metered_subscription
+        self, source, scope, metered_subscription
     ):
-        source.occurrences = [occurrence(organization, 5, 1)]
+        source.occurrences = [occurrence(scope, 5, 1)]
 
         get_metering_service().meter_occurrences_for_period(
             metered_subscription, WINDOW_START, WINDOW_END
@@ -296,14 +282,14 @@ class TestPeriodStamping:
         assert MeteredOccurrence.objects.get().billing_period_start == WINDOW_START
 
     def test_a_window_spanning_a_boundary_starts_the_next_allowance_fresh(
-        self, source, organization, metered_subscription
+        self, source, scope, metered_subscription
     ):
         """Allowance is per period, so a two-month sweep grants two allowances."""
         source.occurrences = [
-            occurrence(organization, 5, 1),
-            occurrence(organization, 6, 2),
-            occurrence(organization, 7, 3),
-            Occurrence(external_id=4, organization_id=organization.pk, occurred_at=utc(2026, 4, 5)),
+            occurrence(scope, 5, 1),
+            occurrence(scope, 6, 2),
+            occurrence(scope, 7, 3),
+            Occurrence(external_id=4, scope_id=scope.pk, occurred_at=utc(2026, 4, 5)),
         ]
 
         get_metering_service().meter_occurrences_for_period(

@@ -7,7 +7,6 @@ from dateutil.relativedelta import relativedelta
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
-from vinta_orgs.models import AbstractOrganization
 
 from vinta_billing import hierarchy
 from vinta_billing.conf import get_setting
@@ -29,6 +28,7 @@ from vinta_billing.exceptions import (
     UnknownPaymentProviderError,
 )
 from vinta_billing.models import (
+    AbstractBillingScope,
     BillingPlan,
     BillingProfile,
     PaymentMethod,
@@ -60,15 +60,15 @@ logger = logging.getLogger(__name__)
 MAX_BILLING_PERIOD_STEPS = 1200
 
 
-def is_billing_root(organization: AbstractOrganization) -> bool:
-    """True when ``organization`` holds its own ``Subscription`` rather than
+def is_billing_root(scope: AbstractBillingScope) -> bool:
+    """True when ``scope`` holds its own ``Subscription`` rather than
     pooling against an ancestor's.
 
     Delegates to the configured hierarchy strategy. Re-exported here because this
     module is where the predicate historically lived and several callers import
     it from this path; :mod:`vinta_billing.hierarchy` is the definition.
     """
-    return hierarchy.is_billing_root(organization)
+    return hierarchy.is_billing_root(scope)
 
 
 def billing_root_filter() -> Q:
@@ -78,14 +78,14 @@ def billing_root_filter() -> Q:
     return hierarchy.get_hierarchy().billing_root_q()
 
 
-def resolve_billing_root(organization: AbstractOrganization) -> AbstractOrganization:
-    """The organization whose ``Subscription`` pays for ``organization``.
+def resolve_billing_root(scope: AbstractBillingScope) -> AbstractBillingScope:
+    """The scope whose ``Subscription`` pays for ``scope``.
 
     Delegates to the configured hierarchy strategy, which owns the walk and its
-    cycle guard. Under the default flat hierarchy every organization is its own
+    cycle guard. Under the default flat hierarchy every scope is its own
     billing root, so this returns its argument.
     """
-    return hierarchy.resolve_billing_root(organization)  # type: ignore[return-value]
+    return hierarchy.resolve_billing_root(scope)  # type: ignore[return-value]
 
 
 def billing_interval_step(billing_interval: str) -> relativedelta:
@@ -115,7 +115,7 @@ def overage_settlement_step() -> relativedelta:
     so "one month" has exactly one definition shared with subscription creation
     (``SubscriptionService._period_end`` also anchors the stored period monthly) and
     ``resolve_billing_period``'s monthly branch. A subscription's stored period is
-    created one month long (``create_subscription_for_organization``) and rolled one
+    created one month long (``create_subscription_for_scope``) and rolled one
     month forward here, so the current period the meter and the usage counter read
     stays monthly for every plan, matching what this step produces.
     """
@@ -181,7 +181,7 @@ def resolve_settlement_period(
     Like ``resolve_billing_period`` but reconstructed with ``overage_settlement_step``
     (one month) rather than the plan's ``billing_interval``. Overage settles monthly
     for *every* plan, and a subscription's stored period is created one month long
-    (``create_subscription_for_organization``) and rolled one month forward at close
+    (``create_subscription_for_scope``) and rolled one month forward at close
     (``CycleCloseService._roll_period``) regardless of ``billing_interval`` — so an
     annually-billed subscription's past periods must be walked back monthly, not by
     twelve-month strides. Reconstructing an annual plan's history with the plan-cycle
@@ -237,17 +237,17 @@ def assert_plan_is_complete(plan: BillingPlan) -> None:
     registered resource — used to be enforced only by a test over *seed
     data*, which cannot see a plan an admin authors at runtime. This is that
     invariant in code, on the two paths that put a subscription on a plan
-    (``create_subscription_for_organization`` and ``change_plan``).
+    (``create_subscription_for_scope`` and ``change_plan``).
 
     Why refusing is the only correct outcome. An omitted resource leaves the
     subscription's row for it either absent or stale, and both read as
     **unlimited** in ``EntitlementService`` — so a downgrade onto an incomplete
     plan grants an infinite ceiling, the exact inverse of a downgrade. The two
     obvious alternatives are worse: materializing the gap as ``limit_value=0``
-    blocks an organization on a resource nobody agreed to restrict (the rollout's
-    "no organization is blocked as a consequence of the rollout itself" rule), and
+    blocks an scope on a resource nobody agreed to restrict (the rollout's
+    "no scope is blocked as a consequence of the rollout itself" rule), and
     keeping the stale row is the bug itself whenever that row is ``NULL`` — which
-    is the dominant real state, since every organization is on ``unlimited``
+    is the dominant real state, since every scope is on ``unlimited``
     (every ``limit_value`` NULL) for the whole rollout.
 
     An incomplete plan is a catalog authoring error, so it fails loudly at the
@@ -275,10 +275,10 @@ def retry_payment_idempotency_key(subscription_pk: int, client_idempotency_key: 
 
 
 class SubscriptionService:
-    """Places organizations on a ``BillingPlan`` and keeps their per-subscription
+    """Places scopes on a ``BillingPlan`` and keeps their per-subscription
     limit/entitlement copies in sync with plan changes.
 
-    Under the "no plan-less state" rule, every organization that is its own
+    Under the "no plan-less state" rule, every scope that is its own
     billing root (see ``resolve_billing_root``) has exactly one ``Subscription``.
     A reseller child never gets one of its own — it pools against its root's.
     """
@@ -297,10 +297,10 @@ class SubscriptionService:
 
         ``payment_provider_resolver`` is the single home of the pin -> default
         provider rule (see :mod:`vinta_billing.services.payment_provider_resolver`).
-        ``create_subscription_for_organization`` stamps its result onto the new
+        ``create_subscription_for_scope`` stamps its result onto the new
         ``Subscription.payment_provider``, and that column is the sole input to
         every later provider resolution for the subscription -- so hardcoding it
-        here would make the organization's own pin inert.
+        here would make the scope's own pin inert.
 
         Both default to the ones this package ships -- the resolver here, the
         payment service on first use (see ``_require_payment_service``) -- so a
@@ -333,33 +333,33 @@ class SubscriptionService:
     def _require_payment_provider_resolver(self) -> "PaymentProviderResolver":
         return self.payment_provider_resolver
 
-    def create_subscription_for_organization(
-        self, organization: AbstractOrganization, plan: BillingPlan | None = None
+    def create_subscription_for_scope(
+        self, scope: AbstractBillingScope, plan: BillingPlan | None = None
     ) -> Subscription | None:
-        """Create ``organization``'s ``Subscription`` (+ its ``SubscriptionPlanLimit``
-        / ``SubscriptionEntitlement`` copies), unless ``organization`` is a reseller
+        """Create ``scope``'s ``Subscription`` (+ its ``SubscriptionPlanLimit``
+        / ``SubscriptionEntitlement`` copies), unless ``scope`` is a reseller
         child — in which case this is a no-op and ``None`` is returned, since a
-        child organization pools against its billing root's subscription instead
-        (``resolve_billing_root``). A nested reseller (``can_invite_organizations=True``
+        child scope pools against its billing root's subscription instead
+        (``resolve_billing_root``). A nested reseller (``can_invite_scopes=True``
         with ``parent`` set) is its own billing root and *does* get a subscription
         here — see ``is_billing_root``.
 
-        Idempotent: if ``organization`` already has a ``Subscription``, it is
+        Idempotent: if ``scope`` already has a ``Subscription``, it is
         returned unchanged rather than duplicated. Uses ``get_or_create`` so two
         concurrent calls (e.g. two requests racing to provision the same
-        organization) resolve to the same row instead of one raising
+        scope) resolve to the same row instead of one raising
         ``IntegrityError`` on the ``OneToOneField``.
 
-        :param organization: The organization to place on a plan.
+        :param scope: The scope to place on a plan.
         :param plan: The catalog plan to subscribe to. Defaults to the catalog's
-            active ``is_default_for_new_organizations=True`` plan (the ``unlimited``
+            active ``is_default_for_new_scopes=True`` plan (the ``unlimited``
             plan at rollout, which acts as the "no feature flag" rollout switch).
         """
-        if not is_billing_root(organization):
+        if not is_billing_root(scope):
             logger.debug(
-                "Skipping subscription creation for organization %s: it is a reseller "
+                "Skipping subscription creation for scope %s: it is a reseller "
                 "child and pools against its billing root.",
-                organization.pk,
+                scope.pk,
             )
             return None
 
@@ -369,26 +369,26 @@ class SubscriptionService:
 
         now = timezone.now()
         period_end = self._period_end(now, BillingInterval.MONTHLY)
-        # Rule B (new row): resolve from the organization -- its
+        # Rule B (new row): resolve from the scope -- its
         # `BillingProfile.payment_provider` pin when set, `DEFAULT_PROVIDER`
         # otherwise -- through the one resolver that owns that rule.
         #
         # This column is *not* a placeholder even though the subscription created
         # here starts on a $0 plan that never touches a gateway: `Subscription` is
-        # a `OneToOneField` on organization, so this is the only row the
-        # organization will ever have, and it is the row every later paid operation
+        # a `OneToOneField` on scope, so this is the only row the
+        # scope will ever have, and it is the row every later paid operation
         # (`process_subscription`, `change_subscription_plan`, `cancel_subscription`,
         # `_ensure_provider_plan`) resolves its adapter from under Rule A. It is
         # also what `PaymentsViewSet._apply_subscription_payment_side_effects`
         # hands to `record_payment_method`, i.e. what gets written into the
-        # organization's write-once pin on its first confirmed subscription charge.
-        # A hardcoded value here would send a Stripe-pinned organization's card
+        # scope's write-once pin on its first confirmed subscription charge.
+        # A hardcoded value here would send a Stripe-pinned scope's card
         # token to MercadoPago and then permanently pin it there.
-        provider = self._require_payment_provider_resolver().resolve_for_organization(organization)
+        provider = self._require_payment_provider_resolver().resolve_for_scope(scope)
 
         with transaction.atomic():
             subscription, created = Subscription.objects.get_or_create(
-                organization=organization,
+                scope=scope,
                 defaults={
                     "plan": plan,
                     "billing_state": BillingState.FREE,
@@ -409,15 +409,13 @@ class SubscriptionService:
         return subscription
 
     def _get_default_plan(self) -> BillingPlan:
-        """Return the catalog's active default plan for new organizations.
+        """Return the catalog's active default plan for new scopes.
 
         Raises ``NoDefaultBillingPlanError`` rather than an uncaught
         ``BillingPlan.DoesNotExist`` — a deactivated default plan (e.g. via admin)
-        must not 500 every organization-creation request.
+        must not 500 every scope-creation request.
         """
-        plan = BillingPlan.objects.filter(
-            is_active=True, is_default_for_new_organizations=True
-        ).first()
+        plan = BillingPlan.objects.filter(is_active=True, is_default_for_new_scopes=True).first()
         if plan is None:
             raise NoDefaultBillingPlanError()
         return plan
@@ -429,7 +427,7 @@ class SubscriptionService:
         Non-overridden ``SubscriptionPlanLimit`` / ``SubscriptionEntitlement`` rows
         are refreshed from the new plan's catalog rows. Rows an admin hand-edited
         (``is_overridden=True``) are left untouched — the support lever for a stuck
-        organization must survive a plan change.
+        scope must survive a plan change.
 
         Atomic: a ``save`` + two ``bulk_create`` + two ``delete`` run as one unit
         so a mid-way failure cannot leave the subscription on the new plan with
@@ -524,7 +522,7 @@ class SubscriptionService:
             if already_settled:
                 return subscription
             if subscription.plan_change_pending_confirmation:
-                raise UnconfirmedPlanChangeError(subscription.organization_id)
+                raise UnconfirmedPlanChangeError(subscription.scope_id)
 
             current_price = self._plan_price(subscription.plan, subscription.billing_interval)
             new_price = self._plan_price(plan, billing_interval)
@@ -550,7 +548,7 @@ class SubscriptionService:
         # lock -- to unwind atomically on any *later* failure, same as every
         # other provider round trip in this codebase.)
         if not subscription.external_id and not payment_token:
-            raise PaymentTokenRequiredError(subscription.organization_id)
+            raise PaymentTokenRequiredError(subscription.scope_id)
 
         # An upgrade supersedes any downgrade previously scheduled, and marks
         # itself as awaiting confirmation so a *second*, different upgrade cannot
@@ -587,13 +585,13 @@ class SubscriptionService:
         # already uses) and restamping is what makes a staff repoint via
         # `set_payment_provider`, or a `DEFAULT_PROVIDER` change, reach
         # a subscription that was stamped before any `BillingProfile` pin
-        # existed -- `create_subscription_for_organization` runs from the
-        # `AbstractOrganization` post-save signal, before a `BillingProfile` can exist.
+        # existed -- `create_subscription_for_scope` runs from the
+        # `AbstractBillingScope` post-save signal, before a `BillingProfile` can exist.
         # Once `external_id` is non-empty, the row carries live provider state
         # and must not move -- Rule A applies unchanged from here on.
         if not subscription.external_id:
-            resolved_provider = self._require_payment_provider_resolver().resolve_for_organization(
-                subscription.organization
+            resolved_provider = self._require_payment_provider_resolver().resolve_for_scope(
+                subscription.scope
             )
             if resolved_provider != subscription.payment_provider:
                 subscription.payment_provider = resolved_provider
@@ -690,7 +688,7 @@ class SubscriptionService:
         ``_ensure_provider_plan`` + ``change_subscription_plan`` path keeps
         MercadoPago's ladder byte-identical **in provider calls, arguments,
         and idempotency key** to before this phase -- not quite byte-identical
-        in every respect: an MP subscription whose organization has no
+        in every respect: an MP subscription whose scope has no
         ``BillingProfile`` now fails one call earlier and without side
         effects (``PaymentService.pay_outstanding_invoice`` raises
         ``MissingBillingProfileError`` from its own ``_serialize_subscription``
@@ -960,11 +958,11 @@ class SubscriptionService:
             # them.
             subscription = Subscription.objects.select_for_update().get(pk=subscription.pk)
             if subscription.billing_state not in (BillingState.GRACE, BillingState.RESTRICTED):
-                raise RetryPaymentNotApplicableError(subscription.organization_id)
+                raise RetryPaymentNotApplicableError(subscription.scope_id)
             if is_downgrade_grace(subscription):
-                raise RetryPaymentNotApplicableError(subscription.organization_id)
+                raise RetryPaymentNotApplicableError(subscription.scope_id)
             if not subscription.external_id:
-                raise SubscriptionNotAttachedError(subscription.organization_id)
+                raise SubscriptionNotAttachedError(subscription.scope_id)
 
             payment_service = self._require_payment_service()
             payment_service.update_subscription_payment_token(subscription, payment_token)
@@ -996,7 +994,7 @@ class SubscriptionService:
         was stamped here but ``billing_state`` stayed ACTIVE/FREE, so
         ``process_dunning``'s GRACE/RESTRICTED sweep (``vinta_billing/jobs.py``) never
         looked at this row and the stamped deadline never expired -- a downgrade
-        that left an organization over its new limits could sit indefinitely with
+        that left an scope over its new limits could sit indefinitely with
         a "grace window" nothing was ever going to close. Routing this write
         through ``transition_billing_state`` like every other ``billing_state``
         change puts it on the one path the sweep already watches:
@@ -1227,7 +1225,7 @@ class SubscriptionService:
 
         payment_service = self._require_payment_service()
         payment = payment_service.create_payment(
-            organization=subscription.organization,
+            scope=subscription.scope,
             currency=subscription.plan.currency,
             amount=unit_price * quantity,
             description=f"Add-on purchase: {quantity} x {resource_key}",
@@ -1270,9 +1268,9 @@ class SubscriptionService:
         return add_on
 
     def record_payment_method(
-        self, organization: AbstractOrganization, provider: str, external_id: str
+        self, scope: AbstractBillingScope, provider: str, external_id: str
     ) -> PaymentMethod | None:
-        """Record that ``organization`` (its billing root) has a confirmed,
+        """Record that ``scope`` (its billing root) has a confirmed,
         chargeable payment instrument on file with ``provider``.
 
         The write behind ``EntitlementService.has_payment_method``'s real
@@ -1289,17 +1287,17 @@ class SubscriptionService:
         nothing to record (should not happen for a confirmed charge; logged and
         skipped rather than writing a meaningless row).
 
-        Also pins ``organization``'s ``BillingProfile.payment_provider`` to
+        Also pins ``scope``'s ``BillingProfile.payment_provider`` to
         ``provider``, in the same transaction as the ``PaymentMethod``
         ``get_or_create`` -- but only the first time: an already-pinned profile
-        is left untouched. An organization that somehow gets a confirmed
+        is left untouched. An scope that somehow gets a confirmed
         instrument at a *second*, different provider keeps its original pin (see
         the **Pin mutability** guiding decision) -- the discrepancy is logged at
         ``warning`` so it surfaces rather than silently repointing future charges.
 
         The pin write is a single conditional ``UPDATE ... WHERE payment_provider
         = ''``, not a read-then-write. Two concurrent calls for the same
-        organization at *different* providers, each inside its own
+        scope at *different* providers, each inside its own
         ``transaction.atomic()``, cannot both observe an empty pin in Python and
         both issue an unconditional ``save()`` -- only one row-matching ``UPDATE``
         can win at the database. The loser's zero-affected-rows result is what
@@ -1309,15 +1307,15 @@ class SubscriptionService:
         """
         if not external_id:
             logger.warning(
-                "record_payment_method called with no external_id for organization %s "
+                "record_payment_method called with no external_id for scope %s "
                 "provider %s; nothing recorded.",
-                organization.pk,
+                scope.pk,
                 provider,
             )
             return None
         with transaction.atomic():
             payment_method, _created = PaymentMethod.objects.get_or_create(
-                organization=organization,
+                scope=scope,
                 provider=provider,
                 external_id=external_id,
                 defaults={"is_active": True},
@@ -1327,13 +1325,13 @@ class SubscriptionService:
                 payment_method.save(update_fields=["is_active"])
 
             try:
-                billing_profile = organization.billing_profile
+                billing_profile = scope.billing_profile
             except BillingProfile.DoesNotExist:
                 logger.warning(
-                    "record_payment_method confirmed a payment method for organization "
-                    "%s at provider %s, but the organization has no BillingProfile to "
+                    "record_payment_method confirmed a payment method for scope "
+                    "%s at provider %s, but the scope has no BillingProfile to "
                     "pin; nothing pinned.",
-                    organization.pk,
+                    scope.pk,
                     provider,
                 )
             else:
@@ -1341,16 +1339,16 @@ class SubscriptionService:
                 # see the docstring above. Only a row that is *still* unpinned at
                 # the moment the UPDATE runs matches the WHERE clause, so exactly
                 # one of two concurrent callers can ever win the pin.
-                pinned = BillingProfile.objects.filter(
-                    organization=organization, payment_provider=""
-                ).update(payment_provider=provider)
+                pinned = BillingProfile.objects.filter(scope=scope, payment_provider="").update(
+                    payment_provider=provider
+                )
                 if not pinned:
                     billing_profile.refresh_from_db(fields=["payment_provider"])
                     if billing_profile.payment_provider != provider:
                         logger.warning(
-                            "AbstractOrganization %s confirmed a payment method at provider %s but "
+                            "AbstractBillingScope %s confirmed a payment method at provider %s but "
                             "is already pinned to %s; leaving the existing pin in place.",
-                            organization.pk,
+                            scope.pk,
                             provider,
                             billing_profile.payment_provider,
                         )
@@ -1358,16 +1356,16 @@ class SubscriptionService:
 
     def set_payment_provider(
         self,
-        organization: AbstractOrganization,
+        scope: AbstractBillingScope,
         provider: str,
         actor: "AbstractBaseUser | None" = None,
     ) -> BillingProfile:
-        """Staff repoint lever: pin ``organization``'s ``BillingProfile`` to
+        """Staff repoint lever: pin ``scope``'s ``BillingProfile`` to
         ``provider``, overwriting whatever it was pinned to before (including a
         never-pinned, empty profile).
 
         Unlike ``record_payment_method``'s write-once pin, this always writes --
-        it is the explicit escape hatch for moving an organization's *future*
+        it is the explicit escape hatch for moving an scope's *future*
         charges onto a different provider. Callers are Django admin (see
         ``vinta_billing.admin.BillingProfileAdmin``) or an operator running this by
         hand; there is no end-user-facing API surface for it.
@@ -1379,7 +1377,7 @@ class SubscriptionService:
         value must still name a real, configured provider.
 
         Deliberately carries **no active-subscription guard**: this succeeds
-        even when the organization holds a live ``Subscription`` at the old
+        even when the scope holds a live ``Subscription`` at the old
         provider. That is a knowingly accepted tradeoff, not an oversight --
         the lever exists precisely for the migrate-a-customer-off-a-provider
         case, and a guard would block it in exactly that scenario. Unwinding
@@ -1397,7 +1395,7 @@ class SubscriptionService:
         Validates **registry membership only**, deliberately: it does not require
         the deployment to already hold that provider's outbound credential
         (``PaymentService.get_configured_payment_adapter``). Repointing an
-        organization onto a provider whose secret is not in this environment yet
+        scope onto a provider whose secret is not in this environment yet
         is a legitimate staff action -- the ordering "flip the pin, then add the
         key" is normal, the pin only governs *future* charges, and refusing it
         here would surface as an uncaught 500 in the Django admin (see
@@ -1410,7 +1408,7 @@ class SubscriptionService:
             adapter registry (``PaymentService.get_payment_adapter``) -- either
             way, there is no adapter this deployment could ever drive that
             provider with. The only exception this method raises for a bad slug.
-        :raises MissingBillingProfileError: when ``organization`` has no
+        :raises MissingBillingProfileError: when ``scope`` has no
             ``BillingProfile`` to pin.
         """
         if provider:
@@ -1422,7 +1420,7 @@ class SubscriptionService:
             self._require_payment_service().get_payment_adapter(provider)
 
         try:
-            billing_profile = organization.billing_profile
+            billing_profile = scope.billing_profile
         except BillingProfile.DoesNotExist as e:
             raise MissingBillingProfileError from e
 
@@ -1436,7 +1434,7 @@ class SubscriptionService:
         payment_provider_repointed.send(
             sender=type(billing_profile),
             billing_profile=billing_profile,
-            organization=organization,
+            scope=scope,
             actor=actor,
             from_provider=previous_provider,
             to_provider=provider,
@@ -1506,7 +1504,7 @@ class SubscriptionService:
         wrong. The fix is to reject the incomplete plan up front, not to guess a
         ceiling for it here.
 
-        Overridden rows are exempt: the support lever for a stuck organization must
+        Overridden rows are exempt: the support lever for a stuck scope must
         survive a plan change untouched.
         """
         subscription.limits.exclude(resource_key__in=plan_resource_keys).filter(

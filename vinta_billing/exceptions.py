@@ -122,20 +122,20 @@ class BillingProfileContactEmailMissingError(PaymentError):
 
 class BillingRootCycleError(PaymentError):
     """Raised by ``resolve_billing_root`` when the ``parent`` chain starting from
-    an organization revisits an organization it already walked through.
+    an scope revisits an scope it already walked through.
 
     ``parent`` is user-mutable data (Django admin), so a cycle is reachable in
     practice. Returning an arbitrary node from the cycle (as opposed to raising)
-    would silently leave every organization on the cycle without a resolvable
+    would silently leave every scope on the cycle without a resolvable
     billing root, which ``get_effective_limit`` would then be handed.
     """
 
-    def __init__(self, organization_id: int, visited_ids: set[int]):
+    def __init__(self, scope_id: int, visited_ids: set[int]):
         super().__init__(
-            f"Cycle detected while resolving the billing root for organization "
-            f"{organization_id}: revisited organization ids {sorted(visited_ids)}"
+            f"Cycle detected while resolving the billing root for scope "
+            f"{scope_id}: revisited scope ids {sorted(visited_ids)}"
         )
-        self.organization_id = organization_id
+        self.scope_id = scope_id
         self.visited_ids = visited_ids
 
 
@@ -145,7 +145,7 @@ class MissingSeedBillingPlanError(PaymentError):
     runtime.
 
     A missing seeded plan means a corrupted or out-of-order deploy — this must
-    fail loudly rather than silently leave every organization plan-less with no
+    fail loudly rather than silently leave every scope plan-less with no
     signal and no re-run path.
     """
 
@@ -167,7 +167,7 @@ class IncompleteBillingPlanError(BillingError):
     runtime: an absent (or stale ``limit_value=None``) row reads as **unlimited**
     in ``EntitlementService``, so letting the plan change through would hand the
     omitted resource an infinite ceiling on a downgrade; materializing it as
-    ``limit_value=0`` would instead block an organization on a resource nobody
+    ``limit_value=0`` would instead block an scope on a resource nobody
     agreed to restrict, which the rollout forbids.
 
     So the plan change is refused and the gap is surfaced to whoever authored it.
@@ -250,7 +250,7 @@ class InapplicableUsageExtraError(BillingError):
     computed as though they had passed nothing, and no part of the answer says
     so. Raising is the only way that mistake is visible -- logging would leave
     the caller holding a wrong number it believes, which on a seat-accept path
-    means refusing a member the organization has room for.
+    means refusing a member the scope has room for.
 
     Inherits ``BillingError`` rather than ``PaymentError`` (a ``ValueError``): it
     is a call-site error, and the ``except ValueError`` wrappers that surround
@@ -276,7 +276,7 @@ class InapplicableUsageExtraError(BillingError):
 
 class OverLimitError(BillingError):
     """Raised by a guarded service method when creating one more of a resource
-    would take the organization past its effective ceiling.
+    would take the scope past its effective ceiling.
 
     Inherits ``BillingError`` rather than ``PaymentError`` precisely because
     ``PaymentError`` is a ``ValueError``, and a project that wraps service calls in
@@ -293,9 +293,9 @@ class OverLimitError(BillingError):
     .. code-block:: json
 
         {
-          "detail": "Organization is at its limit for organization members.",
+          "detail": "You are at your limit for team members.",
           "code": "limit_exceeded",
-          "resource": "organization_members",
+          "resource": "scope_members",
           "current_usage": 10,
           "limit": 10,
           "remedy": "purchase_add_on"
@@ -331,7 +331,7 @@ class OverLimitError(BillingError):
         instead of raising while building an error.
         """
         label = _registry_label(resources, resource_key)
-        return f"Organization is at its limit for {label}."
+        return f"You are at your limit for {label}."
 
     def as_error_body(self) -> dict:
         """The shared contract body, used by every rendering surface."""
@@ -378,7 +378,7 @@ class OverLimitError(BillingError):
         )
 
     @classmethod
-    def from_restricted_organization(cls) -> "OverLimitError":
+    def from_restricted_scope(cls) -> "OverLimitError":
         """Build the error for a write attempted while the caller's billing root is
         ``RESTRICTED`` -- an expired grace window with no resolution.
 
@@ -393,12 +393,12 @@ class OverLimitError(BillingError):
         for anything it does not recognize.
         """
         return cls(
-            resource_key="organization_restricted",
+            resource_key="scope_restricted",
             current_usage=0,
             limit=0,
             remedy=LimitRemedy.RESOLVE_BILLING,
             detail=(
-                "Organization is restricted pending resolution of an outstanding billing issue."
+                "Your account is restricted pending resolution of an outstanding billing issue."
             ),
         )
 
@@ -418,7 +418,7 @@ class OverLimitError(BillingError):
         entitlement cannot be lifted by purchasing more of the same resource; only a
         plan that grants it does. This intentionally does not consult billing state
         the way ``EntitlementService._resolve_remedy_for`` does for limits: an
-        organization in grace/restricted is already told to resolve billing by
+        scope in grace/restricted is already told to resolve billing by
         whichever limit check it hits first on the same request, and duplicating
         that lookup here would mean re-fetching the subscription this call has no
         other reason to need.
@@ -429,19 +429,19 @@ class OverLimitError(BillingError):
             current_usage=0,
             limit=0,
             remedy=LimitRemedy.UPGRADE_PLAN,
-            detail=f"Organization does not have the {label} entitlement.",
+            detail=f"Your plan does not include {label}.",
         )
 
 
 class NoDefaultBillingPlanError(PaymentError):
     """Raised when no active ``BillingPlan`` has
-    ``is_default_for_new_organizations=True`` — e.g. the default plan was
+    ``is_default_for_new_scopes=True`` — e.g. the default plan was
     deactivated in admin without a replacement being marked default first.
     """
 
     def __init__(
         self,
-        message="No active BillingPlan is marked is_default_for_new_organizations=True",
+        message="No active BillingPlan is marked is_default_for_new_scopes=True",
     ):
         super().__init__(message)
 
@@ -459,13 +459,13 @@ class PaymentTokenRequiredError(PaymentError):
 
     code = "payment_token_required"
 
-    def __init__(self, organization_id: int):
+    def __init__(self, scope_id: int):
         super().__init__(
-            f"Organization {organization_id} has no payment method on file with the "
+            f"Scope {scope_id} has no payment method on file with the "
             "provider yet -- a payment_token is required to attach one before "
             "upgrading to a paid plan."
         )
-        self.organization_id = organization_id
+        self.scope_id = scope_id
 
 
 class UnconfirmedPlanChangeError(PaymentError):
@@ -482,12 +482,12 @@ class UnconfirmedPlanChangeError(PaymentError):
 
     code = "unconfirmed_plan_change"
 
-    def __init__(self, organization_id: int):
+    def __init__(self, scope_id: int):
         super().__init__(
-            f"Organization {organization_id} already has a plan change awaiting "
+            f"Scope {scope_id} already has a plan change awaiting "
             "payment confirmation -- wait for it to settle before requesting another."
         )
-        self.organization_id = organization_id
+        self.scope_id = scope_id
 
 
 class IllegalBillingStateTransitionError(BillingError):
@@ -526,12 +526,12 @@ class RetryPaymentNotApplicableError(PaymentError):
 
     code = "retry_payment_not_applicable"
 
-    def __init__(self, organization_id: int):
+    def __init__(self, scope_id: int):
         super().__init__(
-            f"Organization {organization_id}'s subscription is not GRACE or "
+            f"Scope {scope_id}'s subscription is not GRACE or "
             "RESTRICTED -- there is no failed charge for retry-payment to retry."
         )
-        self.organization_id = organization_id
+        self.scope_id = scope_id
 
 
 class SubscriptionNotAttachedError(PaymentError):
@@ -543,20 +543,20 @@ class SubscriptionNotAttachedError(PaymentError):
     logging and returning unchanged -- correct for a background beat tick with
     no one waiting on the result. This endpoint is a user-facing request that
     would otherwise report a misleading 200 success having done nothing, so it
-    raises instead. Such an organization has never completed a first payment;
+    raises instead. Such an scope has never completed a first payment;
     it belongs on ``change-plan``'s first-upgrade path, not here.
     """
 
     code = "subscription_not_attached"
 
-    def __init__(self, organization_id: int):
+    def __init__(self, scope_id: int):
         super().__init__(
-            f"Organization {organization_id}'s subscription has no provider-side "
+            f"Scope {scope_id}'s subscription has no provider-side "
             "instrument attached yet -- there is nothing to attach a new payment "
             "token to or retry a charge against. Use change-plan to make a first "
             "payment instead."
         )
-        self.organization_id = organization_id
+        self.scope_id = scope_id
 
 
 class NoOutstandingBalanceError(PaymentError):

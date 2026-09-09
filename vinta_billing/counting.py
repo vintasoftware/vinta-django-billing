@@ -1,8 +1,8 @@
 """What a usage counter is handed, and the plumbing every counter wants.
 
 A project's counters are ordinary functions taking a :class:`UsageContext` and
-returning ``{organization_id: count}``. Almost all of them are one queryset and
-a ``GROUP BY``, which is what :func:`count_by_organization` does; the two-table
+returning ``{scope_id: count}``. Almost all of them are one queryset and
+a ``GROUP BY``, which is what :func:`count_by_scope` does; the two-table
 ones merge with :func:`merge_breakdowns`.
 """
 
@@ -25,11 +25,11 @@ class UsageContext:
     """Everything a usage counter is allowed to depend on.
 
     A single parameter object rather than a widening positional signature: most
-    counters need only ``organization_ids``, and the ones that need more should
+    counters need only ``scope_ids``, and the ones that need more should
     not force every other counter to grow a parameter it ignores.
     """
 
-    organization_ids: Sequence[int]
+    scope_ids: Sequence[int]
     subscription: Subscription | None = None
     extra: dict[str, Any] | None = None
     """Per-call data a project's own counters agree on with their call sites.
@@ -47,10 +47,10 @@ class UsageContext:
         return self.extra.get(key, default)
 
 
-def count_by_organization(queryset: QuerySet[Any]) -> dict[int, int]:
-    """Turn any organization-scoped queryset into ``{organization_id: row_count}``.
+def count_by_scope(queryset: QuerySet[Any]) -> dict[int, int]:
+    """Turn any scope-scoped queryset into ``{scope_id: row_count}``.
 
-    Organizations with no matching rows are *absent* from the result rather than
+    Scopes with no matching rows are *absent* from the result rather than
     present with a zero: ``GROUP BY`` never emits a row for them, which is
     exactly the contract a usage counter promises, so no caller has to remember
     to strip zero entries.
@@ -58,7 +58,7 @@ def count_by_organization(queryset: QuerySet[Any]) -> dict[int, int]:
     # The leading `.order_by()` clears any ordering the caller's queryset may
     # carry. It is load-bearing, not decoration: Django appends `ORDER BY`
     # columns to `GROUP BY` too, so an ordered queryset would split one
-    # organization's rows into several groups keyed by whatever else it ordered
+    # scope's rows into several groups keyed by whatever else it ordered
     # on, and the comprehension below would silently keep only the last one --
     # under-reporting usage, which in a billing engine means under-charging.
     # A `Meta.ordering` on the counted model is enough to trigger it, so this
@@ -69,20 +69,20 @@ def count_by_organization(queryset: QuerySet[Any]) -> dict[int, int]:
     # model with a composite primary key Django raises
     # `ValueError("COUNT(DISTINCT) doesn't support composite primary keys")`.
     return {
-        row["organization_id"]: row["usage_count"]
-        for row in queryset.order_by().values("organization_id").annotate(usage_count=Count("pk"))
+        row["scope_id"]: row["usage_count"]
+        for row in queryset.order_by().values("scope_id").annotate(usage_count=Count("pk"))
     }
 
 
 def merge_breakdowns(*breakdowns: dict[int, int]) -> dict[int, int]:
-    """Sum any number of ``{organization_id: count}`` maps key-wise into one.
+    """Sum any number of ``{scope_id: count}`` maps key-wise into one.
 
     For a counter whose "one unit of usage" spans more than one table, the same
-    organization can legitimately appear in both source breakdowns, so the maps
+    scope can legitimately appear in both source breakdowns, so the maps
     must be added together rather than merged by last-write-wins.
     """
     merged: dict[int, int] = {}
     for breakdown in breakdowns:
-        for organization_id, count in breakdown.items():
-            merged[organization_id] = merged.get(organization_id, 0) + count
+        for scope_id, count in breakdown.items():
+            merged[scope_id] = merged.get(scope_id, 0) + count
     return merged

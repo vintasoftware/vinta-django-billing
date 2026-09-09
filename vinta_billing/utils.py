@@ -1,4 +1,17 @@
-"""Small helpers shared across the app."""
+"""Resolving the scope a request is acting on.
+
+One seam, ``VINTA_BILLING['SCOPE_RESOLVER']``, because a project's answer to
+"who is being billed here?" is genuinely its own: a header its clients already
+send, a URL segment, a membership lookup, a tenant middleware it already runs.
+
+    VINTA_BILLING = {'SCOPE_RESOLVER': 'myproject.billing.resolve_scope'}
+
+    def resolve_scope(request):
+        return BillingScope.objects.scope_for(request.organization)
+
+The shipped default handles the two cases a library can handle without guessing;
+see :func:`default_scope_resolver`.
+"""
 
 from __future__ import annotations
 
@@ -6,43 +19,54 @@ from typing import Any
 
 from django.db.models import Model
 from django.http import HttpRequest
-from vinta_orgs.middleware import get_organization
-from vinta_orgs.state import OrganizationState
+
+from vinta_billing.conf import get_object_from_setting, get_scope_model
 
 
-def get_organization_state() -> Any:
-    """The ``vinta-django-orgs`` context state, bound to the configured model.
+def default_scope_resolver(request: HttpRequest | Any) -> Model | None:
+    """The shipped resolver: what the project already put there, then the caller.
 
-    Built per call rather than once at import: ``OrganizationState`` resolves
-    ``ORGANIZATION_MODEL`` in its constructor, so a module-level instance would
-    both need the app registry to be populated at import time and go stale the
-    moment a test points the setting somewhere else. Resolution is an app
-    registry dictionary lookup, which is not worth caching against that.
+    Two steps, and it stops rather than guessing at a third:
 
-    Unparameterized on purpose. The typed, project-specific subclass described
-    in ``vinta-django-orgs``' documentation is exactly what a library cannot
-    declare -- it would have to name the project's concrete organization class
-    -- and the base class already resolves the configured model at runtime.
+    **Whatever set ``request.scope`` first.** A project's own middleware, or a
+    view mixin configured through ``VINTA_BILLING['VIEW_MIXIN']``, or an earlier
+    pass of this package's own mixin. Taking it as given is what lets a project
+    resolve scopes its own way without replacing this function.
+
+    **The authenticated caller's own scope**, which is what makes a personal
+    plan work out of the box -- the case this whole change exists to support.
+    Asked through the scope manager's optional ``scope_for`` hook rather than by
+    querying columns directly: the shipped ``BillingScope`` has a generic key, a
+    project's swapped-in model may have a typed one, and only the model knows
+    how to look itself up. A scope model that does not define ``scope_for``
+    simply declines, and the project configures ``SCOPE_RESOLVER``.
+
+    Returns ``None`` rather than guessing further. ``None`` is a safe answer:
+    :meth:`~vinta_billing.view_mixins.TenantScopedViewMixin.filter_queryset_by_scope`
+    fails closed on it, so an unresolved caller sees nothing rather than
+    somebody else's billing.
     """
-    return OrganizationState()
+    scope = getattr(request, "scope", None)
+    if scope is not None:
+        return scope  # type: ignore[no-any-return]
+
+    user = getattr(request, "user", None)
+    if user is None or not getattr(user, "is_authenticated", False):
+        return None
+
+    scope_for = getattr(get_scope_model()._default_manager, "scope_for", None)
+    if scope_for is None:
+        return None
+    return scope_for(user)  # type: ignore[no-any-return]
 
 
-def get_request_organization(request: HttpRequest | Any) -> Model | None:
-    """The organization this request is acting on, or ``None``.
+def get_request_scope(request: HttpRequest | Any) -> Model | None:
+    """The scope this request is acting on, or ``None``.
 
-    Reads, in order: whatever the tenant-scoped view mixin already resolved onto
-    the request, then ``vinta-django-orgs``' middleware attribute, then the
-    organization bound to the current context. The last of those is what makes
-    this work off the request path too -- in a background job that bound one
-    around its unit of work, for instance.
+    Runs whatever ``SCOPE_RESOLVER`` names. Kept as a function of its own rather
+    than inlined at the call sites so that the resolver is read fresh each time
+    -- a test that overrides the setting must not be served a resolver bound at
+    import.
     """
-    organization = getattr(request, "organization", None)
-    if organization is not None:
-        return organization  # type: ignore[no-any-return]
-
-    if isinstance(request, HttpRequest):
-        organization = get_organization(request)
-        if organization is not None:
-            return organization
-
-    return get_organization_state().get()  # type: ignore[no-any-return]
+    resolver = get_object_from_setting("SCOPE_RESOLVER")
+    return resolver(request)  # type: ignore[no-any-return]

@@ -1,15 +1,14 @@
 """Who hears about billing.
 
-A failed charge and an approaching limit both need somebody to tell. Which
-members of an organization those are is a project's decision -- it depends on a
-role or a flag that ``vinta-django-orgs``' membership model does not have -- so
-it comes in through ``BILLING_RECIPIENTS``.
+A failed charge and an approaching limit both need somebody to tell. Who that is
+depends on a role or a flag no scope model can be assumed to have, so it comes
+in through ``BILLING_RECIPIENTS``.
 
     VINTA_BILLING = {"BILLING_RECIPIENTS": "myproject.billing.owners_and_admins"}
 
-    def owners_and_admins(organization):
+    def owners_and_admins(scope):
         return list(
-            Membership.objects.filter(organization=organization)
+            Membership.objects.filter(organization_id=scope.object_id)
             .filter(Q(role="admin") | Q(is_billing_owner=True))
             .values_list("user_id", flat=True)
             .distinct()
@@ -21,59 +20,30 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from vinta_orgs.conf import get_organization_membership_model
-from vinta_orgs.models import AbstractOrganization
-
 from vinta_billing.conf import get_object_from_setting
-from vinta_billing.permissions import MANAGE_BILLING_PERMISSION
+from vinta_billing.models import AbstractBillingScope
 
 
-def all_members(organization: AbstractOrganization) -> Sequence[Any]:
-    """The default: every member of the organization.
-
-    Errs towards telling too many people rather than too few -- a dunning
-    message that reaches nobody ends in an unexplained suspension, which is a
-    worse failure than one extra email.
-    """
-    return list(
-        get_organization_membership_model()
-        .objects.filter(organization_id=organization.pk)
-        .values_list("user_id", flat=True)
-        .distinct()
-    )
-
-
-def members_holding_manage_billing(organization: AbstractOrganization) -> Sequence[Any]:
-    """The members who hold ``vinta_billing.manage_billing`` in the organization.
+def scope_owner(scope: AbstractBillingScope) -> Sequence[Any]:
+    """The default: the scope's owner, if it has one.
 
     The counterpart to
-    :func:`vinta_billing.permissions.member_holding_manage_billing`, so that "who
-    may change billing" and "who is told when it goes wrong" come from one grant
-    rather than drifting apart. Offered rather than defaulted to, and for a
-    sharper reason than the predicate: nothing here grants the permission, and a
-    dunning ladder whose messages reach **nobody** ends in a suspension the payer
-    was never warned about. Point ``BILLING_RECIPIENTS`` at it only once the
-    grant exists::
+    :func:`~vinta_billing.permissions.owner_may_manage_billing`, so that "who
+    may change billing" and "who is told when it goes wrong" come from one
+    column rather than drifting apart.
 
-        VINTA_BILLING = {
-            "BILLING_RECIPIENTS": (
-                "vinta_billing.recipients.members_holding_manage_billing"
-            ),
-        }
-
-    Inactive memberships are excluded: a deactivated member is not somebody to
-    tell, and ``holding_permission`` alone does not exclude them.
+    Returns an empty list for a scope with no owner, and that is the one thing
+    worth knowing about this default: a dunning ladder whose messages reach
+    nobody ends in a suspension the payer was never warned about. A project
+    billing organizations should either populate ``scope.owner`` with the
+    billing contact or configure ``BILLING_RECIPIENTS`` -- and
+    ``LoggingNotifier``, the shipped default notifier, logs what it would have
+    sent, so an empty recipient list is at least visible in a log rather than
+    silent.
     """
-    return list(
-        get_organization_membership_model()
-        .objects.filter(organization_id=organization.pk)
-        .active()
-        .holding_permission(MANAGE_BILLING_PERMISSION)
-        .values_list("user_id", flat=True)
-        .distinct()
-    )
+    return [scope.owner_id] if scope.owner_id is not None else []
 
 
-def get_billing_recipients(organization: AbstractOrganization) -> Sequence[Any]:
+def get_billing_recipients(scope: AbstractBillingScope) -> Sequence[Any]:
     """Run the configured resolver."""
-    return get_object_from_setting("BILLING_RECIPIENTS")(organization)
+    return get_object_from_setting("BILLING_RECIPIENTS")(scope)

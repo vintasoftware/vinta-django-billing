@@ -11,7 +11,7 @@ a project that *does* run a container can build them itself and ignore this
 module entirely.
 
 The instances are cached per process. Every service here is stateless -- they
-hold no request, no organization and no transaction -- so sharing one is safe
+hold no request, no scope and no transaction -- so sharing one is safe
 and saves rebuilding the object graph on every limit check.
 
 Everything above is the *default*. The shipped views and the admin do not name

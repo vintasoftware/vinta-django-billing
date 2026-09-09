@@ -1794,7 +1794,6 @@ dependencies = [
     { name = "django-virtual-models" },
     { name = "djangorestframework" },
     { name = "python-dateutil" },
-    { name = "vinta-django-orgs" },
 ]
 
 [package.optional-dependencies]
@@ -1803,6 +1802,9 @@ mercadopago = [
 ]
 openapi = [
     { name = "drf-spectacular" },
+]
+orgs = [
+    { name = "vinta-django-orgs" },
 ]
 stripe = [
     { name = "stripe" },
@@ -1827,6 +1829,7 @@ dev = [
     { name = "stripe" },
     { name = "tox" },
     { name = "tox-uv" },
+    { name = "vinta-django-orgs" },
 ]
 test = [
     { name = "freezegun" },
@@ -1837,6 +1840,7 @@ test = [
     { name = "pytest-django" },
     { name = "tox" },
     { name = "tox-uv" },
+    { name = "vinta-django-orgs" },
 ]
 
 [package.metadata]
@@ -1850,9 +1854,9 @@ requires-dist = [
     { name = "mercadopago", marker = "extra == 'mercadopago'", specifier = ">=3.2,<4" },
     { name = "python-dateutil", specifier = ">=2.9" },
     { name = "stripe", marker = "extra == 'stripe'", specifier = ">=11.0" },
-    { name = "vinta-django-orgs", specifier = ">=0.5,<0.6" },
+    { name = "vinta-django-orgs", marker = "extra == 'orgs'", specifier = ">=0.5,<0.6" },
 ]
-provides-extras = ["mercadopago", "openapi", "stripe"]
+provides-extras = ["mercadopago", "openapi", "orgs", "stripe"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1873,6 +1877,7 @@ dev = [
     { name = "stripe", specifier = ">=11.0" },
     { name = "tox", specifier = ">=4.22" },
     { name = "tox-uv", specifier = ">=1.13" },
+    { name = "vinta-django-orgs", specifier = ">=0.5,<0.6" },
 ]
 test = [
     { name = "freezegun", specifier = ">=1.5" },
@@ -1883,6 +1888,7 @@ test = [
     { name = "pytest-django", specifier = ">=4.9" },
     { name = "tox", specifier = ">=4.22" },
     { name = "tox-uv", specifier = ">=1.13" },
+    { name = "vinta-django-orgs", specifier = ">=0.5,<0.6" },
 ]
 
 [[package]]

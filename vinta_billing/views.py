@@ -14,7 +14,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework.viewsets import GenericViewSet, ViewSet
 
-from vinta_billing.billing_views import _require_organization
+from vinta_billing.billing_views import _require_scope
 from vinta_billing.constants import PaymentStatuses
 from vinta_billing.exceptions import (
     PaymentProviderNotConfiguredError,
@@ -233,10 +233,10 @@ class PaymentsViewSet(ViewSet):
         if status_update.status != PaymentStatuses.APPROVED:
             return
         payment = status_update.payment
-        organization = payment.organization
-        if organization is not None:
+        scope = payment.scope
+        if scope is not None:
             self.subscription_service.record_payment_method(
-                organization, payment.payment_provider, payment.external_id
+                scope, payment.payment_provider, payment.external_id
             )
         add_on = SubscriptionAddOn.objects.filter(payment=payment).first()
         if add_on is not None:
@@ -378,7 +378,7 @@ class PaymentsViewSet(ViewSet):
                 self.dunning_service.resolve_payment_success(subscription)
                 self.subscription_service.confirm_plan_change(subscription)
                 self.subscription_service.record_payment_method(
-                    subscription.organization,
+                    subscription.scope,
                     subscription.payment_provider,
                     subscription.external_id,
                 )
@@ -397,7 +397,7 @@ class BillingProfileViewSet(
     lookup_field = "pk"
     permission_classes = (IsAuthenticated,)
 
-    #: Writes touch the organization's tax document number and payer identity, not
+    #: Writes touch the scope's tax document number and payer identity, not
     #: just "my own" data, so they are gated to org admins. Reads stay open to any
     #: authenticated member (IsAuthenticated, above).
     write_actions = (
@@ -412,24 +412,24 @@ class BillingProfileViewSet(
         return super().get_permissions()
 
     def get_queryset(self) -> QuerySet[BillingProfile]:
-        # Chain the organization filter on top of the virtual-model-optimized base
+        # Chain the scope filter on top of the virtual-model-optimized base
         # queryset (GenericVirtualModelViewMixin.get_queryset()) rather than
         # constructing a fresh queryset, so scoping doesn't undo the serializer's
         # select_related/prefetch optimization.
         queryset = super().get_queryset()
-        organization = self.request.organization  # type: ignore[attr-defined]
-        if organization is None:
+        scope = self.request.scope  # type: ignore[attr-defined]
+        if scope is None:
             return queryset.none()
-        return queryset.filter(organization=organization)
+        return queryset.filter(scope=scope)
 
     def get_billing_profile(self):
-        organization = self.request.organization  # type: ignore[attr-defined]
-        organization_pk = organization.pk if organization is not None else None
-        return get_object_or_404(self.get_queryset(), pk=organization_pk)
+        scope = self.request.scope  # type: ignore[attr-defined]
+        scope_pk = scope.pk if scope is not None else None
+        return get_object_or_404(self.get_queryset(), pk=scope_pk)
 
     @extend_schema(
         summary="Retrieve billing profile",
-        description="Retrieve the billing profile of the active organization.",
+        description="Retrieve the billing profile of the active scope.",
         responses={200: BillingProfileSerializer},
     )
     @action(
@@ -446,12 +446,12 @@ class BillingProfileViewSet(
 
     @extend_schema(
         summary="Create billing profile",
-        description="Create a new billing profile for the active organization.",
+        description="Create a new billing profile for the active scope.",
         responses={
             201: BillingProfileSerializer,
             409: {
                 "description": (
-                    "This organization already has a billing profile. Not a `BillingError` "
+                    "This scope already has a billing profile. Not a `BillingError` "
                     "and not routed through `vinta_billing.exception_handling` -- the body "
                     "is DRF's `{'detail': ...}`, with no machine-readable `code`."
                 )
@@ -467,7 +467,7 @@ class BillingProfileViewSet(
     def create_billing_profile(self, request, *args, **kwargs):
         if self.get_queryset().exists():
             return Response(
-                {"detail": "A billing profile already exists for this organization."},
+                {"detail": "A billing profile already exists for this scope."},
                 status=status.HTTP_409_CONFLICT,
             )
 
@@ -482,7 +482,7 @@ class BillingProfileViewSet(
 
     @extend_schema(
         summary="Update billing profile",
-        description="Update the billing profile of the active organization.",
+        description="Update the billing profile of the active scope.",
         responses={200: BillingProfileSerializer},
     )
     @action(
@@ -501,7 +501,7 @@ class BillingProfileViewSet(
 
     @extend_schema(
         summary="Partially update billing profile",
-        description="Partially update the billing profile of the active organization.",
+        description="Partially update the billing profile of the active scope.",
         responses={200: BillingProfileSerializer},
     )
     @action(
@@ -520,7 +520,7 @@ class BillingProfileViewSet(
 
 
 class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
-    """``GET /billing/payment-provider/`` -- the active organization's payment provider
+    """``GET /billing/payment-provider/`` -- the active scope's payment provider
     (its pin when set, ``VINTA_BILLING['DEFAULT_PROVIDER']`` otherwise -- resolved through
     ``PaymentProviderResolver``, the one place both this endpoint and charge routing
     implement that rule) plus that provider's browser-safe public credentials.
@@ -564,14 +564,14 @@ class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
         )
 
     @extend_schema(
-        summary="Get the active organization's payment provider",
+        summary="Get the active scope's payment provider",
         description=(
-            "Returns the payment provider the active organization is pinned to (or the "
+            "Returns the payment provider the active scope is pinned to (or the "
             "system default when unpinned) plus its browser-safe public credentials."
         ),
         responses={
             200: PaymentProviderSerializer,
-            403: {"description": "No active organization."},
+            403: {"description": "No active scope."},
             503: {
                 "description": (
                     "The resolved provider is unknown or has no public credentials "
@@ -586,8 +586,8 @@ class PaymentProviderViewSet(TenantScopedViewMixin, ViewSet):
     def retrieve_provider(self, request, *args, **kwargs):
         """``GET /billing/payment-provider/``. See the class docstring for why this is
         not named ``list``."""
-        organization = _require_organization(request)
-        provider = self.payment_provider_resolver.resolve_for_organization(organization)
+        scope = _require_scope(request)
+        provider = self.payment_provider_resolver.resolve_for_scope(scope)
         try:
             credentials = resolve_public_credentials(provider)
         except PaymentProviderNotConfiguredError:

@@ -62,8 +62,8 @@ class TestTheAdminBuildsItsServiceToo:
         repoints = []
 
         class RecordingSubscriptionService(SubscriptionService):
-            def set_payment_provider(self, organization, provider, actor=None):
-                repoints.append((organization, provider, actor))
+            def set_payment_provider(self, scope, provider, actor=None):
+                repoints.append((scope, provider, actor))
                 return billing_profile
 
         class Container:
@@ -80,9 +80,7 @@ class TestTheAdminBuildsItsServiceToo:
         with override_settings(VINTA_BILLING={"SERVICE_CONTAINER": Container()}):
             model_admin.save_model(request, billing_profile, repoint_form, change=True)
 
-        assert repoints == [
-            (billing_profile.organization, PaymentProviders.MERCADOPAGO, request.user)
-        ]
+        assert repoints == [(billing_profile.scope, PaymentProviders.MERCADOPAGO, request.user)]
 
     def test_an_edit_that_does_not_touch_the_provider_asks_for_no_service(
         self, db, billing_profile, rf

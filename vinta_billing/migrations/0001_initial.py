@@ -7,17 +7,27 @@ import model_utils.fields
 from django.conf import settings
 from django.db import migrations, models
 
+# ``LEGACY_ORGANIZATION_MODEL`` is read at *import* time here -- Django loads
+# every migration file to build the graph, whether or not it will run one -- so
+# naming it directly would force every installation, including one that has
+# never heard of ``vinta-django-orgs``, to keep that setting defined and that
+# package installed. That is the entire reason this indirection exists.
+#
+# An installation upgrading from 0.7 has the setting, so nothing changes for it.
+# A fresh install does not, and the fallback target is arbitrary: 0004 through
+# 0006 add the scope columns, backfill them and drop these ones again, so on a
+# database built from scratch the column exists for three migrations and holds
+# nothing.
+LEGACY_ORGANIZATION_MODEL = getattr(settings, "ORGANIZATION_MODEL", settings.AUTH_USER_MODEL)
+
 
 class Migration(migrations.Migration):
 
     initial = True
 
     dependencies = [
-        # ``vinta-django-orgs`` 0.2.0 renamed both apps and collapsed each one's
-        # migrations into a single ``0001_initial`` under the new label, so this
-        # names that rather than the pre-rename leaf it was generated against.
-        ("vinta_orgs", "0001_initial"),
-        migrations.swappable_dependency(settings.ORGANIZATION_MODEL),
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        migrations.swappable_dependency(LEGACY_ORGANIZATION_MODEL),
     ]
 
     operations = [
@@ -165,7 +175,7 @@ class Migration(migrations.Migration):
                         primary_key=True,
                         related_name="billing_profile",
                         serialize=False,
-                        to=settings.ORGANIZATION_MODEL,
+                        to=LEGACY_ORGANIZATION_MODEL,
                     ),
                 ),
                 ("contact_first_name", models.CharField(max_length=255)),
@@ -680,7 +690,7 @@ class Migration(migrations.Migration):
                     models.OneToOneField(
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="subscription",
-                        to=settings.ORGANIZATION_MODEL,
+                        to=LEGACY_ORGANIZATION_MODEL,
                     ),
                 ),
                 (
@@ -773,7 +783,7 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="billing_period_summaries",
-                        to=settings.ORGANIZATION_MODEL,
+                        to=LEGACY_ORGANIZATION_MODEL,
                     ),
                 ),
                 (
@@ -1183,7 +1193,7 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="payment_methods",
-                        to=settings.ORGANIZATION_MODEL,
+                        to=LEGACY_ORGANIZATION_MODEL,
                     ),
                 ),
             ],
@@ -1373,7 +1383,7 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="metered_occurrences",
-                        to=settings.ORGANIZATION_MODEL,
+                        to=LEGACY_ORGANIZATION_MODEL,
                     ),
                 ),
                 (
