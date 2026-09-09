@@ -75,12 +75,31 @@ class TestGetOrCreateFor:
         assert again.label == "Acme (billing contact: finance@acme.test)"
 
     def test_two_payers_sharing_a_pk_across_models_do_not_collide(self, user, organization):
-        """A user and an organization can both be pk 1. The content type separates them."""
-        organization.pk = user.pk
-        organization.save()
+        """A user and an organization can both be pk 1. The content type separates them.
 
-        personal, _ = BillingScope.objects.get_or_create_for(user)
-        team, _ = BillingScope.objects.get_or_create_for(organization)
+        Both rows are given the *same* ``scope_type`` on purpose: the unique
+        constraint is on ``(scope_type, scope_key)``, so if the key did not carry
+        the content type these two would collide on it.
+
+        Built by hand rather than by re-assigning one payer's pk to the other's.
+        Which integers two tables hand out is a backend detail -- SQLite counts
+        per table, so both are 1 and the collision happens by itself, while
+        Postgres keeps a sequence per table that does not reset between tests --
+        so the case has to be constructed rather than hoped for.
+        """
+        from django.contrib.contenttypes.models import ContentType
+
+        shared_pk = "1"
+        personal = BillingScope.objects.create(
+            scope_type=ScopeType.ORGANIZATION,
+            content_type=ContentType.objects.get_for_model(type(user)),
+            object_id=shared_pk,
+        )
+        team = BillingScope.objects.create(
+            scope_type=ScopeType.ORGANIZATION,
+            content_type=ContentType.objects.get_for_model(type(organization)),
+            object_id=shared_pk,
+        )
 
         assert personal.pk != team.pk
         assert personal.scope_key != team.scope_key
