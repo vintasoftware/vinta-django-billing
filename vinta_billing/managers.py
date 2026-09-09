@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from django.db.models import Manager
+from django.db.models import Manager, Model
 from django.utils import timezone
 
+from vinta_billing.constants import ScopeType
 from vinta_billing.querysets import (
     BillingPeriodSummaryQuerySet,
     MeteredOccurrenceQuerySet,
@@ -15,7 +16,74 @@ from vinta_billing.querysets import (
 
 
 if TYPE_CHECKING:
-    from vinta_billing.models import ProviderWebhookEvent
+    from vinta_billing.models import BillingScope, ProviderWebhookEvent
+
+
+class BillingScopeManager(Manager["BillingScope"]):
+    """Manager for the shipped, generic-key ``BillingScope``.
+
+    Only :meth:`get_or_create_for` is specific to the generic key, and it is the
+    reason this manager exists: without it, every caller would have to reach for
+    ``ContentType.objects.get_for_model`` itself to name a payer, which is
+    exactly the ceremony the scope model is supposed to absorb. A project that
+    swaps in a scope model with typed foreign keys does not need it and does not
+    get it.
+    """
+
+    def get_or_create_for(
+        self,
+        obj: Model,
+        *,
+        scope_type: str | None = None,
+        label: str | None = None,
+        owner: Any = None,
+        parent: BillingScope | None = None,
+    ) -> tuple[BillingScope, bool]:
+        """The scope that bills ``obj``, creating it on first sight.
+
+        ``obj`` is whatever the project bills -- a user, an organization, a
+        workspace. Everything else is inferred and can be overridden:
+
+        * ``scope_type`` is ``USER`` when ``obj`` is an instance of
+          ``AUTH_USER_MODEL`` and ``ORGANIZATION`` otherwise. A project with a
+          third kind of payer passes its own string.
+        * ``label`` is ``obj.name`` when there is one, else ``str(obj)``.
+        * ``owner`` is ``obj`` itself for a user scope, and ``None`` otherwise
+          -- this package cannot know which member of an organization owns its
+          billing, which is what ``BILLING_MANAGER_PREDICATE`` is for.
+
+        Idempotent on ``(content_type, object_id)`` rather than on
+        ``scope_key``: the key is derived from those two, so matching on the
+        source columns is the same question asked without a string round-trip.
+        An existing scope is returned untouched -- a second call must not
+        silently overwrite a label or an owner a project has since curated.
+        """
+        from django.contrib.auth import get_user_model
+        from django.contrib.contenttypes.models import ContentType
+
+        if scope_type is None:
+            scope_type = (
+                ScopeType.USER if isinstance(obj, get_user_model()) else ScopeType.ORGANIZATION
+            )
+        if label is None:
+            # ``name`` first: it is what a tenant model almost always calls its
+            # display field, and ``str()`` on an arbitrary project model can
+            # dereference related rows.
+            label = str(getattr(obj, "name", None) or obj)
+        if owner is None and scope_type == ScopeType.USER:
+            owner = obj
+
+        scope, created = self.get_or_create(
+            content_type=ContentType.objects.get_for_model(obj, for_concrete_model=False),
+            object_id=str(obj.pk),
+            defaults={
+                "scope_type": scope_type,
+                "label": label,
+                "owner": owner,
+                "parent": parent,
+            },
+        )
+        return scope, created
 
 
 class ProviderWebhookEventManager(Manager):

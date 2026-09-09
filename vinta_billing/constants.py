@@ -155,3 +155,21 @@ class PaymentProviders(TextChoices):
 
     MERCADOPAGO = (MERCADOPAGO, "MercadoPago")
     STRIPE = (STRIPE, "Stripe")
+
+
+class ScopeType(TextChoices):
+    """The two kinds of payer this package itself knows how to name.
+
+    Deliberately *not* passed as ``choices`` to ``AbstractBillingScope.scope_type``,
+    and the reason is the whole point of the scope model. A project's kinds of
+    payer are its own -- a workspace, a project, a household, a franchise -- and
+    it must be able to store one without a migration or a fork. These are the two
+    values the shipped code writes; the column accepts any string.
+
+    ``ORGANIZATION`` is the default because it is what every installation of this
+    package did before scopes existed, so a project that never thinks about
+    ``scope_type`` keeps the vocabulary it already had.
+    """
+
+    USER = ("user", _("User"))
+    ORGANIZATION = ("organization", _("Organization"))

@@ -1,10 +1,13 @@
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from django.conf import settings
+from django.contrib.contenttypes.fields import GenericForeignKey
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q, UniqueConstraint
 from vinta_orgs.conf import organization_model_string
 
+from vinta_billing import conf
 from vinta_billing.base_models import BaseModel
 from vinta_billing.constants import (
     BillingInterval,
@@ -16,10 +19,12 @@ from vinta_billing.constants import (
     PaymentStatuses,
     ProviderWebhookRoute,
     RefundStatuses,
+    ScopeType,
     SubscriptionStatuses,
 )
 from vinta_billing.managers import (
     BillingPeriodSummaryManager,
+    BillingScopeManager,
     LimitWarningNotificationManager,
     MeteredOccurrenceManager,
     ProviderWebhookEventManager,
@@ -29,6 +34,213 @@ from vinta_billing.registry import entitlement_choices, resource_choices, resour
 
 if TYPE_CHECKING:
     from django_stubs_ext.db.models.manager import RelatedManager
+
+
+#: The model every scope foreign key in this app points at, resolved at import
+#: time because a field definition needs a target now. Defaults to the model
+#: this app ships, so an installation that has not overridden it still works --
+#: the swappable machinery reads the same setting and simply finds nothing to
+#: swap.
+SCOPE_MODEL = conf.scope_model_string()
+
+
+class AbstractBillingScope(BaseModel):
+    """Who is being billed.
+
+    Every table in this app hangs off one of these rows. The indirection is the
+    point: a foreign key straight to a project's tenant model resolves to
+    exactly one model per project, so a project could sell a plan to an
+    organization *or* to a user but never to both. A scope row can be either,
+    and ``scope_type`` says which.
+
+    Subclasses decide what a scope *is* by implementing :meth:`build_scope_key`
+    and the ``scope`` property over whatever columns suit them -- a generic key,
+    a nullable foreign key per kind, a composite. This class owns what every
+    such choice has in common: a portable string spelling of the value, a
+    display label, an owner, and a place in a hierarchy.
+
+    Three columns exist so that the shipped defaults work with no project code
+    at all:
+
+    ``label``
+        The display name, live rather than snapshotted -- a payer is a thing
+        that still exists. Replaces every ``organization.name`` read this
+        package used to do, and stops it assuming the payer has a ``name``.
+    ``owner``
+        Who may change this scope's billing and who hears when a charge fails,
+        under the shipped :func:`~vinta_billing.permissions.owner_may_manage_billing`
+        and :func:`~vinta_billing.recipients.scope_owner` defaults. ``SET_NULL``:
+        deleting a user must not delete their payment history.
+    ``parent``
+        A reseller chain, on a table this package owns, so
+        :class:`~vinta_billing.hierarchy.ParentFieldHierarchy` needs no field on
+        a model it does not control.
+
+    A project that swaps the scope model out and populates none of the three
+    pays one NULL each.
+    """
+
+    # One of ``ScopeType``, or a value the installing project defines. No
+    # ``choices``: see ``ScopeType``.
+    scope_type = models.CharField(max_length=32, default=ScopeType.ORGANIZATION)
+
+    # The portable spelling of the scope, maintained by ``save``. Stable for the
+    # life of the scope and unique among scopes of the same type: it is the
+    # idempotency key provisioning code reaches for and the handle the admin and
+    # the API address a scope by, so a key that changes strands both.
+    scope_key = models.CharField(max_length=255, db_index=True)
+
+    label = models.CharField(max_length=255, blank=True)
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+
+    # ``PROTECT``, not ``CASCADE``: deleting a reseller must not silently delete
+    # every subscription underneath it. ``%(class)s`` in the related name
+    # because more than one concrete scope model can be *defined* in a project
+    # even though only one is ever active, and two bare ``children`` accessors
+    # on one target would clash.
+    parent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="%(app_label)s_%(class)s_children",
+    )
+
+    class Meta(BaseModel.Meta):
+        abstract = True
+
+    def __str__(self) -> str:
+        return self.label or self.scope_key or str(self.pk)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.validate_scope()
+        self.scope_key = self.build_scope_key()
+        if (
+            update_fields := kwargs.get("update_fields")
+        ) is not None and "scope_key" not in update_fields:
+            # A partial update that moves the scope but leaves ``scope_key``
+            # behind would silently detach the scope from every billing row
+            # that found it by key, so add the column rather than let the write
+            # proceed.
+            kwargs["update_fields"] = [*update_fields, "scope_key"]
+        super().save(*args, **kwargs)
+
+    def clean(self) -> None:
+        super().clean()
+        self.validate_scope()
+
+    @property
+    def scope(self) -> Any:
+        """The thing being billed: a user, an organization, whatever."""
+        raise NotImplementedError("Needs to be implemented on subclass")
+
+    @scope.setter
+    def scope(self, value: Any) -> None:
+        raise NotImplementedError("Needs to be implemented on subclass")
+
+    def build_scope_key(self) -> str:
+        """Return the portable string form of this scope.
+
+        Must be stable for the life of the scope and unique among scopes of the
+        same ``scope_type``.
+        """
+        raise NotImplementedError("Needs to be implemented on subclass")
+
+    def validate_scope(self) -> None:
+        """Reject a scope that names nothing.
+
+        Unlike an audit scope, a billing scope has no "global" value: somebody
+        pays. A convenience check rather than the guarantee -- ``save`` is
+        bypassed by ``bulk_create`` and ``QuerySet.update``, so concrete
+        subclasses are expected to carry a CHECK constraint saying the same
+        thing.
+        """
+        if not self.build_scope_key():
+            raise ValidationError("A billing scope must name something to bill.")
+
+
+class BillingScope(AbstractBillingScope):
+    """The scope model this app ships: a generic key to anything.
+
+    A ``content_type``/``object_id`` pair rather than the opaque string
+    ``vinta-django-audit-logs`` uses for its scope, and the divergence is
+    deliberate. An audit scope is written on an append-only hot path where the
+    join is unaffordable; a billing scope is read about once per request. Paying
+    for the generic key buys the thing this model exists for -- both kinds of
+    payer, in one project, with no project code::
+
+        BillingScope.objects.get_or_create_for(request.user)          # personal
+        BillingScope.objects.get_or_create_for(request.organization)  # team
+
+    A project that wants real referential integrity, typed access and CHECK
+    constraints per kind subclasses :class:`AbstractBillingScope` with named
+    foreign keys instead and points ``BILLING_SCOPE_MODEL`` at that.
+
+    ``content_type`` is ``PROTECT``: ``remove_stale_contenttypes`` runs after
+    every migrate that drops a model, and a scope whose content type vanished
+    could no longer name what it bills. The *target row* is a different matter
+    -- nothing constrains it, so deleting an organization leaves the scope, its
+    label and its payment history intact, which is what an auditable billing
+    trail needs.
+    """
+
+    content_type = models.ForeignKey(
+        "contenttypes.ContentType",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    # A string, so it holds an integer pk, a UUID or a natural key equally well,
+    # and so the scope does not change shape when the payer model does.
+    object_id = models.CharField(max_length=255)
+    scope_object = GenericForeignKey("content_type", "object_id")
+
+    objects: ClassVar[BillingScopeManager] = BillingScopeManager()
+
+    class Meta(AbstractBillingScope.Meta):
+        abstract = False
+        swappable = "BILLING_SCOPE_MODEL"
+        constraints: ClassVar = [
+            # The invariant ``validate_scope`` checks, held where ``save``
+            # cannot reach: ``bulk_create`` and ``QuerySet.update`` never call
+            # it.
+            models.CheckConstraint(
+                condition=~Q(object_id=""),
+                name="billing_scope_names_a_payer",
+            ),
+            # ``scope_key`` is what provisioning code looks a scope up by, so it
+            # is the half that has to be unique. ``label`` is a display value
+            # and must stay free to change.
+            UniqueConstraint(
+                fields=["scope_type", "scope_key"],
+                name="billing_scope_unique_key_per_type",
+            ),
+        ]
+
+    @property
+    def scope(self) -> Any:
+        return self.scope_object
+
+    @scope.setter
+    def scope(self, value: Any) -> None:
+        self.scope_object = value
+
+    def build_scope_key(self) -> str:
+        """``"app_label.modelname:pk"``.
+
+        Readable in an export and meaningful without a join, which a bare
+        ``content_type_id`` is not -- content type ids differ between databases.
+        """
+        if self.content_type_id is None or not self.object_id:
+            return ""
+        content_type = self.content_type
+        return f"{content_type.app_label}.{content_type.model}:{self.object_id}"
 
 
 class BillingAddress(BaseModel):
