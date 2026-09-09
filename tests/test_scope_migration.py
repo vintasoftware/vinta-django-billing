@@ -23,6 +23,8 @@ import pytest
 from django.conf import settings
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.loader import MigrationLoader
+from django.db.migrations.recorder import MigrationRecorder
 from django.test import override_settings
 
 
@@ -53,12 +55,50 @@ UPGRADE_SETTINGS = {"LEGACY_SCOPE_MODEL": "vinta_orgs.Organization"}
 
 
 def _migrate(target):
-    """Run the graph to ``target`` and hand back the resulting model registry."""
+    """Run the graph to ``target`` and hand back the resulting model registry.
+
+    ``replace_migrations=False`` is what makes this module keep working after the
+    squash. A fresh test database applies
+    ``0001_initial_squashed_0006_drop_organization_columns`` and Django then
+    drops every migration it replaces out of the graph -- so 0003, the state
+    these tests rewind to, is not addressable through the default loader. Asking
+    for the unsquashed graph gets the six real migrations back, which are the
+    ones an upgrading installation actually runs.
+    """
     executor = MigrationExecutor(connection)
+    executor.loader = MigrationLoader(connection, replace_migrations=False)
     executor.loader.build_graph()
     executor.migrate([target])
     executor.loader.build_graph()
     return executor.loader.project_state([target]).apps
+
+
+#: The migrations the squash stands in for, in order.
+REPLACED = [
+    "0001_initial",
+    "0002_manage_billing_permission",
+    "0003_billingscope",
+    "0004_add_scope_columns",
+    "0005_backfill_scopes",
+    "0006_drop_organization_columns",
+]
+
+
+def _record_the_replaced_migrations_as_applied():
+    """Tell the recorder what the schema already reflects.
+
+    A fresh test database applies the squashed migration, so
+    ``django_migrations`` holds one row for it and none for the six it replaces.
+    The unsquashed graph these tests drive would therefore conclude that nothing
+    is applied and try to build the schema again on top of itself. The schema
+    *is* the end state of all six, so recording them says only what is already
+    true, and rewinding then works from an accurate picture.
+    """
+    recorder = MigrationRecorder(connection)
+    applied = recorder.applied_migrations()
+    for name in REPLACED:
+        if ("vinta_billing", name) not in applied:
+            recorder.record_applied("vinta_billing", name)
 
 
 @pytest.fixture
@@ -69,6 +109,7 @@ def at_legacy():
     leaves the graph part-applied by refusing to guess, and teardown still has
     to get the database back to the current schema for the next test.
     """
+    _record_the_replaced_migrations_as_applied()
     apps = _migrate(LEGACY)
     yield apps
     with override_settings(VINTA_BILLING=UPGRADE_SETTINGS):

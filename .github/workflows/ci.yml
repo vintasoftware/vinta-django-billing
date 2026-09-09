@@ -49,8 +49,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
 
-  swapped-organization-model:
-    name: swapped ORGANIZATION_MODEL
+  swapped-payer-model:
+    name: swapped payer model
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -61,10 +61,28 @@ jobs:
           enable-cache: true
           python-version: "3.12"
 
-      # Every organization relation has to resolve through ORGANIZATION_MODEL.
-      # That is invisible under the default settings, where the swappable
-      # reference and the concrete model are the same class.
+      # Billing still works when the model its scopes name is swapped out from
+      # under it.
       - run: uv run --frozen tox -e swapped
+
+  without-vinta-django-orgs:
+    name: no vinta-django-orgs installed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # The claim 0.8 makes, and the one no other job can check: every other
+      # environment installs the `test` group, which still needs the package in
+      # order to exercise `vinta_billing.contrib.orgs`. This one installs
+      # neither that group nor the `orgs` extra, so a stray import or a
+      # migration that reads ORGANIZATION_MODEL fails here and nowhere else.
+      - run: uv run --frozen tox -e noorgs
 
   postgres:
     name: row locks (Postgres)

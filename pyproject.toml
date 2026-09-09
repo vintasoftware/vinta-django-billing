@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "vinta-django-billing"
 dynamic = ["version"]
-description = "Subscriptions, plan limits, entitlements and metered usage for multi-organization Django applications"
+description = "Subscriptions, plan limits, entitlements and metered usage for Django applications, billed to users, organizations or anything else"
 readme = "README.md"
 requires-python = ">=3.11,<3.16"
 license = "MIT"
@@ -36,20 +36,20 @@ dependencies = [
     "python-dateutil>=2.9",
     # Read-side query planning for the shipped serializers and viewsets.
     "django-virtual-models>=0.4,<0.5",
-    # The organization models every table here is scoped to. Only the
-    # library's guaranteed surface is used -- the swappable model reference,
-    # the scoping mixin and the retriever -- never a project-specific field.
-    #
-    # Upper-bounded because it is pre-1.0 and moving: 0.2.0 renamed both apps,
-    # 0.3.0 defaulted `STRICT_ORGANIZATION_FILTER` to `True`, and 0.4.0 deleted
-    # the module-level organization-context API -- three consecutive minors, each
-    # breaking. An uncapped floor let the first of them reach CI unannounced and
-    # break `main`. Raise the cap deliberately, with the migration in the same
-    # change.
-    "vinta-django-orgs>=0.5,<0.6",
 ]
 
 [project.optional-dependencies]
+# Membership-backed billing policy, for a project whose payers are
+# `vinta-django-orgs` organizations. Only `vinta_billing.contrib.orgs` imports
+# it, and only inside its functions, so the package installs and runs without
+# it -- see that module for the two settings that restore the pre-0.8 defaults.
+#
+# Upper-bounded because it is pre-1.0 and moving: 0.2.0 renamed both apps,
+# 0.3.0 defaulted `STRICT_ORGANIZATION_FILTER` to `True`, and 0.4.0 deleted the
+# module-level organization-context API -- three consecutive minors, each
+# breaking. An uncapped floor let the first of them reach CI unannounced and
+# break `main`. Raise the cap deliberately, with the migration in the same change.
+orgs = ["vinta-django-orgs>=0.5,<0.6"]
 # Provider SDKs. The adapters import them lazily, so a project that only
 # charges through one provider does not install the other.
 stripe = ["stripe>=11.0"]
@@ -64,6 +64,10 @@ Changelog = "https://github.com/vintasoftware/vinta-django-billing/blob/main/HIS
 
 [dependency-groups]
 test = [
+    # Not a runtime dependency any more -- see the `orgs` extra. The suite still
+    # needs it to exercise `vinta_billing.contrib.orgs`, and to build the
+    # organizations its scopes name.
+    "vinta-django-orgs>=0.5,<0.6",
     "pytest>=8.3",
     "pytest-django>=4.9",
     "pytest-cov>=6.0",

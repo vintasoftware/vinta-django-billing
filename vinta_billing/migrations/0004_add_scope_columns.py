@@ -11,6 +11,11 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+# Same reasoning as 0001: read at import time, so it cannot name a setting a
+# fresh install has no reason to define. See that migration's comment.
+LEGACY_ORGANIZATION_MODEL = getattr(settings, "ORGANIZATION_MODEL", settings.AUTH_USER_MODEL)
+
+
 class Migration(migrations.Migration):
     dependencies = [
         ("vinta_billing", "0003_billingscope"),
@@ -59,7 +64,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="billing_period_summaries",
-                to=settings.ORGANIZATION_MODEL,
+                to=LEGACY_ORGANIZATION_MODEL,
             ),
         ),
         migrations.AlterField(
@@ -69,7 +74,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="metered_occurrences",
-                to=settings.ORGANIZATION_MODEL,
+                to=LEGACY_ORGANIZATION_MODEL,
             ),
         ),
         migrations.AlterField(
@@ -79,7 +84,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="payment_methods",
-                to=settings.ORGANIZATION_MODEL,
+                to=LEGACY_ORGANIZATION_MODEL,
             ),
         ),
         migrations.AlterField(
@@ -89,7 +94,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="subscription",
-                to=settings.ORGANIZATION_MODEL,
+                to=LEGACY_ORGANIZATION_MODEL,
             ),
         ),
         # Nullable for now. 0006 tightens them once 0005 has filled them in.
