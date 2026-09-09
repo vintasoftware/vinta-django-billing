@@ -1,5 +1,117 @@
 # History
 
+## 0.8.0
+
+- **Billing hangs off a swappable scope instead of an organization, and
+  `vinta-django-orgs` is no longer a dependency.** This package already let you
+  swap the organization model, so the problem was never a hardcoded target. It
+  was that `Meta.swappable` resolves exactly **one** model per project: you
+  could sell a plan to an organization *or* to a user, never both, and a solo
+  customer had to be forced into a one-member organization. Every table now
+  points at a `BillingScope` — a row that names whoever is paying — and
+  `scope_type` says what kind of payer that is. The shipped model uses a
+  generic key, so `BillingScope.objects.get_or_create_for(request.user)` and
+  `get_or_create_for(organization)` both work with no project code, in one
+  project, at the same time. A project wanting real foreign keys and per-kind
+  constraints points `BILLING_SCOPE_MODEL` at its own `AbstractBillingScope`
+  subclass instead. **What an adopter must do:** quite a lot — see the upgrade
+  below. **What changes in the document:** `?organization=` becomes `?scope=`,
+  `by_organization[].organization_id` becomes `by_scope[].scope_id`, and
+  `billing_root_organization_id` becomes `billing_root_scope_id`.
+
+### Upgrading from 0.7
+
+Set `VINTA_BILLING["LEGACY_SCOPE_MODEL"]` to whatever your `ORGANIZATION_MODEL`
+named, then migrate:
+
+```python
+VINTA_BILLING = {"LEGACY_SCOPE_MODEL": "vinta_orgs.Organization"}
+```
+
+Migration 0005 creates one scope per organization and re-points every billing
+row at it. With rows to migrate and that setting unset it refuses rather than
+guessing at a content type, because a scope naming the wrong one is both silent
+and very hard to unpick afterwards. 0004 through 0006 are additive, then
+backfill, then drop, and the sequence reverses cleanly — an operator who needs
+to stop partway can.
+
+**Keep `ORGANIZATION_MODEL` defined** until you prune the replaced migrations.
+Django loads every migration file to build the graph whether or not it will run
+one, and 0001 reads that setting at import time. It falls back to
+`AUTH_USER_MODEL` when absent, so a *fresh* install needs neither the setting
+nor the package.
+
+Renamed settings and API:
+
+| Was | Becomes |
+| --- | --- |
+| `ORGANIZATION_MODEL` (for billing) | `BILLING_SCOPE_MODEL`, top-level, optional |
+| — | `VINTA_BILLING["SCOPE_RESOLVER"]` |
+| — | `VINTA_BILLING["LEGACY_SCOPE_MODEL"]` (upgrade only) |
+| `?organization=` | `?scope=` |
+| `by_organization[].organization_id` | `by_scope[].scope_id` |
+| `billing_root_organization_id` | `billing_root_scope_id` |
+| `request.organization` | `request.scope` |
+| `resolve_organization` | `resolve_scope` |
+| `organization_required` | `scope_required` |
+| `pooled_organization_ids` | `pooled_scope_ids` |
+| `for_organizations` | `for_scopes` |
+| `is_default_for_new_organizations` | `is_default_for_new_scopes` |
+
+There is no `organization` alias. Two vocabularies for one concept, in a package
+where "organization" would then mean "scope, but only sometimes", is worse than
+one honest break before 1.0.
+
+- **The permission and recipient defaults read `scope.owner`.** They used to be
+  "any member of the organization", which a scope has no way to answer — it may
+  name a user, or a workspace, or something with no members at all. The new
+  default is least privilege and already right for a personal plan, where
+  `get_or_create_for(user)` has set the owner. **What an adopter must do:** if
+  your payers are `vinta-django-orgs` organizations, install the `orgs` extra
+  and point both settings at `vinta_billing.contrib.orgs`, which carries the
+  four membership-backed functions unchanged. Otherwise populate `scope.owner`
+  with the billing contact, or configure the two seams. Do check one of those
+  happened: a scope with no owner and no configured resolver tells **nobody**
+  about a failed charge, which turns the dunning ladder into a suspension the
+  payer was never warned about.
+
+- **`SCOPE_RESOLVER` replaces the reads off `vinta-django-orgs`' middleware and
+  context state.** The default takes whatever already set `request.scope`, then
+  falls back to the caller's own scope — which is what makes a personal plan
+  work unconfigured. It stops there rather than picking among scopes a caller
+  merely *owns*: choosing arbitrarily between tenants is how one customer reads
+  another's billing. **What an adopter must do:** a project whose tenancy is
+  resolved some other way configures the seam;
+  `vinta_billing.contrib.orgs.resolve_scope_from_organization` bridges
+  `request.organization` for projects staying on that library.
+
+- **`ParentFieldHierarchy` needs no project code now.** `AbstractBillingScope`
+  ships a self-referential `parent`, so a reseller chain is one setting rather
+  than a field on a model this package does not own. `FlatHierarchy` stays the
+  default: over an all-NULL `parent` column a walk reaches the same answer and
+  costs a descendant query per pooled read. **What an adopter must do:** nothing,
+  unless you wrote a hierarchy against your organization model's parent field, in
+  which case it keeps working — `parent_field` is still configurable.
+
+- **`BillingProfile` has a surrogate primary key.** It used to *be* its payer
+  (`organization` was `primary_key=True`), which meant re-pointing a profile at
+  a different payer would rewrite its pk and every `Payment` row hanging off it.
+  The upgrade carries the existing values across untouched, so no payment is
+  re-pointed and nothing outside this package's own tables notices. **What an
+  adopter must do:** nothing, unless you query `BillingProfile` by organization
+  id, which is now `scope_id` and no longer the pk.
+
+- **`OrganizationBaseModel` is gone.** Nothing in this package ever subclassed
+  it. **What an adopter must do:** nothing, unless you imported it, in which case
+  declare the foreign key yourself.
+
+- **Deliberately not adopted: an identity model.**
+  `vinta-django-audit-logs` swaps one alongside its scope, and it does not fit
+  here — no billing model records who acted, so it would be a swappable model
+  nothing points at. If an actor trail arrives on subscription and payment
+  transitions, the right move is probably to depend on that package rather than
+  grow a second identity model.
+
 ## 0.7.0
 
 - **The two inbound webhooks declare their path parameters, and an adopter's
