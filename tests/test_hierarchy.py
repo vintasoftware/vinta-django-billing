@@ -1,7 +1,7 @@
 """Who pays for whom.
 
 The hierarchy strategy is the seam that lets this package run against
-``vinta-django-orgs``' organization model, which has no parent field at all,
+``vinta-django-orgs``' scope model, which has no parent field at all,
 while still supporting the reseller trees the engine was extracted from.
 """
 
@@ -18,7 +18,7 @@ from vinta_billing.hierarchy import (
 
 
 class FakeOrg:
-    """Stands in for an organization model with a parent chain.
+    """Stands in for an scope model with a parent chain.
 
     A fake rather than a real model: the point is that ``ParentFieldHierarchy``
     reads nothing but the two configured attribute names, and a fake proves that
@@ -41,14 +41,14 @@ class TestFlatHierarchy:
     def test_is_the_default(self):
         assert isinstance(get_hierarchy(), FlatHierarchy)
 
-    def test_every_organization_is_its_own_root(self, organization):
-        assert FlatHierarchy().is_billing_root(organization) is True
-        assert FlatHierarchy().resolve_billing_root(organization) is organization
+    def test_every_organization_is_its_own_root(self, scope):
+        assert FlatHierarchy().is_billing_root(scope) is True
+        assert FlatHierarchy().resolve_billing_root(scope) is scope
 
-    def test_nothing_pools_with_anything(self, organization):
-        assert FlatHierarchy().pooled_organization_ids(organization) == [organization.pk]
+    def test_nothing_pools_with_anything(self, scope):
+        assert FlatHierarchy().pooled_scope_ids(scope) == [scope.pk]
 
-    def test_root_filter_matches_everything(self, organization, other_organization):
+    def test_root_filter_matches_everything(self, scope, other_scope):
         from vinta_orgs.conf import get_organization_model
 
         matched = get_organization_model().objects.filter(FlatHierarchy().billing_root_q())
@@ -89,7 +89,7 @@ class TestParentFieldHierarchy:
     def test_a_cycle_raises_rather_than_returning_an_arbitrary_node(self):
         """`parent` is user-mutable data, so a cycle is reachable in production.
 
-        Returning some node from the cycle would leave every organization on it
+        Returning some node from the cycle would leave every scope on it
         billing against a different root depending on where the walk started --
         wrong, and invisible.
         """

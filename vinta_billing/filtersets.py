@@ -83,11 +83,11 @@ class MeteredOccurrenceFilterSet(filters.FilterSet):
         field_name="is_within_allowance",
         label="Filter by whether the occurrence fell inside the included allowance",
     )
-    organization = filters.NumberFilter(
-        method="filter_organization",
-        label="Only rows attributed to this organization",
+    scope = filters.NumberFilter(
+        method="filter_scope",
+        label="Only rows attributed to this scope",
         help_text=(
-            "Only rows attributed to this organization. Must be inside the caller's "
+            "Only rows attributed to this scope. Must be inside the caller's "
             "pooled billing subtree -- an id outside it is a validation error, not "
             "an empty result."
         ),
@@ -118,24 +118,22 @@ class MeteredOccurrenceFilterSet(filters.FilterSet):
         fields = (
             "billing_period_start",
             "is_within_allowance",
-            "organization",
+            "scope",
             "occurrence_start_after",
             "occurrence_start_before",
         )
 
-    def filter_organization(self, queryset, name, value):
-        """Restrict to one organization -- but only one **inside the caller's
+    def filter_scope(self, queryset, name, value):
+        """Restrict to one scope -- but only one **inside the caller's
         pool**. ``MeteredOccurrenceViewSet.get_queryset`` stashes the resolved
         pool on the request so this doesn't need its own DI/service access.
 
         An id outside the pool is a validation error (400), never a silent
-        empty ``200``: a quietly-empty result for an organization the caller
+        empty ``200``: a quietly-empty result for an scope the caller
         cannot see would read as "you used nothing" for a question the caller
         was never allowed to ask.
         """
-        pooled_organization_ids = getattr(self.request, "pooled_organization_ids", ())
-        if value not in pooled_organization_ids:
-            raise ValidationError(
-                {"organization": (f"Organization {value} is not within your billing pool.")}
-            )
-        return queryset.filter(organization_id=value)
+        pooled_scope_ids = getattr(self.request, "pooled_scope_ids", ())
+        if value not in pooled_scope_ids:
+            raise ValidationError({"scope": (f"Scope {value} is not within your billing pool.")})
+        return queryset.filter(scope_id=value)

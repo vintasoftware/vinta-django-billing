@@ -30,6 +30,23 @@ class BillingScopeManager(Manager["BillingScope"]):
     get it.
     """
 
+    def scope_for(self, obj: Model) -> BillingScope | None:
+        """The scope that bills ``obj``, or ``None`` if there is not one yet.
+
+        The read-only half of :meth:`get_or_create_for`, and the hook
+        :func:`vinta_billing.utils.default_scope_resolver` looks for: resolving
+        a request must never create a row as a side effect. Optional by
+        convention -- a project that swaps the scope model out and wants the
+        default resolver to keep working defines a ``scope_for`` of its own on
+        its manager; one that does not simply configures ``SCOPE_RESOLVER``.
+        """
+        from django.contrib.contenttypes.models import ContentType
+
+        return self.filter(
+            content_type=ContentType.objects.get_for_model(obj, for_concrete_model=False),
+            object_id=str(obj.pk),
+        ).first()
+
     def get_or_create_for(
         self,
         obj: Model,
@@ -90,9 +107,9 @@ class ProviderWebhookEventManager(Manager):
     """Manager for the webhook-delivery idempotency ledger.
 
     ``ProviderWebhookEvent`` is not tenant-scoped — a webhook notification arrives
-    before we know which organization it resolves to (see the billing plans and
+    before we know which scope it resolves to (see the billing plans and
     limits plan's Data Model Changes) — so this is a plain ``Manager`` rather than
-    the tenant-aware ``OrganizationManager``.
+    a tenant-aware, scope-filtering one.
 
     Uses an explicit ``get_queryset()`` override (instead of
     ``Manager.from_queryset(...)`` as a base class) because inlining
@@ -149,8 +166,8 @@ class MeteredOccurrenceManager(Manager):
     """Manager for the post-paid occurrence ledger.
 
     A plain ``Manager`` for the same reason as ``ProviderWebhookEventManager``:
-    ``MeteredOccurrence`` is not an ``OrganizationModel``, because billing reads
-    legitimately cross organizations (summing a reseller subtree's usage, sweeping
+    ``MeteredOccurrence`` carries no scope-filtering default manager, because billing
+    reads legitimately cross scopes (summing a reseller subtree's usage, sweeping
     every subscription at cycle close). See the model docstring.
     """
 
@@ -162,16 +179,16 @@ class MeteredOccurrenceManager(Manager):
     ) -> MeteredOccurrenceQuerySet:
         return self.get_queryset().for_billing_period(subscription_id, billing_period_start)
 
-    def for_organizations(self, organization_ids: Sequence[int]) -> MeteredOccurrenceQuerySet:
-        return self.get_queryset().for_organizations(organization_ids)
+    def for_scopes(self, scope_ids: Sequence[int]) -> MeteredOccurrenceQuerySet:
+        return self.get_queryset().for_scopes(scope_ids)
 
 
 class BillingPeriodSummaryManager(Manager):
     """Manager for ``BillingPeriodSummary``, the closed-period statement ledger.
 
     A plain ``Manager`` for the same reason as ``MeteredOccurrenceManager``:
-    ``BillingPeriodSummary`` is not an ``OrganizationModel``, because billing reads
-    legitimately cross organizations (a reseller root reading its whole subtree's
+    ``BillingPeriodSummary`` carries no scope-filtering default manager, because billing
+    reads legitimately cross scopes (a reseller root reading its whole subtree's
     statement history). See the model docstring.
 
     Uses an explicit ``get_queryset()`` override rather than
@@ -183,8 +200,8 @@ class BillingPeriodSummaryManager(Manager):
     def get_queryset(self) -> BillingPeriodSummaryQuerySet:
         return BillingPeriodSummaryQuerySet(self.model, using=self._db)
 
-    def for_organizations(self, organization_ids: Sequence[int]) -> BillingPeriodSummaryQuerySet:
-        return self.get_queryset().for_organizations(organization_ids)
+    def for_scopes(self, scope_ids: Sequence[int]) -> BillingPeriodSummaryQuerySet:
+        return self.get_queryset().for_scopes(scope_ids)
 
 
 class LimitWarningNotificationManager(Manager):

@@ -17,12 +17,12 @@ full reasoning):
 
 - **Never touches ``PaymentMethod``.** A failed charge says nothing about
   whether the card is still attached -- ``EntitlementService.has_payment_method``
-  must keep reading ``True`` for a GRACE organization with a card on file, so it
+  must keep reading ``True`` for a GRACE scope with a card on file, so it
   keeps accruing postpaid usage; the dunning ladder, not the postpaid guard, is
   what escalates it.
 - **Clears ``plan_change_pending_confirmation``** whenever it moves a
   subscription into GRACE, so a first-upgrade whose initial charge fails does
-  not leave the organization stuck unable to request a different plan (the flag
+  not leave the scope stuck unable to request a different plan (the flag
   was set when the upgrade was initiated; a failed charge never reaches the
   APPROVED webhook branch that would otherwise clear it).
 """
@@ -184,7 +184,7 @@ def is_downgrade_grace(subscription: Subscription) -> bool:
     to drift apart, so this lives in exactly one place.
 
     **Known limitation**, accepted as out of scope here: an
-    organization with a downgrade already scheduled whose *currently active*
+    scope with a downgrade already scheduled whose *currently active*
     (still higher, pre-boundary) plan then also fails a renewal charge reads
     as a downgrade-grace here too, and the genuinely failed charge does not
     get retried by the dunning ladder (nor by ``retry_payment`` -- see its
@@ -193,7 +193,7 @@ def is_downgrade_grace(subscription: Subscription) -> bool:
     larger schema change than the dead-edge gap this function exists to close
     warrants. The compound case is rare (a renewal charge landing inside a
     downgrade's typically much-shorter grace window) and, either way, the
-    organization still lands on a state the sweep inspects and can expire --
+    scope still lands on a state the sweep inspects and can expire --
     it no longer sits forever on an unswept row, which is the gap this
     function closes.
     """
@@ -248,7 +248,7 @@ class DunningService:
         falling back to the ``BILLING_DEFAULT_GRACE_PERIOD_DAYS`` setting, and
         clears ``plan_change_pending_confirmation`` (see module docstring) in
         the same transition, so a failed first-upgrade charge does not leave the
-        organization stuck.
+        scope stuck.
 
         Does **not** touch ``PaymentMethod`` -- see module docstring.
         """
@@ -303,15 +303,15 @@ class DunningService:
         owns, once ``subscription`` has just left ``RESTRICTED`` for a live state.
 
         Callers pass this **only** when the *prior* state was ``RESTRICTED`` --
-        sync was never paused for a ``GRACE`` organization (only ``RESTRICTED``
+        sync was never paused for a ``GRACE`` scope (only ``RESTRICTED``
         write-blocks and sync-pauses; see
         ``EntitlementService.is_billing_root_restricted``), so leaving ``GRACE``
         has nothing to reconcile.
 
         Nothing is resynced here: this package has no idea what a restriction
         paused. It sends :data:`vinta_billing.signals.billing_restriction_lifted` with
-        the pooled organization ids (``EntitlementService
-        .get_pooled_organization_ids`` -- the exact set every usage counter and
+        the pooled scope ids (``EntitlementService
+        .get_pooled_scope_ids`` -- the exact set every usage counter and
         the restriction guard itself resolve against), and a project's receiver
         decides what that means for it.
 
@@ -322,9 +322,7 @@ class DunningService:
         and find the subscription still (as far as an uncommitted read is
         concerned) RESTRICTED.
         """
-        organization_ids = self.entitlement_service.get_pooled_organization_ids(
-            subscription.organization
-        )
+        scope_ids = self.entitlement_service.get_pooled_scope_ids(subscription.scope)
         # Sent on commit, not inline: a receiver that queues work must not be
         # able to pick it up before the transaction that moved `billing_state`
         # off RESTRICTED has committed, or the worker reads the subscription as
@@ -333,7 +331,7 @@ class DunningService:
             lambda: billing_restriction_lifted.send(
                 sender=type(subscription),
                 subscription=subscription,
-                organization_ids=organization_ids,
+                scope_ids=scope_ids,
             )
         )
 
@@ -385,7 +383,7 @@ class DunningService:
         not only past expiry: unlike a payment-failure grace there is no failed
         charge to retry -- ``SubscriptionService._schedule_downgrade`` already
         applied the lower ceiling immediately, and this window exists solely to
-        give the organization time to reduce usage (or upgrade back) before
+        give the scope time to reduce usage (or upgrade back) before
         RESTRICTED. It is still evaluated for expiry on every tick, identically
         to a payment-failure grace.
 
@@ -479,21 +477,21 @@ class DunningService:
 
     def _expire_downgrade_grace(self, subscription: Subscription) -> Subscription:
         """Resolve a downgrade-originated grace window that elapsed
-        with the organization still over its new, lower limits: GRACE -> ACTIVE
+        with the scope still over its new, lower limits: GRACE -> ACTIVE
         if usage now fits, otherwise GRACE -> RESTRICTED.
 
         Checked against ``_fits_under_current_limits`` -- the limits
         ``_schedule_downgrade`` already synced onto ``subscription`` immediately
         when the downgrade was requested -- rather than
-        ``check_free_fallback``'s catalog ``free`` plan: an organization
+        ``check_free_fallback``'s catalog ``free`` plan: an scope
         downgrading from, say, ``pro`` to a mid-tier paid plan is never going to
         "fit under free" as its resolution condition, and checking the wrong
-        plan would restrict organizations that already did exactly what the
+        plan would restrict scopes that already did exactly what the
         downgrade asked of them.
 
         ACTIVE, not FREE, on the resolved branch: unlike a payment-failure grace
         (which only ever reaches FREE by fitting under the *catalog's* free
-        ceilings), an organization here remains a paying subscriber of its
+        ceilings), an scope here remains a paying subscriber of its
         still-active, pre-boundary ``subscription.plan`` -- the downgrade itself
         has not taken effect yet (that is the cycle-close sweep). Both
         ``(GRACE, ACTIVE)`` and ``(GRACE, RESTRICTED)`` are already legal edges
@@ -525,18 +523,16 @@ class DunningService:
         (pending) plan's, already synced by ``_schedule_downgrade`` the moment
         the downgrade was requested -- so "fits" here means the overage that
         triggered this grace episode has actually been resolved (by deleting
-        resources, buying an add-on, etc.), without assuming the organization
+        resources, buying an add-on, etc.), without assuming the scope
         downgraded to the catalog's ``free`` tier specifically, which it may not
         have.
         """
-        organization = subscription.organization
+        scope = subscription.scope
         for resource_key in subscription.limits.values_list("resource_key", flat=True):
-            effective_limit = self.entitlement_service.get_effective_limit(
-                organization, resource_key
-            )
+            effective_limit = self.entitlement_service.get_effective_limit(scope, resource_key)
             if effective_limit.limit_value is None:
                 continue
-            usage = self.entitlement_service.get_current_usage(organization, resource_key)
+            usage = self.entitlement_service.get_current_usage(scope, resource_key)
             if usage > effective_limit.limit_value:
                 return False
         return True
@@ -554,11 +550,11 @@ class DunningService:
         left open here.
 
         Resolved by ``slug`` (``FREE_PLAN_SLUG``), **not**
-        ``is_default_for_new_organizations`` -- that flag currently marks the
+        ``is_default_for_new_scopes`` -- that flag currently marks the
         rollout's ``unlimited`` kill-switch plan, whose every
         ``PlanLimit.limit_value`` is ``NULL``. Every ceiling check below skips a
         ``NULL`` limit (it means "no ceiling"), so resolving "the free plan" via
-        the default-for-new-organizations flag would make *every* usage trivially
+        the default-for-new-scopes flag would make *every* usage trivially
         "fit" and short-circuit the entire dunning ladder on its first tick, for
         the whole length of the rollout. The catalog's actual ``free`` tier (real,
         finite limits) is what this check means by "free limits".
@@ -584,13 +580,11 @@ class DunningService:
         return BillingPlan.objects.filter(slug=FREE_PLAN_SLUG, is_active=True).first()
 
     def _fits_under_plan(self, subscription: Subscription, plan: BillingPlan) -> bool:
-        organization = subscription.organization
+        scope = subscription.scope
         for plan_limit in plan.limits.all():
             if plan_limit.limit_value is None:
                 continue
-            usage = self.entitlement_service.get_current_usage(
-                organization, plan_limit.resource_key
-            )
+            usage = self.entitlement_service.get_current_usage(scope, plan_limit.resource_key)
             if usage > plan_limit.limit_value:
                 return False
         return True
@@ -619,18 +613,18 @@ class DunningService:
     def _recipient_user_ids(self, subscription: Subscription) -> list[Any]:
         """Who to tell about ``subscription``, per ``BILLING_RECIPIENTS``.
 
-        Resolved on the subscription's own organization -- the billing root --
+        Resolved on the subscription's own scope -- the billing root --
         never the pooled subtree: there is one commercial relationship per
         reseller tree, and the children's members are not party to it.
         """
-        return list(get_billing_recipients(subscription.organization))
+        return list(get_billing_recipients(subscription.scope))
 
     def _notify_entered_grace(self, subscription: Subscription) -> None:
         if self.notification_service is None:
             return
-        organization = subscription.organization
+        scope = subscription.scope
         context_kwargs = {
-            "organization_name": organization.name,
+            "scope_name": scope.label,
             "grace_period_ends_at": self._format_dt(subscription.grace_period_ends_at),
         }
         for user_id in self._recipient_user_ids(subscription):
@@ -656,9 +650,9 @@ class DunningService:
     def _notify_reminder(self, subscription: Subscription, urgency: str) -> None:
         if self.notification_service is None:
             return
-        organization = subscription.organization
+        scope = subscription.scope
         context_kwargs = {
-            "organization_name": organization.name,
+            "scope_name": scope.label,
             "grace_period_ends_at": self._format_dt(subscription.grace_period_ends_at),
             "urgency": urgency,
         }
@@ -677,8 +671,8 @@ class DunningService:
     def _notify_restricted(self, subscription: Subscription) -> None:
         if self.notification_service is None:
             return
-        organization = subscription.organization
-        context_kwargs = {"organization_name": organization.name}
+        scope = subscription.scope
+        context_kwargs = {"scope_name": scope.label}
         for user_id in self._recipient_user_ids(subscription):
             self.notification_service.create_notification(
                 user_id=user_id,

@@ -1,6 +1,6 @@
-"""The test project again, with the organization models swapped out.
+"""The test project again, with the scope models swapped out.
 
-Everything ``billing`` stores about an organization is a foreign key, and every
+Everything ``billing`` stores about an scope is a foreign key, and every
 one of them has to resolve through ``ORGANIZATION_MODEL`` rather than naming
 ``vinta_orgs.Organization``. That is invisible under the default settings --
 the swappable model and the concrete model are the same class there -- so it

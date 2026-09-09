@@ -199,6 +199,16 @@ class TestDefaultProvider:
 
 
 @pytest.mark.django_db
+def resolve_scope_by_owner(request):
+    """The scope the authenticated caller owns."""
+    from vinta_billing.models import BillingScope
+
+    user = getattr(request, "user", None)
+    if user is None or not user.is_authenticated:
+        return None
+    return BillingScope.objects.filter(owner=user).first()
+
+
 class TestTheProviderEndpointsRefuseAnUnconfiguredProviderTheSameWay:
     """Both shipped payment-provider endpoints answer **503** for a provider this
     deployment holds no credential for.
@@ -211,24 +221,33 @@ class TestTheProviderEndpointsRefuseAnUnconfiguredProviderTheSameWay:
     adopter's error monitoring is already watching.
     """
 
-    UNCONFIGURED: ClassVar = {"PROVIDERS": {}, "DEFAULT_PROVIDER": PaymentProviders.STRIPE}
+    #: `SCOPE_RESOLVER` stands in for the project's own tenancy. The shipped
+    #: default deliberately will not guess here: it resolves the scope that
+    #: *names* the caller (a personal plan), and declines to pick among the
+    #: scopes a caller merely owns, because picking arbitrarily among tenants is
+    #: how one customer ends up reading another's billing.
+    UNCONFIGURED: ClassVar = {
+        "PROVIDERS": {},
+        "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
+        "SCOPE_RESOLVER": "tests.test_provider_config.resolve_scope_by_owner",
+    }
 
-    def _member_client(self, organization):
-        from django.contrib.auth import get_user_model
+    def _owner_client(self, scope):
+        """A client acting as the scope's billing owner.
+
+        The scope reaches the view through ``request.scope``, which the shipped
+        resolver reads first, so no tenant header is involved any more.
+        """
         from rest_framework.test import APIClient
-        from vinta_orgs.conf import get_organization_membership_model
 
-        user = get_user_model().objects.create_user(username="provider-reader", password="pw")
-        get_organization_membership_model().objects.create(organization=organization, user=user)
         client = APIClient()
-        client.force_login(user)
-        client.credentials(HTTP_ORGANIZATION_SLUG=organization.slug)
+        client.force_login(scope.owner)
         return client
 
-    def test_the_organizations_provider_endpoint_is_503(self, organization):
+    def test_the_scopes_provider_endpoint_is_503(self, scope):
         from django.urls import reverse
 
-        client = self._member_client(organization)
+        client = self._owner_client(scope)
 
         with override_settings(VINTA_BILLING=self.UNCONFIGURED):
             response = client.get(reverse("billing:payment-provider"))

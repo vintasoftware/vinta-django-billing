@@ -3,24 +3,26 @@
 ``tests/test_request_seams.py`` tests ``IsBillingManager`` in isolation, by
 calling ``has_object_permission`` with an object it built. That is exactly how
 an authorization bypass survived two releases: every object-level check the
-shipped viewsets make passes a **billing root**, which is an ``Organization``,
-and nothing in the suite ever sent a request through one of those viewsets to
-find out what the permission class did with it.
+shipped viewsets make passes a **billing root**, which is a scope, and nothing
+in the suite ever sent a request through one of those viewsets to find out what
+the permission class did with it.
 
 So the tests here send real requests, through the router the README tells a
-project to mount, to the three endpoints that check against a resolved billing
-root:
+project to mount, to the endpoints that check against a resolved billing root:
 
 * ``GET  /billing/usage/occurrences/`` (``MeteredOccurrenceViewSet.list``)
 * ``POST /billing/subscription/change-plan/`` and its two sibling write actions
   (``SubscriptionViewSet.get_subscription(check_object_perms=True)``)
 * ``POST /billing/add-ons/`` (``AddOnViewSet.create``)
 
-The caller in each is an administrator of a *child* organization that bills
-against a reseller root it has no membership in. The request-level check passes
--- they do administer something -- and the object-level check is the only thing
-standing between them and the root's plan, the root's payment method and the
-root's usage.
+The caller in each is the owner of a *child* scope that bills against a reseller
+root they do not own. The request-level check passes -- they do own something --
+and the object-level check is the only thing standing between them and the
+root's plan, the root's payment method and the root's usage.
+
+The reseller shape is built with the stock ``ParentFieldHierarchy`` over
+``BillingScope.parent``. Before scopes this file had to define a hierarchy class
+of its own, because the organization model had no parent for the engine to walk.
 """
 
 from __future__ import annotations
@@ -34,43 +36,34 @@ from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
-from vinta_orgs.conf import get_organization_membership_model, get_organization_model
 
 from vinta_billing.constants import BillingInterval, BillingState, LimitKind
-from vinta_billing.hierarchy import FlatHierarchy
-from vinta_billing.models import BillingPlan, PlanLimit, Subscription
+from vinta_billing.models import BillingPlan, BillingScope, PlanLimit, Subscription
 
 
 pytestmark = pytest.mark.django_db
 
 
-class ResellerHierarchy(FlatHierarchy):
-    """One reseller root, and every other organization billing against it.
+def resolve_scope_by_owner(request):
+    """``SCOPE_RESOLVER`` for this module: the scope the caller owns.
 
-    The stock ``vinta-django-orgs`` organization model has no parent field, so a
-    project's hierarchy is the only thing that can say a child bills against an
-    ancestor -- which is what ``HIERARCHY`` is for. This is the smallest
-    strategy that produces the shape the defect lives in.
+    Stands in for whatever a project uses to decide which tenant a request acts
+    on. Deliberately generous -- it resolves *a* scope for any authenticated
+    caller -- so that the request-level check always passes and the object-level
+    check is the only thing these tests can be measuring.
     """
-
-    root_slug = "reseller-root"
-
-    def is_billing_root(self, organization):
-        return organization.slug == self.root_slug
-
-    def resolve_billing_root(self, organization):
-        if self.is_billing_root(organization):
-            return organization
-        return get_organization_model().objects.get(slug=self.root_slug)
-
-    def pooled_organization_ids(self, root):
-        return list(get_organization_model().objects.values_list("pk", flat=True))
+    user = getattr(request, "user", None)
+    if user is None or not user.is_authenticated:
+        return None
+    return BillingScope.objects.filter(owner=user).first()
 
 
-#: Applied to every test below. ``HIERARCHY`` is handed the class itself rather
-#: than a dotted path, which ``get_object_from_setting`` supports for exactly
-#: this.
-reseller_settings = override_settings(VINTA_BILLING={"HIERARCHY": ResellerHierarchy})
+reseller_settings = override_settings(
+    VINTA_BILLING={
+        "HIERARCHY": "vinta_billing.hierarchy.ParentFieldHierarchy",
+        "SCOPE_RESOLVER": "tests.test_viewset_permissions.resolve_scope_by_owner",
+    }
+)
 
 
 @pytest.fixture(autouse=True)
@@ -81,13 +74,37 @@ def _reseller_hierarchy():
 
 @pytest.fixture
 def reseller_root(db):
-    return get_organization_model().objects.create(name="Reseller", slug="reseller-root")
+    """The paying root. Parentless, so ``ParentFieldHierarchy`` calls it a root."""
+    owner = get_user_model().objects.create_user(username="root-owner", password="pw")
+    return BillingScope.objects.create(
+        scope_type="organization",
+        scope_key="reseller-root",
+        label="Reseller",
+        owner=owner,
+        content_type=_user_content_type(),
+        object_id=str(owner.pk),
+    )
 
 
 @pytest.fixture
-def child(db):
-    """An organization that bills against ``reseller_root`` and administers itself."""
-    return get_organization_model().objects.create(name="Child", slug="child")
+def child(db, reseller_root):
+    """A scope that bills against ``reseller_root`` and owns only itself."""
+    owner = get_user_model().objects.create_user(username="child-owner", password="pw")
+    return BillingScope.objects.create(
+        scope_type="organization",
+        scope_key="child",
+        label="Child",
+        owner=owner,
+        parent=reseller_root,
+        content_type=_user_content_type(),
+        object_id=str(owner.pk),
+    )
+
+
+def _user_content_type():
+    from django.contrib.contenttypes.models import ContentType
+
+    return ContentType.objects.get_for_model(get_user_model())
 
 
 @pytest.fixture
@@ -111,10 +128,10 @@ def root_plan(db):
 
 @pytest.fixture
 def root_subscription(db, reseller_root, root_plan):
-    """The subscription the child organization must not be able to touch."""
+    """The subscription the child scope must not be able to touch."""
     now = timezone.now()
     subscription = Subscription.objects.create(
-        organization=reseller_root,
+        scope=reseller_root,
         plan=root_plan,
         billing_state=BillingState.ACTIVE,
         billing_interval=BillingInterval.MONTHLY,
@@ -127,26 +144,14 @@ def root_subscription(db, reseller_root, root_plan):
     return subscription
 
 
-def _member_client(organization):
-    """An authenticated client acting as a member of ``organization``.
-
-    The organization is selected with the ``Organization-Slug`` header, which
-    ``vinta-django-orgs``' stock retrievers read and -- under
-    ``VERIFY_ORGANIZATION_MEMBERSHIP``, on by default -- refuse for a caller who
-    is not a member. So this really is "an administrator of this organization,
-    acting on it", not a caller naming somebody else's tenant.
-    """
-    user = get_user_model().objects.create_user(
-        username=f"member-of-{organization.slug}", password="pw"
-    )
-    get_organization_membership_model().objects.create(organization=organization, user=user)
+def _owner_client(scope):
+    """An authenticated client acting as the owner of ``scope``."""
     client = APIClient()
-    client.force_login(user)
-    client.credentials(HTTP_ORGANIZATION_SLUG=organization.slug)
+    client.force_login(scope.owner)
     return client
 
 
-#: The three endpoints whose only tenancy gate is ``check_object_permissions``
+#: The endpoints whose only tenancy gate is ``check_object_permissions``
 #: against the resolved billing root, as ``(url name, method, body)``.
 ROOT_GATED_ENDPOINTS = [
     ("billing:BillingUsageOccurrence-list", "get", None),
@@ -157,14 +162,13 @@ ROOT_GATED_ENDPOINTS = [
 ]
 
 
-class TestAChildOrganizationCannotActOnItsBillingRoot:
+class TestAChildScopeCannotActOnItsBillingRoot:
     """The authorization bypass, from the outside.
 
     Before the fix every one of these answered something other than 403: the
-    object-level check read ``getattr(root, "organization", None)``, found an
-    ``Organization`` has no such field, and fell back to the *request*-level
-    check -- which had already passed, because the caller does administer their
-    own organization.
+    object-level check read ``getattr(root, "scope", None)``, found that a scope
+    has no such field, and fell back to the *request*-level check -- which had
+    already passed, because the caller does own their own scope.
     """
 
     @pytest.mark.parametrize(
@@ -175,13 +179,13 @@ class TestAChildOrganizationCannotActOnItsBillingRoot:
     def test_the_child_is_refused(
         self, url_name, method, body, reseller_root, child, root_subscription
     ):
-        client = _member_client(child)
+        client = _owner_client(child)
 
         response = getattr(client, method)(reverse(url_name), body, format="json")
 
         assert response.status_code == 403, (
-            f"{url_name} answered {response.status_code}: a member of {child.slug!r} reached "
-            f"an action gated on {reseller_root.slug!r}'s subscription"
+            f"{url_name} answered {response.status_code}: the owner of {child.label!r} reached "
+            f"an action gated on {reseller_root.label!r}'s subscription"
         )
 
     def test_the_child_cannot_change_the_roots_plan(
@@ -196,7 +200,7 @@ class TestAChildOrganizationCannotActOnItsBillingRoot:
             annual_price=Decimal("5000.00"),
             is_active=True,
         )
-        client = _member_client(child)
+        client = _owner_client(child)
 
         response = client.post(
             reverse("billing:BillingSubscription-change-plan"),
@@ -213,13 +217,13 @@ class TestAChildOrganizationCannotActOnItsBillingRoot:
         assert root_subscription.plan_id == root_plan.pk
 
 
-class TestTheRootsOwnMemberIsStillAllowedThrough:
+class TestTheRootsOwnOwnerIsStillAllowedThrough:
     """The other half: the fix must refuse the child without refusing the root.
 
     Asserting ``!= 403`` rather than a specific success code -- what each of
-    these answers past the gate (a 404 for an organization with nothing to
-    cancel, a 400 for a missing field) is another test's subject; that the
-    permission layer did not stop them is this one's.
+    these answers past the gate (a 404 for a scope with nothing to cancel, a 400
+    for a missing field) is another test's subject; that the permission layer
+    did not stop them is this one's.
     """
 
     @pytest.mark.parametrize(
@@ -227,20 +231,20 @@ class TestTheRootsOwnMemberIsStillAllowedThrough:
         ROOT_GATED_ENDPOINTS,
         ids=[name for name, _, _ in ROOT_GATED_ENDPOINTS],
     )
-    def test_a_member_of_the_root_passes_the_object_gate(
+    def test_the_owner_of_the_root_passes_the_object_gate(
         self, url_name, method, body, reseller_root, root_subscription
     ):
-        client = _member_client(reseller_root)
+        client = _owner_client(reseller_root)
 
         response = getattr(client, method)(reverse(url_name), body, format="json")
 
         assert response.status_code != 403
 
 
-class TestOrganizationScopedObjectsAreUnaffected:
-    """The existing behaviour for a genuinely organization-scoped object --
-    everything with an ``organization`` foreign key -- is untouched: the check
-    is still asked about *that* object's organization."""
+class TestScopedObjectsAreUnaffected:
+    """The existing behaviour for a genuinely scoped object -- everything with a
+    ``scope`` foreign key -- is untouched: the check is still asked about *that*
+    object's scope."""
 
     def test_a_row_belonging_to_another_tenant_is_still_refused(
         self, reseller_root, child, root_subscription
@@ -250,8 +254,7 @@ class TestOrganizationScopedObjectsAreUnaffected:
         from vinta_billing.permissions import IsBillingManager
 
         request = APIRequestFactory().get("/")
-        request.user = get_user_model().objects.create_user(username="outsider", password="pw")
-        get_organization_membership_model().objects.create(organization=child, user=request.user)
-        request.organization = child
+        request.user = child.owner
+        request.scope = child
 
         assert IsBillingManager().has_object_permission(request, None, root_subscription) is False

@@ -69,7 +69,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     # After `AuthenticationMiddleware`, which `vinta_orgs.W001` checks for: from
-    # `vinta-django-orgs` 0.3 the middleware refuses an organization the caller
+    # `vinta-django-orgs` 0.3 the middleware refuses an scope the caller
     # holds no active membership in, and it needs `request.user` to do that.
     # Placed earlier, the check silently does nothing and any authenticated
     # caller can select any tenant by naming its slug.

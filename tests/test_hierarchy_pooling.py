@@ -3,7 +3,7 @@
 ``tests.test_hierarchy`` covers the walk-up (resolving a billing root) with
 fakes, because that path only reads attributes. Pooling walks *down* and issues
 real queries per level, so it needs a real model -- ``tests.testapp.Company``,
-standing in for the organization model of a project whose organizations nest.
+standing in for the scope model of a project whose scopes nest.
 """
 
 import pytest
@@ -49,7 +49,7 @@ def tree():
 
 class TestPooling:
     def test_collects_the_whole_subtree(self, tree):
-        pooled = set(FlaggedHierarchy().pooled_organization_ids(tree["root"]))
+        pooled = set(FlaggedHierarchy().pooled_scope_ids(tree["root"]))
 
         assert pooled == {
             tree["root"].pk,
@@ -64,29 +64,27 @@ class TestPooling:
         Folding it in would charge the ancestor for capacity it did not sell,
         and double-count the same usage against two ceilings.
         """
-        pooled = set(FlaggedHierarchy().pooled_organization_ids(tree["root"]))
+        pooled = set(FlaggedHierarchy().pooled_scope_ids(tree["root"]))
 
         assert tree["reseller"].pk not in pooled
         assert tree["reseller_child"].pk not in pooled
 
     def test_a_nested_root_pools_its_own_subtree(self, tree):
-        pooled = set(FlaggedHierarchy().pooled_organization_ids(tree["reseller"]))
+        pooled = set(FlaggedHierarchy().pooled_scope_ids(tree["reseller"]))
 
         assert pooled == {tree["reseller"].pk, tree["reseller_child"].pk}
 
     def test_a_leaf_pools_only_itself(self, tree):
-        assert FlaggedHierarchy().pooled_organization_ids(tree["grandchild"]) == [
-            tree["grandchild"].pk
-        ]
+        assert FlaggedHierarchy().pooled_scope_ids(tree["grandchild"]) == [tree["grandchild"].pk]
 
     def test_descends_one_query_per_level_not_one_per_row(self, tree, django_assert_num_queries):
-        """The subtree is unbounded, so a query per organization would not scale.
+        """The subtree is unbounded, so a query per scope would not scale.
 
         Three for this tree: one for the root's children, one for theirs, and
         one that finds the level below empty and stops the walk.
         """
         with django_assert_num_queries(3):
-            FlaggedHierarchy().pooled_organization_ids(tree["root"])
+            FlaggedHierarchy().pooled_scope_ids(tree["root"])
 
     def test_a_cycle_below_the_root_terminates(self, tree):
         """A cycle is reachable by descent once a cycle member is its own root.
@@ -99,7 +97,7 @@ class TestPooling:
         loop_top.parent = loop_bottom
         loop_top.save(update_fields=["parent"])
 
-        pooled = FlaggedHierarchy().pooled_organization_ids(tree["root"])
+        pooled = FlaggedHierarchy().pooled_scope_ids(tree["root"])
 
         assert len(pooled) == len(set(pooled))
 
@@ -107,4 +105,4 @@ class TestPooling:
 class TestFlatPoolingIsNotAffectedByStructure:
     def test_ignores_children_entirely(self, tree):
         """The default hierarchy pools nothing, whatever the data looks like."""
-        assert FlatHierarchy().pooled_organization_ids(tree["root"]) == [tree["root"].pk]
+        assert FlatHierarchy().pooled_scope_ids(tree["root"]) == [tree["root"].pk]

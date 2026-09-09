@@ -33,7 +33,7 @@ Five properties carry that weight:
    no-op. No period-close record model is needed. Concurrent sweeps serialise on a
    ``SELECT ... FOR UPDATE`` of the subscription row.
 
-4. **Real-money overage is not activated yet.** Every organization is on
+4. **Real-money overage is not activated yet.** Every scope is on
    ``unlimited`` (NULL ``event_occurrences`` limit) for the whole rollout, so the
    overage sum is always zero and no charge is ever issued today. That is
    deliberate: the recurrence pk-aliasing defect can inflate the metered
@@ -71,7 +71,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from vinta_billing.constants import BillingState
-from vinta_billing.counting import count_by_organization
+from vinta_billing.counting import count_by_scope
 from vinta_billing.exceptions import IllegalBillingStateTransitionError
 from vinta_billing.models import (
     BillingPeriodResourceUsage,
@@ -266,7 +266,7 @@ class CycleCloseService:
 
         **Real-money charge — do not activate before the recurrence fix ships.**
         If the effective ``event_occurrences`` limit is NULL (unlimited), this
-        charges nothing and returns immediately. Every organization is on
+        charges nothing and returns immediately. Every scope is on
         ``unlimited`` for the whole rollout, so this is the branch taken today: the
         machinery is exercised and reconciled, but no money moves. Turning the
         metered count into a charge before the upstream recurrence pk-aliasing
@@ -280,7 +280,7 @@ class CycleCloseService:
         removed. Both belt and braces are intentional.
         """
         effective_limit = self._entitlement_service.get_effective_limit(
-            subscription.organization, metered_resource_key()
+            subscription.scope, metered_resource_key()
         )
         if effective_limit.limit_value is None:
             logger.debug(
@@ -299,7 +299,7 @@ class CycleCloseService:
 
         idempotency_key = overage_idempotency_key(subscription, period_start)
         payment = self._payment_service.create_payment(
-            organization=subscription.organization,
+            scope=subscription.scope,
             currency=subscription.plan.currency,
             amount=overage_total,
             description=(
@@ -359,16 +359,16 @@ class CycleCloseService:
           runs is never the period being closed (that mismatch is *why* the period
           needs closing). Its breakdown is grouped straight off
           ``MeteredOccurrence.objects.for_billing_period(subscription.pk,
-          period_start)`` instead — **with no organization filter** — so it reads
+          period_start)`` instead — **with no scope filter** — so it reads
           byte-identically to what ``_charge_overage`` and ``reconcile_period``
           summed: those two also read ``for_billing_period(...)`` with no pool
           restriction (see ``metering_service.reconcile_period``). Filtering that
-          grouping to ``get_pooled_organization_ids(subscription.organization)``
+          grouping to ``get_pooled_scope_ids(subscription.scope)``
           would read a *different, close-time* pool than the one the charge was
           computed against — pool membership is resolved at *meter* time (a child
           can be promoted to its own billing root, e.g.
-          ``can_invite_organizations`` flipped true, any time before close), so a
-          close-time pool filter here can silently drop an organization's rows
+          ``can_invite_scopes`` flipped true, any time before close), so a
+          close-time pool filter here can silently drop an scope's rows
           from the statement while the charge still summed them, making the
           statement contradict the invoice it is supposed to explain. Its
           ``overage_unit_price`` is likewise read back from the *stamped* rows of
@@ -397,14 +397,14 @@ class CycleCloseService:
         and because nothing about "now" changes between one iteration and the
         next in the same call, those per-iteration snapshots come out identical
         across the run, so N catch-up statements record identical prepaid
-        ``total``/``by_organization`` figures. That is the point-in-time snapshot
+        ``total``/``by_scope`` figures. That is the point-in-time snapshot
         working as designed, not a bug: only ``event_occurrences`` (and the money
         columns derived from it) actually vary per period in a catch-up run.
 
-        ``subscription.organization`` is used directly as the billing root rather
+        ``subscription.scope`` is used directly as the billing root rather
         than re-resolving it through ``resolve_billing_root``: every ``Subscription``
         belongs to a billing root by construction
-        (``SubscriptionService.create_subscription_for_organization`` refuses to
+        (``SubscriptionService.create_subscription_for_scope`` refuses to
         create one for a reseller child) and ``subscriptions_to_close`` only ever
         selects from ``MeteringService.subscriptions_to_sweep()``'s root ids — so
         that walk would terminate on its first step here regardless. Both the
@@ -420,9 +420,9 @@ class CycleCloseService:
         changes. All of this runs inside ``close_subscription``'s
         ``SELECT ... FOR UPDATE`` on the subscription row, so avoiding that
         duplicate work also shortens how long a catch-up run holds that lock
-        across other guarded creates for the same organization. The pooled
-        organization ids are resolved **once** here, via
-        ``get_pooled_organization_ids(root)``, and passed to every
+        across other guarded creates for the same scope. The pooled
+        scope ids are resolved **once** here, via
+        ``get_pooled_scope_ids(root)``, and passed to every
         ``usage_breakdown_for_root`` call in the resource loop, rather than
         re-walking the subtree BFS on each of the seven non-``event_occurrences``
         resources.
@@ -485,7 +485,7 @@ class CycleCloseService:
                     subscription=subscription,
                     billing_period_start=period_start,
                     defaults={
-                        "organization": subscription.organization,
+                        "scope": subscription.scope,
                         "billing_period_end": period_end,
                         "plan_slug": subscription.plan.slug,
                         "plan_name": subscription.plan.name,
@@ -509,28 +509,26 @@ class CycleCloseService:
                         summary.pk,
                     )
 
-                root = subscription.organization
+                root = subscription.scope
                 # Resolved once, not once per resource: every non-event_occurrences
                 # resource pools against the same subtree, and re-walking that BFS
                 # seven times over would be work spent while holding the
                 # subscription row's SELECT ... FOR UPDATE for no new information.
-                pooled_organization_ids = self._entitlement_service.get_pooled_organization_ids(
-                    root
-                )
+                pooled_scope_ids = self._entitlement_service.get_pooled_scope_ids(root)
                 resource_rows: list[BillingPeriodResourceUsage] = []
                 for resource_key in resources.keys():
                     effective_limit = self._entitlement_service.effective_limit_for_subscription(
                         subscription, resource_key, root
                     )
                     if resource_key == metered_resource_key():
-                        # No `.for_organizations(...)` pool filter here — see the
+                        # No `.for_scopes(...)` pool filter here — see the
                         # docstring above. Grouped through the same helper every
                         # other usage counter uses (its load-bearing `.order_by()`
                         # and composite-pk caveats apply here too).
                         occurrence_queryset = MeteredOccurrence.objects.for_billing_period(
                             subscription.pk, period_start
                         )
-                        usage_breakdown = count_by_organization(occurrence_queryset)
+                        usage_breakdown = count_by_scope(occurrence_queryset)
                         total: int | None = sum(usage_breakdown.values())
                         stamped_overage_prices = list(
                             occurrence_queryset.filter(is_within_allowance=False)
@@ -566,7 +564,7 @@ class CycleCloseService:
                             root,
                             resource_key,
                             subscription,
-                            pooled_organization_ids=pooled_organization_ids,
+                            pooled_scope_ids=pooled_scope_ids,
                         )
                         # `{}` is ambiguous between "no counter registered for this
                         # resource" and "a real counter found zero usage"; only the
@@ -585,7 +583,7 @@ class CycleCloseService:
                             # strings on write, so writing str here up front keeps
                             # the in-memory value identical to what a round-trip
                             # read back from Postgres returns.
-                            by_organization={str(k): v for k, v in usage_breakdown.items()},
+                            by_scope={str(k): v for k, v in usage_breakdown.items()},
                         )
                     )
                 BillingPeriodResourceUsage.objects.bulk_create(resource_rows, ignore_conflicts=True)
@@ -654,7 +652,7 @@ class CycleCloseService:
         grace episode's resolution is ``DunningService``'s job (it inspects the
         window on every ``process_dunning`` tick), and the downgrade-grace/
         billing-state interaction still needs product sign-off. That is inert today
-        — no organization can voluntarily downgrade while every plan is
+        — no scope can voluntarily downgrade while every plan is
         ``unlimited`` — so this flip cannot fire against real data yet.
         """
         pending_plan = subscription.pending_plan

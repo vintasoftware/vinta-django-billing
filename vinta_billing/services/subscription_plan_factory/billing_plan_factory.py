@@ -9,7 +9,7 @@ class BillingPlanFactory(BaseSubscriptionPlanFactory):
     ``Subscription``'s catalog ``BillingPlan``.
 
     The plan a subscriber is charged against is the catalog row, read straight
-    off ``subscription.plan`` -- there is no per-organization plan model to
+    off ``subscription.plan`` -- there is no per-scope plan model to
     resolve through first.
     """
 

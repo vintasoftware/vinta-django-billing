@@ -5,7 +5,7 @@ the ``parent`` chain) plus a subscription fetch plus an entitlement-row fetch. T
 is used on the two hottest call sites:
 
 - ``PublicApiSystemUserMiddleware._has_partner_api_entitlement`` checks ``partner_api``
-  on every request that resolved an authenticated organization.
+  on every request that resolved an authenticated scope.
 - ``resolve_branding_for_display`` runs on ``brandingForTenant``, an *unauthenticated*
   public query whose ``tenant_id`` is attacker-supplied.
 
@@ -36,8 +36,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from vinta_orgs.models import AbstractOrganization
-
+    from vinta_billing.models import AbstractBillingScope
     from vinta_billing.services.entitlement_service import EntitlementService
 
 
@@ -65,19 +64,19 @@ def entitlement_request_cache():
 
 def has_entitlement_cached(
     entitlement_service: "EntitlementService",
-    organization: "AbstractOrganization",
+    scope: "AbstractBillingScope",
     entitlement_key: str,
 ) -> bool:
     """``entitlement_service.has_entitlement``, memoized when a cache is active.
 
-    Keyed on the *asked-for* organization rather than its billing root: resolving the
+    Keyed on the *asked-for* scope rather than its billing root: resolving the
     root is itself part of the cost being avoided.
     """
     cache = _entitlement_cache.get()
     if cache is None:
-        return entitlement_service.has_entitlement(organization, entitlement_key)
+        return entitlement_service.has_entitlement(scope, entitlement_key)
 
-    key = (organization.pk, entitlement_key)
+    key = (scope.pk, entitlement_key)
     if key not in cache:
-        cache[key] = entitlement_service.has_entitlement(organization, entitlement_key)
+        cache[key] = entitlement_service.has_entitlement(scope, entitlement_key)
     return cache[key]

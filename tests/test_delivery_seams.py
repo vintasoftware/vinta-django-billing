@@ -20,10 +20,8 @@ class RecordingNotifier:
 
 
 class StubSource:
-    def iter_occurrences(self, organization_ids, window_start, window_end):
-        return [
-            Occurrence(external_id=1, organization_id=organization_ids[0], occurred_at=window_start)
-        ]
+    def iter_occurrences(self, scope_ids, window_start, window_end):
+        return [Occurrence(external_id=1, scope_id=scope_ids[0], occurred_at=window_start)]
 
     def describe(self, external_ids):
         return {external_id: {"title": "n%d" % external_id} for external_id in external_ids}
@@ -87,7 +85,7 @@ class TestOccurrenceSource:
     def test_occurrences_carry_a_default_quantity_of_one(self):
         occurrence = Occurrence(
             external_id=1,
-            organization_id=2,
+            scope_id=2,
             occurred_at=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
         )
 

@@ -57,20 +57,34 @@ def test_registering_a_resource_does_not_ask_for_a_migration():
 
 
 @pytest.mark.django_db
-def test_the_organization_column_points_at_the_swappable_model():
-    """Scoped tables must follow `ORGANIZATION_MODEL`, not a hardcoded table.
+def test_every_scope_column_points_at_the_swappable_model():
+    """Scoped tables must follow `BILLING_SCOPE_MODEL`, not a hardcoded table.
 
     Getting this wrong only shows up in a project that swapped the model, which
-    is exactly the project least able to work around it.
+    is exactly the project least able to work around it. Checked across all five
+    rather than on one model, because a single hardcoded target among them is
+    exactly the kind of thing a bulk rename leaves behind.
     """
-    from vinta_orgs.conf import get_organization_model
+    from vinta_billing.conf import get_scope_model
+    from vinta_billing.models import (
+        BillingPeriodSummary,
+        BillingProfile,
+        MeteredOccurrence,
+        PaymentMethod,
+        Subscription,
+    )
 
-    from vinta_billing.models import BillingProfile
+    for model in (
+        BillingProfile,
+        Subscription,
+        PaymentMethod,
+        MeteredOccurrence,
+        BillingPeriodSummary,
+    ):
+        field = model._meta.get_field("scope")
 
-    field = BillingProfile._meta.get_field("organization")
-
-    assert isinstance(field, models.ForeignKey | models.OneToOneField)
-    assert field.related_model is get_organization_model()
+        assert isinstance(field, models.ForeignKey | models.OneToOneField), model
+        assert field.related_model is get_scope_model(), model
 
 
 def test_a_fresh_registry_starts_empty():

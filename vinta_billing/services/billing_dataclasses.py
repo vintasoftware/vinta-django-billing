@@ -3,7 +3,7 @@
 Kept separate from ``vinta_billing/services/dataclasses.py`` (which models the
 *payment gateway* wire shapes) because these describe this app's own
 limits/entitlements domain and are consumed by non-payments callers — the
-organization, calendar, webhooks, and public-API services that ask "may I create
+scope, calendar, webhooks, and public-API services that ask "may I create
 one more of these?".
 
 Not yet added: ``UsageSnapshot``, the periodic materialization of
@@ -27,7 +27,7 @@ class EffectiveLimit:
     plus the quantity of every active ``SubscriptionAddOn`` for the same resource.
     **``None`` means unlimited, never zero** — a resource with no
     ``SubscriptionPlanLimit`` row at all also resolves to ``None``, so a missing
-    seed row cannot lock an organization out of a resource it used to be able to
+    seed row cannot lock an scope out of a resource it used to be able to
     create (the fail-open rule).
 
     Deliberately carries no ``current_usage`` field: usage is a subtree-wide
@@ -58,7 +58,7 @@ class LimitCheckResult:
     ``current_usage is None`` means **usage was not counted**, which happens on
     exactly one path: an unlimited ceiling, where the answer cannot depend on it
     and counting would make every guarded create on the ``unlimited`` plan (i.e.
-    every organization, for the whole rollout) pay for several queries nobody
+    every scope, for the whole rollout) pay for several queries nobody
     reads. It is ``None`` rather than ``0`` so a caller cannot mistake "not
     measured" for "measured, and it was zero". It is always an ``int`` on the
     branch that matters — ``allowed is False`` — which is the only branch the
@@ -92,7 +92,7 @@ class OccurrenceIdentity:
     ``*_tz_unaware`` field, which is not comparable across timezones.
     """
 
-    organization_id: int
+    scope_id: int
     event_id: int
     occurrence_start: datetime.datetime
 

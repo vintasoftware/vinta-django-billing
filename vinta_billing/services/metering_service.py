@@ -9,7 +9,7 @@ no failing test, no alert; just a wrong number.
 Four properties carry that weight, in order of importance:
 
 1. **The unique constraint is the mechanism.**
-   ``MeteredOccurrence(organization, event_id, occurrence_start)`` plus
+   ``MeteredOccurrence(scope, event_id, occurrence_start)`` plus
    ``bulk_create(..., ignore_conflicts=True)`` is what makes re-running a window,
    or running two overlapping windows, a no-op at the database level. The sweep
    window deliberately overlaps the previous one so a missed run self-heals;
@@ -49,8 +49,8 @@ from collections.abc import Iterable, Sequence
 from decimal import Decimal
 
 from django.db import transaction
-from vinta_orgs.conf import get_organization_model
 
+from vinta_billing.conf import get_scope_model
 from vinta_billing.metering import get_occurrence_source
 from vinta_billing.models import MeteredOccurrence, Subscription
 from vinta_billing.services.billing_dataclasses import (
@@ -91,7 +91,7 @@ ZERO_PRICE = Decimal("0")
 def _identity_sort_key(identity: OccurrenceIdentity) -> tuple[datetime.datetime, int, int]:
     """Stable, chronological ordering for the drift lists in a reconciliation report,
     so two runs over the same data produce byte-identical output."""
-    return (identity.occurrence_start, identity.organization_id, identity.event_id)
+    return (identity.occurrence_start, identity.scope_id, identity.event_id)
 
 
 class MeteringService:
@@ -152,7 +152,7 @@ class MeteringService:
             )
 
         with transaction.atomic():
-            self._entitlement_service.lock_billing_root(subscription.organization)
+            self._entitlement_service.lock_billing_root(subscription.scope)
             identities = self.expand_occurrence_identities(subscription, window_start, window_end)
             recorded = self._record(subscription, identities)
 
@@ -182,7 +182,7 @@ class MeteringService:
             return 0
 
         effective_limit = self._entitlement_service.get_effective_limit(
-            subscription.organization, metered_resource_key()
+            subscription.scope, metered_resource_key()
         )
         already_recorded = self._existing_identities(subscription, identities)
         new_identities = sorted(
@@ -222,7 +222,7 @@ class MeteringService:
             is_within_allowance, unit_price = self._price_for(effective_limit, position)
             rows.append(
                 MeteredOccurrence(
-                    organization_id=identity.organization_id,
+                    scope_id=identity.scope_id,
                     subscription=subscription,
                     event_id=identity.event_id,
                     occurrence_start=identity.occurrence_start,
@@ -243,7 +243,7 @@ class MeteringService:
         of a billing period (zero-based).
 
         ``limit_value is None`` is unlimited — the whole rollout runs there, since
-        every organization sits on the ``unlimited`` plan — and everything is
+        every scope sits on the ``unlimited`` plan — and everything is
         inside the allowance at no cost.
         """
         if effective_limit.limit_value is None or position < effective_limit.limit_value:
@@ -273,21 +273,21 @@ class MeteringService:
 
         Queried by the unique-constraint tuple itself so this cannot disagree with
         what an insert would conflict on. Scoped by ``occurrence_start`` range and
-        the pooled organization ids rather than by an ``OR`` over every tuple, so
+        the pooled scope ids rather than by an ``OR`` over every tuple, so
         the query stays one indexable predicate regardless of window size.
 
         **Deliberately not filtered by ``subscription``.** The constraint is
-        ``(organization, event_id, occurrence_start)`` — no subscription column — so
+        ``(scope, event_id, occurrence_start)`` — no subscription column — so
         narrowing here by ``subscription_id`` would make this pre-filter *stricter*
         than the thing it is predicting. A row recorded under a different
-        subscription for the same organization would then be invisible here but
+        subscription for the same scope would then be invisible here but
         still conflict on insert: the occurrence would silently consume an allowance
         position without producing a row, pushing a genuinely new occurrence into
-        overage while the organization is under its ceiling. An overcharge that
+        overage while the scope is under its ceiling. An overcharge that
         ``reconcile_period`` reports as ``drift == 0``, because the identity sets
         still agree.
 
-        That state is reachable without any data corruption: an organization that
+        That state is reachable without any data corruption: an scope that
         was its own billing root (and so had its own ``Subscription``, and rows
         stamped with it) can be re-parented under a reseller and demoted, after
         which the ancestor's sweep meters its events under the *ancestor's*
@@ -300,20 +300,20 @@ class MeteringService:
         onto new rows, and keeping the signature honest about that is cheaper than a
         reader wondering why it was dropped.
         """
-        organization_ids = {identity.organization_id for identity in identities}
+        scope_ids = {identity.scope_id for identity in identities}
         starts = [identity.occurrence_start for identity in identities]
-        existing = MeteredOccurrence.objects.for_organizations(sorted(organization_ids)).filter(
+        existing = MeteredOccurrence.objects.for_scopes(sorted(scope_ids)).filter(
             occurrence_start__gte=min(starts),
             occurrence_start__lte=max(starts),
         )
         return {
             OccurrenceIdentity(
-                organization_id=organization_id,
+                scope_id=scope_id,
                 event_id=event_id,
                 occurrence_start=occurrence_start,
             )
-            for organization_id, event_id, occurrence_start in existing.values_list(
-                "organization_id", "event_id", "occurrence_start"
+            for scope_id, event_id, occurrence_start in existing.values_list(
+                "scope_id", "event_id", "occurrence_start"
             )
         }
 
@@ -342,33 +342,31 @@ class MeteringService:
         *within a single statement*, and this way ``occurrences_seen`` counts
         distinct occurrences rather than expansion outputs.
 
-        Occurrences naming an organization outside the pooled subtree are
+        Occurrences naming an scope outside the pooled subtree are
         dropped rather than billed to the wrong root: the source is handed the
         pool, so reporting outside it is a bug in the source, and silently
         charging another tenant for it would be worse than under-counting.
         """
-        organization_ids = self._entitlement_service.get_pooled_organization_ids(
-            subscription.organization
-        )
-        pool = set(organization_ids)
+        scope_ids = self._entitlement_service.get_pooled_scope_ids(subscription.scope)
+        pool = set(scope_ids)
 
         identities: dict[OccurrenceIdentity, None] = {}
         for occurrence in get_occurrence_source().iter_occurrences(
-            organization_ids, window_start, window_end
+            scope_ids, window_start, window_end
         ):
             if not window_start <= occurrence.occurred_at < window_end:
                 continue
-            if occurrence.organization_id not in pool:
+            if occurrence.scope_id not in pool:
                 logger.warning(
-                    "Occurrence source reported organization %s, which is outside "
+                    "Occurrence source reported scope %s, which is outside "
                     "the pooled subtree of subscription %s; skipping.",
-                    occurrence.organization_id,
+                    occurrence.scope_id,
                     subscription.pk,
                 )
                 continue
             identities[
                 OccurrenceIdentity(
-                    organization_id=occurrence.organization_id,
+                    scope_id=occurrence.scope_id,
                     event_id=occurrence.external_id,
                     occurrence_start=occurrence.occurred_at,
                 )
@@ -418,17 +416,17 @@ class MeteringService:
         expected = set(self.expand_occurrence_identities(subscription, period_start, period_end))
         metered = {
             OccurrenceIdentity(
-                organization_id=organization_id,
+                scope_id=scope_id,
                 event_id=event_id,
                 occurrence_start=occurrence_start,
             )
             for (
-                organization_id,
+                scope_id,
                 event_id,
                 occurrence_start,
             ) in MeteredOccurrence.objects.for_billing_period(
                 subscription.pk, period_start
-            ).values_list("organization_id", "event_id", "occurrence_start")
+            ).values_list("scope_id", "event_id", "occurrence_start")
         }
         return ReconciliationReport(
             subscription_id=subscription.pk,
@@ -448,12 +446,12 @@ class MeteringService:
     def subscriptions_to_sweep() -> Iterable[int]:
         """Ids of every subscription the periodic sweep should meter.
 
-        Subscriptions **whose organization is currently a billing root**, not every
+        Subscriptions **whose scope is currently a billing root**, not every
         ``Subscription`` row. The two are supposed to be the same set —
-        ``SubscriptionService.create_subscription_for_organization`` skips reseller
+        ``SubscriptionService.create_subscription_for_scope`` skips reseller
         children — but that is an invariant nothing enforces at the database level,
-        and it is broken by an ordinary admin action: re-parenting an organization
-        under a reseller, or clearing ``can_invite_organizations``, demotes a root
+        and it is broken by an ordinary admin action: re-parenting an scope
+        under a reseller, or clearing ``can_invite_scopes``, demotes a root
         while leaving its ``Subscription`` behind.
 
         Sweeping a demoted root is not merely redundant work.
@@ -466,27 +464,25 @@ class MeteringService:
 
         Exclusions are logged rather than silently dropped: a non-empty exclusion
         list means the invariant is violated and somebody should reconcile that
-        organization's ledger, which is invisible if the sweep just skips it.
+        scope's ledger, which is invisible if the sweep just skips it.
         """
         all_ids = set(Subscription.objects.values_list("pk", flat=True))
         root_ids = set(
             Subscription.objects.filter(
-                # Through a subquery on Organization rather than a `organization__`
+                # Through a subquery on Scope rather than a `scope__`
                 # -prefixed copy of the predicate, so `billing_root_filter` stays the
                 # single definition of "is a billing root" (see `is_billing_root`).
                 # ``_default_manager`` rather than ``objects``: the configured model
-                # is only known to be an ``AbstractOrganization``, which declares no
+                # is only known to be an ``AbstractBillingScope``, which declares no
                 # manager of its own -- the same access ``vinta-django-orgs`` uses
                 # internally for the same reason.
-                organization__in=get_organization_model()._default_manager.filter(
-                    billing_root_filter()
-                )
+                scope__in=get_scope_model()._default_manager.filter(billing_root_filter())
             ).values_list("pk", flat=True)
         )
         excluded = all_ids - root_ids
         if excluded:
             logger.warning(
-                "Excluding %s subscription(s) from the metering sweep: their organizations are "
+                "Excluding %s subscription(s) from the metering sweep: their scopes are "
                 "no longer billing roots, so their usage pools against an ancestor. Ids: %s. "
                 "Their existing ledger rows are untouched and may need reconciling.",
                 len(excluded),

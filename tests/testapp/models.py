@@ -4,36 +4,56 @@ Deliberately trivial and deliberately *not* billing concepts: the point of the
 suite is that the engine counts things it has never heard of. A ``Widget`` is a
 prepaid resource, a ``Seat`` is the two-table kind (rows plus pending
 invitations), and neither is mentioned anywhere in ``billing``.
+
+Each one hangs off a plain foreign key to the configured scope model. There is
+no scoping mixin and no scoped default manager, which matters for the counters
+in ``billing_resources``: usage pools across a whole billing subtree, so a
+counter is asked about several scopes at once and must never be narrowed to
+whichever one a request happened to bind.
 """
 
 from django.conf import settings
 from django.db import models
-from vinta_orgs.mixins import SingleOrganizationModelMixin
+
+from vinta_billing.conf import scope_model_string
 
 
-class Widget(SingleOrganizationModelMixin):
+class ScopedModel(models.Model):
+    """A host-application row that belongs to one billing scope."""
+
+    scope = models.ForeignKey(
+        scope_model_string(),
+        on_delete=models.CASCADE,
+        related_name="+",
+    )
+
+    class Meta:
+        abstract = True
+
+
+class Widget(ScopedModel):
     name = models.CharField(max_length=100)
 
     def __str__(self) -> str:
         return self.name
 
 
-class Seat(SingleOrganizationModelMixin):
+class Seat(ScopedModel):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, related_name="testapp_seats", on_delete=models.CASCADE
     )
     is_active = models.BooleanField(default=True)
 
     def __str__(self) -> str:
-        return "%s @ %s" % (self.user, self.organization)
+        return "%s @ %s" % (self.user, self.scope)
 
 
-class SeatInvitation(SingleOrganizationModelMixin):
+class SeatInvitation(ScopedModel):
     """A seat held open for somebody who has not accepted yet.
 
     Exists so the suite covers the two-table counter shape: a pending invitation
-    occupies a seat, and must be counted alongside the real ones or an
-    organization can invite past its ceiling and blow through it on accept.
+    occupies a seat, and must be counted alongside the real ones or a scope can
+    invite past its ceiling and blow through it on accept.
     """
 
     email = models.EmailField()
@@ -44,12 +64,11 @@ class SeatInvitation(SingleOrganizationModelMixin):
 
 
 class Company(models.Model):
-    """An organization-like model with a parent chain.
+    """A tenant-like model with a parent chain.
 
-    Not an organization -- ``vinta-django-orgs``' model has no parent, which is
-    the whole reason :class:`vinta_billing.hierarchy.ParentFieldHierarchy` exists.
-    This stands in for the organization model of a project that *does* nest, so
-    the subtree walk is exercised against real queries rather than fakes.
+    Stands in for the payer model of a project that nests. Its own ``parent`` is
+    what ``ParentFieldHierarchy`` is pointed at when the suite exercises a
+    hierarchy that follows the *project's* tree rather than the scope tree.
     """
 
     name = models.CharField(max_length=100)

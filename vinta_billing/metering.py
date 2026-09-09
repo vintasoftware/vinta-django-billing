@@ -39,7 +39,7 @@ class Occurrence:
     """
 
     external_id: int
-    organization_id: int
+    scope_id: int
     occurred_at: datetime.datetime
     quantity: int = 1
     detail: dict[str, Any] = field(default_factory=dict)
@@ -51,7 +51,7 @@ class OccurrenceSource(Protocol):
 
     def iter_occurrences(
         self,
-        organization_ids: Sequence[int],
+        scope_ids: Sequence[int],
         window_start: datetime.datetime,
         window_end: datetime.datetime,
     ) -> Iterable[Occurrence]:
@@ -78,7 +78,7 @@ class NullOccurrenceSource:
 
     def iter_occurrences(
         self,
-        organization_ids: Sequence[int],
+        scope_ids: Sequence[int],
         window_start: datetime.datetime,
         window_end: datetime.datetime,
     ) -> Iterable[Occurrence]:

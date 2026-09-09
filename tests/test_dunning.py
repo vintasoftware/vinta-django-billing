@@ -169,7 +169,7 @@ class TestEnterGrace:
         assert subscription.billing_state == state
 
     def test_clears_a_pending_plan_change_confirmation(self, service, subscription):
-        """A failed first-upgrade charge must not leave the organization stuck
+        """A failed first-upgrade charge must not leave the scope stuck
         waiting for a confirmation that will never come."""
         subscription.billing_state = BillingState.FREE
         subscription.plan_change_pending_confirmation = True
@@ -358,10 +358,10 @@ class TestProcessGrace:
 
 class TestExpireGrace:
     def test_usage_over_the_free_ceiling_is_restricted(
-        self, service, subscription, organization, free_plan
+        self, service, subscription, scope, free_plan
     ):
-        Widget.objects.create(organization=organization, name="a")
-        Widget.objects.create(organization=organization, name="b")  # free plan allows 1
+        Widget.objects.create(scope=scope, name="a")
+        Widget.objects.create(scope=scope, name="b")  # free plan allows 1
         subscription.billing_state = BillingState.GRACE
         subscription.save(update_fields=["billing_state"])
 
@@ -373,7 +373,7 @@ class TestExpireGrace:
     def test_usage_under_the_free_ceiling_falls_back_to_free(
         self, service, subscription, free_plan
     ):
-        """An organization that already fits the free plan is not suspended."""
+        """An scope that already fits the free plan is not suspended."""
         subscription.billing_state = BillingState.GRACE
         subscription.save(update_fields=["billing_state"])
 
@@ -411,7 +411,7 @@ class TestExpireGrace:
 
     def test_with_no_free_plan_in_the_catalog_it_restricts(self, service, subscription):
         """Nowhere to fall back to, so the safe outcome is to block writes rather
-        than leave an unpaid organization on a paid plan."""
+        than leave an unpaid scope on a paid plan."""
         subscription.billing_state = BillingState.GRACE
         subscription.save(update_fields=["billing_state"])
 
@@ -436,10 +436,10 @@ class TestRestrictedSweep:
         assert subscription.billing_state == BillingState.FREE
 
     def test_a_restricted_organization_still_over_the_ceiling_stays_put(
-        self, service, subscription, organization, free_plan
+        self, service, subscription, scope, free_plan
     ):
-        Widget.objects.create(organization=organization, name="a")
-        Widget.objects.create(organization=organization, name="b")
+        Widget.objects.create(scope=scope, name="a")
+        Widget.objects.create(scope=scope, name="b")
         subscription.billing_state = BillingState.RESTRICTED
         subscription.save(update_fields=["billing_state"])
 

@@ -4,11 +4,10 @@
 
 import pytest
 from model_bakery import baker
-from vinta_orgs.conf import get_organization_model
 
 from vinta_billing.constants import PaymentProviders
 from vinta_billing.exceptions import PaymentProviderNotConfiguredError
-from vinta_billing.models import BillingProfile
+from vinta_billing.models import BillingProfile, BillingScope
 from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 from vinta_billing.services.provider_credentials import (
     PublicProviderCredentials,
@@ -77,12 +76,12 @@ class TestResolvePublicCredentials:
 
 
 class TestPaymentProviderResolver:
-    def test_resolve_for_organization_returns_the_pin_when_set(self):
-        organization = baker.make(get_organization_model())
+    def test_resolve_for_scope_returns_the_pin_when_set(self):
+        scope = baker.make(BillingScope, object_id="1")
         billing_address = baker.make("vinta_billing.BillingAddress")
         baker.make(
             BillingProfile,
-            organization=organization,
+            scope=scope,
             contact_email="billing@example.com",
             document_type="CPF",
             document_number="12345678900",
@@ -92,18 +91,18 @@ class TestPaymentProviderResolver:
 
         resolver = PaymentProviderResolver()
 
-        assert resolver.resolve_for_organization(organization) == PaymentProviders.MERCADOPAGO
+        assert resolver.resolve_for_scope(scope) == PaymentProviders.MERCADOPAGO
 
-    def test_resolve_for_organization_returns_the_default_when_unpinned(self, settings):
+    def test_resolve_for_scope_returns_the_default_when_unpinned(self, settings):
         settings.VINTA_BILLING = {
             **settings.VINTA_BILLING,
             "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
         }
-        organization = baker.make(get_organization_model())
+        scope = baker.make(BillingScope, object_id="1")
         billing_address = baker.make("vinta_billing.BillingAddress")
         baker.make(
             BillingProfile,
-            organization=organization,
+            scope=scope,
             contact_email="billing@example.com",
             document_type="CPF",
             document_number="12345678900",
@@ -113,18 +112,18 @@ class TestPaymentProviderResolver:
 
         resolver = PaymentProviderResolver()
 
-        assert resolver.resolve_for_organization(organization) == PaymentProviders.STRIPE
+        assert resolver.resolve_for_scope(scope) == PaymentProviders.STRIPE
 
-    def test_resolve_for_organization_returns_the_default_with_no_billing_profile(self, settings):
+    def test_resolve_for_scope_returns_the_default_with_no_billing_profile(self, settings):
         settings.VINTA_BILLING = {
             **settings.VINTA_BILLING,
             "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
         }
-        organization = baker.make(get_organization_model())
+        scope = baker.make(BillingScope, object_id="1")
 
         resolver = PaymentProviderResolver()
 
-        assert resolver.resolve_for_organization(organization) == PaymentProviders.STRIPE
+        assert resolver.resolve_for_scope(scope) == PaymentProviders.STRIPE
 
     def test_resolve_default_reads_the_settings_namespace(self, settings):
         settings.VINTA_BILLING = {

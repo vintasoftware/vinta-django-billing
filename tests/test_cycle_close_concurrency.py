@@ -109,11 +109,11 @@ class SleepingPaymentService:
 
 
 @pytest.fixture
-def closable(db, organization, plan, make_subscription):
+def closable(db, scope, plan, make_subscription):
     """A billing-root subscription on a finite postpaid allowance, pinned to a
     monthly cycle that has already ended so a close has real work to do."""
     subscription = make_subscription(
-        organization,
+        scope,
         plan,
         billing_interval=BillingInterval.MONTHLY,
         billing_state=BillingState.ACTIVE,
@@ -126,10 +126,10 @@ def closable(db, organization, plan, make_subscription):
     return subscription
 
 
-def _seed_overage(subscription, organization, count):
+def _seed_overage(subscription, scope, count):
     MeteredOccurrence.objects.bulk_create(
         MeteredOccurrence(
-            organization=organization,
+            scope=scope,
             subscription=subscription,
             event_id=index,
             occurrence_start=PERIOD_START + datetime.timedelta(days=index),
@@ -161,13 +161,11 @@ def _two_concurrent_closes(service, subscription):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_two_concurrent_closes_charge_the_period_exactly_once(
-    closable, organization, billing_profile
-):
+def test_two_concurrent_closes_charge_the_period_exactly_once(closable, scope, billing_profile):
     """The claim ``close_subscription``'s docstring makes: a concurrent sweep
     blocks until this one commits, then re-reads the rolled period and finds
     nothing left to close."""
-    _seed_overage(closable, organization, 2)  # 2 x 0.50 = 1.00
+    _seed_overage(closable, scope, 2)  # 2 x 0.50 = 1.00
     payment_service = SleepingPaymentService(
         billing_profile, race_window_seconds=RACE_WINDOW_SECONDS
     )
@@ -189,7 +187,7 @@ def test_two_concurrent_closes_charge_the_period_exactly_once(
 
 @pytest.mark.django_db(transaction=True)
 def test_the_loser_actually_waits_for_the_winner_rather_than_failing_fast(
-    closable, organization, billing_profile
+    closable, scope, billing_profile
 ):
     """The lock has to *block*, not skip. A `select_for_update(nowait=True)` or a
     `skip_locked` would also produce ``[0, 1]`` -- and would silently drop a
@@ -199,7 +197,7 @@ def test_the_loser_actually_waits_for_the_winner_rather_than_failing_fast(
     The winner sleeps ``RACE_WINDOW_SECONDS`` inside its transaction, so if the
     loser were failing fast the whole thing would finish in well under that.
     """
-    _seed_overage(closable, organization, 1)
+    _seed_overage(closable, scope, 1)
     payment_service = SleepingPaymentService(
         billing_profile, race_window_seconds=RACE_WINDOW_SECONDS
     )

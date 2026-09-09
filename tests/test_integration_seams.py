@@ -3,7 +3,7 @@
 Both exist because of what a host application had to do without them. It ran
 its own copy of the REST layer -- seven viewset subclasses across two modules,
 plus a route table -- for two reasons and no others: its DRF surface resolves
-the acting organization from a header of its own, and its services are built by
+the acting scope from a header of its own, and its services are built by
 its own ``dependency_injector`` container. Neither is a thing a billing library
 should own, and neither was reachable from the outside, so the whole layer had
 to be restated to change two lines of it.
@@ -34,6 +34,7 @@ from vinta_billing.billing_views import (
     BillingUsageViewSet,
     SubscriptionViewSet,
 )
+from vinta_billing.conf import get_scope_model
 from vinta_billing.routing import get_routes
 from vinta_billing.services.container import (
     get_entitlement_service,
@@ -50,11 +51,11 @@ class HeaderScopedViewMixin:
 
     Modelled on ``vinta_orgs.drf.OrganizationScopedAPIViewMixin`` and the host
     mixin built on it: resolution happens between "``request.user`` is real" and
-    "permissions run", it *assigns* ``request.organization`` as a side effect,
-    and ``resolve_organization`` returns ``None``.
+    "permissions run", it *assigns* ``request.scope`` as a side effect,
+    and ``resolve_scope`` returns ``None``.
 
     That last detail is the one that matters. This mixin goes in front, so its
-    ``resolve_organization`` wins on name resolution over the package's, whose
+    ``resolve_scope`` wins on name resolution over the package's, whose
     caller assigns whatever came back -- and assigning that ``None`` would undo
     the resolution and 403 every billing endpoint. The host carried a mixin
     whose entire job was working around that.
@@ -65,13 +66,13 @@ class HeaderScopedViewMixin:
 
     def perform_authentication(self, request):
         super().perform_authentication(request)
-        self.resolve_organization(request)
+        self.resolve_scope(request)
 
-    def resolve_organization(self, request):
-        raw_id = request.headers.get("X-Organization-Id")
+    def resolve_scope(self, request):
+        raw_id = request.headers.get("X-Scope-Id")
         HeaderScopedViewMixin.resolved.append(raw_id or "")
-        request.organization = (
-            get_organization_model().objects.filter(pk=raw_id).first() if raw_id else None
+        request.scope = (
+            get_scope_model()._default_manager.filter(pk=raw_id).first() if raw_id else None
         )
         return None
 
@@ -97,7 +98,7 @@ class FakeContainer:
         return service
 
 
-def _mount(view_mixin=None, service_container=None):
+def _mount(view_mixin=None, service_container=None, scope_resolver=None):
     """Rebuild ``tests.urls_seams`` under the given settings, and return the override.
 
     Used as a context manager. The reload is what makes this a real mounting
@@ -110,6 +111,8 @@ def _mount(view_mixin=None, service_container=None):
         billing_settings["VIEW_MIXIN"] = view_mixin
     if service_container is not None:
         billing_settings["SERVICE_CONTAINER"] = service_container
+    if scope_resolver is not None:
+        billing_settings["SCOPE_RESOLVER"] = scope_resolver
 
     class _Mounted:
         def __enter__(self):
@@ -183,12 +186,12 @@ class TestTheViewMixinSeam:
 
     def test_a_mixin_that_extends_this_packages_own_still_linearizes(self):
         """The other shape a project's mixin takes: a subclass of the one
-        shipped here, overriding ``resolve_organization`` alone. It goes in
+        shipped here, overriding ``resolve_scope`` alone. It goes in
         front like any other, and the resulting MRO puts the subclass before
         the viewset and the base after both."""
 
         class NarrowedMixin(TenantScopedViewMixin):
-            def resolve_organization(self, request):
+            def resolve_scope(self, request):
                 return None
 
         with override_settings(VINTA_BILLING={"VIEW_MIXIN": NarrowedMixin}):
@@ -262,46 +265,67 @@ class TestBothSeamsThroughAMountedRoute:
     def test_the_shipped_route_uses_the_projects_mixin_and_the_projects_container(
         self, logged_in_client, db
     ):
+        from vinta_billing.models import BillingScope
+
         organization = get_organization_model().objects.create(name="Mounted", slug="mounted")
+        scope, _ = BillingScope.objects.get_or_create_for(organization)
+        # The mixin resolves the scope; the shipped owner predicate then has to
+        # say yes, so the caller owns it. Both seams are the subject here, not
+        # the permission -- but a 403 would hide whether either ran.
+        scope.owner = logged_in_client.handler._force_user
+        scope.save(update_fields=["owner", "modified"])
         container = FakeContainer()
         HeaderScopedViewMixin.resolved.clear()
 
         with _mount(view_mixin=HeaderScopedViewMixin, service_container=container):
             response = logged_in_client.get(
                 reverse("billing:BillingUsage-retrieve"),
-                HTTP_X_ORGANIZATION_ID=str(organization.pk),
+                HTTP_X_SCOPE_ID=str(scope.pk),
             )
 
-        # The project's mixin resolved the organization -- from a header this
+        # The project's mixin resolved the scope -- from a header this
         # package has never heard of -- and the view served it rather than
-        # answering "an active organization is required".
+        # answering "an active scope is required".
         assert response.status_code == 200, response.data
-        assert HeaderScopedViewMixin.resolved == [str(organization.pk)]
+        assert HeaderScopedViewMixin.resolved == [str(scope.pk)]
         # And the usage was computed by the service the project's container
         # built, not by one this package cached for itself.
         assert container.built, "the configured container was never asked for a service"
         assert all(isinstance(service, RecordingEntitlementService) for service in container.built)
 
-    def test_vinta_orgs_own_drf_mixin_composes_without_an_adapter(self, db):
+    def test_vinta_orgs_own_drf_mixin_composes_through_the_contrib_bridge(self, db):
         """Not a stand-in this time: ``vinta_orgs.drf
         .OrganizationScopedAPIViewMixin`` itself, which is what a project's own
         tenant-scoped base viewset is built on and where the assign-and-return-
-        ``None`` shape comes from. Configured directly, with nothing of this
-        package's in between, it resolves the organization for a shipped
-        endpoint."""
+        ``None`` shape comes from.
+
+        Since billing hangs off scopes rather than organizations, that mixin is
+        now half the wiring: it resolves ``request.organization``, and
+        ``vinta_billing.contrib.orgs.resolve_scope_from_organization`` turns that
+        into the scope billing reads. This is the upgrade path a project already
+        on ``vinta-django-orgs`` takes, so it is worth a test that the two
+        compose with nothing of this package's own in between.
+        """
+        from vinta_billing.models import BillingScope
+
         organization = get_organization_model().objects.create(name="Composed", slug="composed")
+        scope, _ = BillingScope.objects.get_or_create_for(organization)
         user = get_user_model().objects.create_user(username="composed", password="pw")
         get_organization_membership_model().objects.create(organization=organization, user=user)
         client = APIClient()
         client.force_login(user)
 
-        with _mount(view_mixin="vinta_orgs.drf.OrganizationScopedAPIViewMixin"):
+        with _mount(
+            view_mixin="vinta_orgs.drf.OrganizationScopedAPIViewMixin",
+            scope_resolver="vinta_billing.contrib.orgs.resolve_scope_from_organization",
+        ):
             response = client.get(
                 reverse("billing:BillingUsage-retrieve"),
                 HTTP_ORGANIZATION_SLUG=organization.slug,
             )
 
         assert response.status_code == 200, response.data
+        assert scope.pk is not None
 
     def test_without_the_mixin_the_same_request_resolves_no_organization(
         self, logged_in_client, db
@@ -309,12 +333,12 @@ class TestBothSeamsThroughAMountedRoute:
         """The other half of the previous test: the header means nothing to this
         package on its own, so it is the configured mixin -- not the request --
         that is doing the work above."""
-        organization = get_organization_model().objects.create(name="Mounted", slug="mounted")
+        scope = get_organization_model().objects.create(name="Mounted", slug="mounted")
 
         with _mount():
             response = logged_in_client.get(
                 reverse("billing:BillingUsage-retrieve"),
-                HTTP_X_ORGANIZATION_ID=str(organization.pk),
+                HTTP_X_SCOPE_ID=str(scope.pk),
             )
 
         assert response.status_code == 403

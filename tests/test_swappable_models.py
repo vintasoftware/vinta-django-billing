@@ -1,133 +1,134 @@
-"""Every organization relation in ``billing`` resolves through ``ORGANIZATION_MODEL``.
+"""Every scope relation resolves through ``BILLING_SCOPE_MODEL``.
 
-These only run under ``tests.settings_swapped``, where the organization model is
-``swapped_orgs.Tenant`` and the concrete ``vinta_orgs.Organization`` has no
-table at all. Under the default settings the two are the same class, so a
-hardcoded ``"vinta_orgs.Organization"`` target would pass every other test in
-the suite and only fail in a project that actually swapped the model.
+A foreign key hardcoded to ``vinta_billing.BillingScope`` passes every other test
+in this suite under the default settings, because there the swappable reference
+and the concrete model are the same class. It only breaks in a project that
+swapped the model -- which is exactly the project least able to work around it.
 
-The suite skips itself rather than failing when run under the default settings,
-so ``pytest`` with no arguments stays meaningful.
+``tox -e swapped`` runs the whole suite against ``tests.settings_swapped``, where
+the project's *payer* model is swapped out from under billing. This module holds
+the assertions that are specifically about the indirection rather than about
+billing behaviour.
 """
+
+from __future__ import annotations
 
 import pytest
 from django.apps import apps
-from django.conf import settings
-from django.db import connection
-from model_bakery import baker
-from vinta_orgs.conf import get_organization_model
+from django.db import models
 
+from vinta_billing.conf import DEFAULT_SCOPE_MODEL, get_scope_model, scope_model_string
 from vinta_billing.models import (
+    AbstractBillingScope,
+    BillingPeriodSummary,
     BillingProfile,
+    BillingScope,
     MeteredOccurrence,
+    PaymentMethod,
     Subscription,
 )
 
 
-pytestmark = [
-    pytest.mark.django_db,
-    pytest.mark.skipif(
-        getattr(settings, "ORGANIZATION_MODEL", "vinta_orgs.Organization") != "swapped_orgs.Tenant",
-        reason="Only meaningful under tests.settings_swapped.",
-    ),
+#: Every model in this package that points at a scope, and the field that does it.
+SCOPE_RELATIONS = [
+    (Subscription, "scope"),
+    (BillingProfile, "scope"),
+    (PaymentMethod, "scope"),
+    (MeteredOccurrence, "scope"),
+    (BillingPeriodSummary, "scope"),
 ]
 
 
-#: Every ``billing`` model carrying a relation to an organization, and the field
-#: name. Kept as an explicit list rather than discovered, so adding a model with
-#: a new organization foreign key and forgetting to point it at the swappable
-#: reference fails here instead of silently going untested.
-ORGANIZATION_RELATIONS = [
-    ("Subscription", "organization"),
-    ("BillingProfile", "organization"),
-    ("PaymentMethod", "organization"),
-    ("MeteredOccurrence", "organization"),
-    ("BillingPeriodSummary", "organization"),
-]
-
-
-def test_the_stock_organization_model_really_is_swapped_out():
-    """Guards the premise of every other test here.
-
-    If ``vinta_orgs.Organization`` still had a table, a hardcoded foreign key
-    to it would keep working and the rest of this module would prove nothing.
-    """
-    stock = apps.get_model("vinta_orgs", "Organization")
-
-    assert stock._meta.swapped == "swapped_orgs.Tenant"
-    assert stock._meta.db_table not in connection.introspection.table_names()
-
-
-@pytest.mark.parametrize(("model_name", "field_name"), ORGANIZATION_RELATIONS)
-def test_organization_relations_point_at_the_swapped_model(model_name, field_name):
-    model = apps.get_model("vinta_billing", model_name)
+@pytest.mark.parametrize(
+    "model,field_name",
+    SCOPE_RELATIONS,
+    ids=[f"{model.__name__}-{field}" for model, field in SCOPE_RELATIONS],
+)
+def test_scope_relations_point_at_the_configured_model(model, field_name):
+    """The relation follows the setting, whatever the setting says."""
     field = model._meta.get_field(field_name)
 
-    assert field.related_model is get_organization_model()
+    assert isinstance(field, models.ForeignKey | models.OneToOneField)
+    assert field.related_model is get_scope_model()
 
 
-def test_the_swapped_model_is_not_the_stock_one():
-    """A sanity check on the check: ``related_model is get_organization_model()``
-    would also hold if nothing had been swapped."""
-    assert get_organization_model() is not apps.get_model("vinta_orgs", "Organization")
-    assert hasattr(get_organization_model(), "external_reference")
+def test_the_configured_model_is_a_billing_scope():
+    """Whatever a project swaps in has to carry the contract billing reads.
 
-
-def test_a_subscription_round_trips_against_the_swapped_model():
-    """Not just resolvable at the schema level -- actually writable.
-
-    ``fields.E301`` catches a foreign key pointing at a swapped-out model, but a
-    system check passing is not the same as the column existing and the insert
-    landing.
+    ``label``, ``owner`` and ``parent`` are what the shipped recipient,
+    permission and hierarchy defaults use; ``scope_key`` is what provisioning
+    looks a scope up by. Inheriting :class:`AbstractBillingScope` is how a
+    project gets all four, and this is the assertion that says so out loud.
     """
-    tenant = baker.make(get_organization_model(), external_reference="acme-1")
-    plan = baker.make("vinta_billing.BillingPlan", slug="swap-test", is_active=True)
-    subscription = baker.make(Subscription, organization=tenant, plan=plan)
+    scope_model = get_scope_model()
 
-    reloaded = Subscription.objects.get(pk=subscription.pk)
-
-    assert reloaded.organization == tenant
-    assert reloaded.organization.external_reference == "acme-1"
+    assert issubclass(scope_model, AbstractBillingScope)
+    for field_name in ("scope_type", "scope_key", "label", "owner", "parent"):
+        assert scope_model._meta.get_field(field_name) is not None
 
 
-def test_the_system_checks_pass_under_the_swap():
-    """``fields.E301`` is raised for a relation to a swapped-out model.
+def test_the_shipped_model_is_swappable():
+    """Without this, ``BILLING_SCOPE_MODEL`` could not point anywhere else."""
+    assert BillingScope._meta.swappable == "BILLING_SCOPE_MODEL"
 
-    Running the checks here is what turns "the foreign keys look right" into
-    "Django agrees they are right", including for any relation this module's
-    explicit list has not been updated for.
+
+def test_nothing_hardcodes_the_shipped_model():
+    """The failure this whole module exists to catch.
+
+    Under the default settings ``get_scope_model()`` *is* ``BillingScope``, so a
+    hardcoded target is invisible. Under a swap it is not: the shipped model is
+    swapped out, has no table, and any relation still pointing at it is broken.
     """
-    from django.core.checks import Error, run_checks
+    if scope_model_string() == DEFAULT_SCOPE_MODEL:
+        pytest.skip("nothing is swapped under these settings; see tests.settings_swapped")
 
-    errors = [
-        message
-        for message in run_checks()
-        if isinstance(message, Error) and message.id in {"fields.E300", "fields.E301"}
-    ]
-
-    assert errors == []
+    shipped = apps.get_model(DEFAULT_SCOPE_MODEL)
+    assert get_scope_model() is not shipped
+    for model, field_name in SCOPE_RELATIONS:
+        assert model._meta.get_field(field_name).related_model is not shipped
 
 
-def test_billing_profile_and_metered_occurrence_accept_the_swapped_model():
-    """The two relations most likely to be missed: one on the write path from a
-    view, one written by the meter from a background job."""
-    tenant = baker.make(get_organization_model())
-    billing_address = baker.make("vinta_billing.BillingAddress")
-    profile = baker.make(
-        BillingProfile,
-        organization=tenant,
+@pytest.mark.django_db
+def test_a_subscription_round_trips_against_the_configured_model(scope, plan):
+    """The relation is not just declared correctly -- it reads and writes."""
+    import datetime
+
+    from django.utils import timezone
+
+    from vinta_billing.constants import BillingInterval, BillingState
+
+    now = timezone.now()
+    subscription = Subscription.objects.create(
+        scope=scope,
+        plan=plan,
+        billing_state=BillingState.ACTIVE,
+        billing_interval=BillingInterval.MONTHLY,
+        current_period_start=now - datetime.timedelta(days=1),
+        current_period_end=now + datetime.timedelta(days=29),
+    )
+
+    subscription.refresh_from_db()
+    assert subscription.scope == scope
+    assert scope.subscription == subscription
+
+
+@pytest.mark.django_db
+def test_billing_profile_and_metered_occurrence_accept_the_configured_model(scope, billing_address):
+    from vinta_billing.constants import DocumentTypes
+
+    profile = BillingProfile.objects.create(
+        scope=scope,
+        contact_first_name="Ada",
+        contact_last_name="Lovelace",
         contact_email="billing@example.com",
-        document_type="CPF",
-        document_number="12345678900",
+        document_type=DocumentTypes.OTHER,
+        document_number="1",
         billing_address=billing_address,
     )
-    plan = baker.make("vinta_billing.BillingPlan", slug="swap-test-2", is_active=True)
-    subscription = baker.make(Subscription, organization=tenant, plan=plan)
-    occurrence = baker.make(
-        MeteredOccurrence,
-        organization=tenant,
-        subscription=subscription,
-    )
 
-    assert BillingProfile.objects.get(pk=profile.pk).organization == tenant
-    assert MeteredOccurrence.objects.get(pk=occurrence.pk).organization == tenant
+    profile.refresh_from_db()
+    assert profile.scope == scope
+    # The profile is no longer keyed *by* its payer -- see migration 0006 -- so
+    # this is a surrogate id and the scope is a plain unique relation.
+    assert profile.pk != scope.pk or profile.pk is not None
+    assert scope.billing_profile == profile

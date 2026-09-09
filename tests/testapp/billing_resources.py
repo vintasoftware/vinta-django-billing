@@ -3,12 +3,10 @@
 This is the file a host application writes. Everything the engine knows about
 widgets, seats and events enters through here.
 
-Every counter reads through ``original_manager`` -- the *unscoped* manager
-``vinta-django-orgs`` puts on scoped models -- and never ``objects``. Usage
-pools across a whole billing subtree, so a counter is asked about several
-organizations at once and must not be narrowed to whichever one happens to be
-bound to the current context. In a Celery beat run there is no bound
-organization at all, and the scoped manager would report zero usage for
+Every counter reads through an unscoped manager. Usage pools across a whole
+billing subtree, so a counter is asked about several scopes at once and must not
+be narrowed to whichever one a request happened to bind. In a Celery beat run
+there is no bound scope at all, and a scoped manager would report zero usage for
 everybody: every ceiling would silently read as empty.
 """
 
@@ -16,7 +14,7 @@ from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
 from vinta_billing.constants import LimitKind, LimitRemedy
-from vinta_billing.counting import UsageContext, count_by_organization, merge_breakdowns
+from vinta_billing.counting import UsageContext, count_by_scope, merge_breakdowns
 from vinta_billing.registry import entitlements, resources
 from vinta_billing.services.entitlement_service import count_metered_occurrences
 
@@ -25,37 +23,33 @@ from vinta_billing.services.entitlement_service import count_metered_occurrences
 #: invitation is net zero on seats -- the pending row becomes the membership it
 #: was already holding a seat for -- so the invitation being accepted has to be
 #: excluded, or the accept fails its own check at exactly the ceiling and an
-#: organization can never fill its last seat.
+#: scope can never fill its last seat.
 EXCLUDE_INVITATION_ID = "exclude_invitation_id"
 
 
 def count_widgets(context: UsageContext) -> dict[int, int]:
     from tests.testapp.models import Widget
 
-    return count_by_organization(
-        Widget.original_manager.filter(organization_id__in=context.organization_ids)
-    )
+    return count_by_scope(Widget.objects.filter(scope_id__in=context.scope_ids))
 
 
 def count_seats(context: UsageContext) -> dict[int, int]:
-    """Active seats plus still-open invitations, per organization.
+    """Active seats plus still-open invitations, per scope.
 
     The two tables are grouped separately and merged key-wise rather than
-    concatenated, so an organization holding both kinds of seat is not
-    double-keyed in the result.
+    concatenated, so a scope holding both kinds of seat is not double-keyed in
+    the result.
     """
     from tests.testapp.models import Seat, SeatInvitation
 
-    seats = count_by_organization(
-        Seat.original_manager.filter(organization_id__in=context.organization_ids, is_active=True)
-    )
-    pending = SeatInvitation.original_manager.filter(
-        organization_id__in=context.organization_ids, accepted_at__isnull=True
+    seats = count_by_scope(Seat.objects.filter(scope_id__in=context.scope_ids, is_active=True))
+    pending = SeatInvitation.objects.filter(
+        scope_id__in=context.scope_ids, accepted_at__isnull=True
     )
     exclude_id = context.get(EXCLUDE_INVITATION_ID)
     if exclude_id is not None:
         pending = pending.filter(~Q(pk=exclude_id))
-    return merge_breakdowns(seats, count_by_organization(pending))
+    return merge_breakdowns(seats, count_by_scope(pending))
 
 
 def register() -> None:

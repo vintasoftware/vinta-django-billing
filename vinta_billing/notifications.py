@@ -1,6 +1,6 @@
 """Where dunning and usage-warning messages go.
 
-The engine decides *that* an organization should be told its card failed or that
+The engine decides *that* an scope should be told its card failed or that
 it is close to a limit, and hands over the facts. It does not decide how the
 message is delivered or rendered -- that is a transport, every project already
 has one, and this package deliberately ships no adapter for any of them.

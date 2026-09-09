@@ -321,7 +321,7 @@ def check_approaching_limits(dispatch: Dispatch | None = None) -> None:
     ``UsageWarningService.check_subscription`` for why warning it further adds
     nothing) and ``CANCELLED`` (running out the clock to ``FREE``, not
     accruing toward a block). ``FREE``, ``ACTIVE``, and ``GRACE`` subscriptions
-    are all in scope -- a free-tier organization approaching its seat limit
+    are all in scope -- a free-tier scope approaching its seat limit
     needs the same proactive warning as a paid one.
     """
 

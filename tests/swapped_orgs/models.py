@@ -1,4 +1,4 @@
-"""A project's own organization and membership models, swapped in.
+"""A project's own scope and membership models, swapped in.
 
 The whole point of this app is to be *different* from the concrete models
 ``vinta-django-orgs`` ships: a different app label, a different table, and an
@@ -14,7 +14,7 @@ from vinta_orgs.models import AbstractOrganization, AbstractOrganizationMembersh
 
 
 class Tenant(AbstractOrganization):
-    """The project's organization model, under a name of its own."""
+    """The project's scope model, under a name of its own."""
 
     #: Not on ``AbstractOrganization``. Its presence on the model every billing
     #: foreign key resolves to is what proves the swap actually took.

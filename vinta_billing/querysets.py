@@ -43,15 +43,15 @@ class MeteredOccurrenceQuerySet(QuerySet):
             subscription_id=subscription_id, billing_period_start=billing_period_start
         )
 
-    def for_organizations(self, organization_ids: Sequence[int]) -> MeteredOccurrenceQuerySet:
+    def for_scopes(self, scope_ids: Sequence[int]) -> MeteredOccurrenceQuerySet:
         """Restrict to a pooled billing subtree.
 
-        ``MeteredOccurrence`` is not an ``OrganizationModel`` (see the model
+        ``MeteredOccurrence`` is not an ``ScopeModel`` (see the model
         docstring), so this is an ordinary filter — but every usage read still has
-        to be organization-scoped, and going through a named method keeps that
+        to be scope-scoped, and going through a named method keeps that
         visible at the call site.
         """
-        return self.filter(organization_id__in=organization_ids)
+        return self.filter(scope_id__in=scope_ids)
 
     def overage(self) -> MeteredOccurrenceQuerySet:
         """Only the rows that fell **outside** the included allowance.
@@ -82,12 +82,12 @@ class MeteredOccurrenceQuerySet(QuerySet):
 class BillingPeriodSummaryQuerySet(QuerySet):
     """QuerySet for ``BillingPeriodSummary``, the closed-period statement ledger."""
 
-    def for_organizations(self, organization_ids: Sequence[int]) -> BillingPeriodSummaryQuerySet:
+    def for_scopes(self, scope_ids: Sequence[int]) -> BillingPeriodSummaryQuerySet:
         """Restrict to a pooled billing subtree.
 
-        ``BillingPeriodSummary`` is not an ``OrganizationModel`` (see the model
+        ``BillingPeriodSummary`` is not an ``ScopeModel`` (see the model
         docstring), so this is an ordinary filter — but every read is still
-        organization-scoped, and going through a named method keeps that visible at
-        the call site. Mirrors ``MeteredOccurrenceQuerySet.for_organizations``.
+        scope-scoped, and going through a named method keeps that visible at
+        the call site. Mirrors ``MeteredOccurrenceQuerySet.for_scopes``.
         """
-        return self.filter(organization_id__in=organization_ids)
+        return self.filter(scope_id__in=scope_ids)

@@ -12,11 +12,11 @@ time, and the engine discovers them:
     # myproject/billing_resources.py
     from vinta_billing.registry import resources
     from vinta_billing.constants import LimitKind, LimitRemedy
-    from vinta_billing.counting import count_by_organization
+    from vinta_billing.counting import count_by_scope
 
     def count_seats(context):
-        return count_by_organization(
-            Membership.objects.filter(organization_id__in=context.organization_ids)
+        return count_by_scope(
+            Membership.objects.filter(scope_id__in=context.scope_ids)
         )
 
     resources.register(
@@ -59,10 +59,10 @@ if TYPE_CHECKING:
     from vinta_billing.counting import UsageContext
 
 
-#: A usage counter answers "how much of this resource is each organization
-#: using?" as ``{organization_id: count}``.
+#: A usage counter answers "how much of this resource is each scope
+#: using?" as ``{scope_id: count}``.
 #:
-#: Organizations at zero must be *absent* from the mapping rather than present
+#: Scopes at zero must be *absent* from the mapping rather than present
 #: with a zero -- ``GROUP BY`` never emits a row for them, and the engine relies
 #: on that rather than making every counter remember to strip them.
 UsageCounter = Callable[["UsageContext"], dict[int, int]]
