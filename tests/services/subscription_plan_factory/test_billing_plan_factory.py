@@ -4,16 +4,18 @@ from decimal import Decimal
 import pytest
 from model_bakery import baker
 
+from tests.conftest import make_scope
+from tests.payers import make_payer
 from vinta_billing.constants import BillingInterval, PaymentProviders
-from vinta_billing.models import BillingPlan, BillingScope, Subscription
+from vinta_billing.models import BillingPlan, Subscription
 from vinta_billing.services.subscription_plan_factory.billing_plan_factory import BillingPlanFactory
 
 
-# This module builds its own Subscription rows (OneToOne with BillingScope), so it
+# This module builds its own Subscription rows (OneToOne with the scope model), so it
 # opts out of conftest's autouse `provision_default_subscription`.
 @pytest.fixture
 def scope():
-    return baker.make(BillingScope, object_id="1")
+    return make_scope(make_payer("Factory Co"))
 
 
 @pytest.fixture

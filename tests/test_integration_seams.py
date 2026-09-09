@@ -28,6 +28,7 @@ from rest_framework.test import APIClient
 from vinta_orgs.conf import get_organization_membership_model, get_organization_model
 
 import tests.urls_seams
+from tests.payers import payers_are_organizations
 from vinta_billing.billing_views import (
     AddOnViewSet,
     BillingPlanViewSet,
@@ -257,6 +258,10 @@ class TestTheServiceContainerSeam:
         assert view.entitlement_service is mine
 
 
+@pytest.mark.skipif(
+    not payers_are_organizations(),
+    reason="these mount vinta-django-orgs' own mixin, so the payer has to be an organization",
+)
 class TestBothSeamsThroughAMountedRoute:
     """The bar this release aims at: a project mounts ``get_routes()`` and
     ``get_extra_patterns()`` as they are, and its own scoping and its own
@@ -265,10 +270,10 @@ class TestBothSeamsThroughAMountedRoute:
     def test_the_shipped_route_uses_the_projects_mixin_and_the_projects_container(
         self, logged_in_client, db
     ):
-        from vinta_billing.models import BillingScope
+        from tests.conftest import make_scope
 
         organization = get_organization_model().objects.create(name="Mounted", slug="mounted")
-        scope, _ = BillingScope.objects.get_or_create_for(organization)
+        scope = make_scope(organization)
         # The mixin resolves the scope; the shipped owner predicate then has to
         # say yes, so the caller owns it. Both seams are the subject here, not
         # the permission -- but a 403 would hide whether either ran.
@@ -306,10 +311,10 @@ class TestBothSeamsThroughAMountedRoute:
         on ``vinta-django-orgs`` takes, so it is worth a test that the two
         compose with nothing of this package's own in between.
         """
-        from vinta_billing.models import BillingScope
+        from tests.conftest import make_scope
 
         organization = get_organization_model().objects.create(name="Composed", slug="composed")
-        scope, _ = BillingScope.objects.get_or_create_for(organization)
+        scope = make_scope(organization)
         user = get_user_model().objects.create_user(username="composed", password="pw")
         get_organization_membership_model().objects.create(organization=organization, user=user)
         client = APIClient()

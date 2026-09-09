@@ -14,11 +14,22 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 
+from vinta_billing.conf import DEFAULT_SCOPE_MODEL, scope_model_string
 from vinta_billing.constants import ScopeType
 from vinta_billing.models import BillingScope
 
 
-pytestmark = pytest.mark.django_db
+# This module is about the *shipped* scope model specifically -- its generic
+# key, its manager, its constraints. Under a settings module that swapped it
+# out, `BillingScope` has no table and none of it applies; the contract every
+# scope model has to honour is checked in `test_swappable_models.py` instead.
+pytestmark = [
+    pytest.mark.django_db,
+    pytest.mark.skipif(
+        scope_model_string() != DEFAULT_SCOPE_MODEL,
+        reason="the shipped scope model is swapped out under these settings",
+    ),
+]
 
 
 class TestGetOrCreateFor:

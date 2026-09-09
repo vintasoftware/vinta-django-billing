@@ -79,7 +79,9 @@ class Migration(migrations.Migration):
                         null=True,
                         on_delete=django.db.models.deletion.PROTECT,
                         related_name="%(app_label)s_%(class)s_children",
-                        to=settings.BILLING_SCOPE_MODEL,
+                        # The concrete model, not the setting -- see the field's
+                        # comment in models.py for why `swappable=False` matters.
+                        to="vinta_billing.billingscope",
                     ),
                 ),
             ],

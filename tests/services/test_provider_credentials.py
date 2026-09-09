@@ -5,9 +5,11 @@
 import pytest
 from model_bakery import baker
 
+from tests.conftest import make_scope
+from tests.payers import make_payer
 from vinta_billing.constants import PaymentProviders
 from vinta_billing.exceptions import PaymentProviderNotConfiguredError
-from vinta_billing.models import BillingProfile, BillingScope
+from vinta_billing.models import BillingProfile
 from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 from vinta_billing.services.provider_credentials import (
     PublicProviderCredentials,
@@ -77,7 +79,7 @@ class TestResolvePublicCredentials:
 
 class TestPaymentProviderResolver:
     def test_resolve_for_scope_returns_the_pin_when_set(self):
-        scope = baker.make(BillingScope, object_id="1")
+        scope = make_scope(make_payer("Credentials Co"))
         billing_address = baker.make("vinta_billing.BillingAddress")
         baker.make(
             BillingProfile,
@@ -98,7 +100,7 @@ class TestPaymentProviderResolver:
             **settings.VINTA_BILLING,
             "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
         }
-        scope = baker.make(BillingScope, object_id="1")
+        scope = make_scope(make_payer("Credentials Co"))
         billing_address = baker.make("vinta_billing.BillingAddress")
         baker.make(
             BillingProfile,
@@ -119,7 +121,7 @@ class TestPaymentProviderResolver:
             **settings.VINTA_BILLING,
             "DEFAULT_PROVIDER": PaymentProviders.STRIPE,
         }
-        scope = baker.make(BillingScope, object_id="1")
+        scope = make_scope(make_payer("Credentials Co"))
 
         resolver = PaymentProviderResolver()
 

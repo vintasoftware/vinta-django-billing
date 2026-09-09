@@ -49,9 +49,9 @@ class TestFlatHierarchy:
         assert FlatHierarchy().pooled_scope_ids(scope) == [scope.pk]
 
     def test_root_filter_matches_everything(self, scope, other_scope):
-        from vinta_orgs.conf import get_organization_model
+        from vinta_billing.conf import get_scope_model
 
-        matched = get_organization_model().objects.filter(FlatHierarchy().billing_root_q())
+        matched = get_scope_model()._default_manager.filter(FlatHierarchy().billing_root_q())
 
         assert matched.count() == 2
 

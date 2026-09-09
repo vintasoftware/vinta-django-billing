@@ -9,6 +9,7 @@ import pytest
 from django.test import override_settings
 from rest_framework.test import APIRequestFactory
 
+from tests.payers import scopes_can_name_users
 from tests.testapp.models import Widget
 from vinta_billing.contrib.orgs import (
     all_members,
@@ -44,6 +45,10 @@ class TestGetRequestScope:
 
         assert get_request_scope(request) is scope
 
+    @pytest.mark.skipif(
+        not scopes_can_name_users(),
+        reason="the configured scope model bills companies only",
+    )
     def test_falls_back_to_the_scope_the_caller_owns(self, db, user):
         """A personal plan resolves with nothing configured at all.
 
@@ -51,9 +56,9 @@ class TestGetRequestScope:
         is what makes "bill this user" work before a project has written a
         resolver of its own.
         """
-        from vinta_billing.models import BillingScope
+        from tests.conftest import make_scope
 
-        personal, _ = BillingScope.objects.get_or_create_for(user)
+        personal = make_scope(user)
         request = APIRequestFactory().get("/")
         request.user = user
 

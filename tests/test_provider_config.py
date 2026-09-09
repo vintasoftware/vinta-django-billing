@@ -201,12 +201,12 @@ class TestDefaultProvider:
 @pytest.mark.django_db
 def resolve_scope_by_owner(request):
     """The scope the authenticated caller owns."""
-    from vinta_billing.models import BillingScope
+    from vinta_billing.conf import get_scope_model
 
     user = getattr(request, "user", None)
     if user is None or not user.is_authenticated:
         return None
-    return BillingScope.objects.filter(owner=user).first()
+    return get_scope_model()._default_manager.filter(owner=user).first()
 
 
 class TestTheProviderEndpointsRefuseAnUnconfiguredProviderTheSameWay:

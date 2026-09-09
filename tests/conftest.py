@@ -15,11 +15,22 @@ from decimal import Decimal
 import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from vinta_orgs.conf import get_organization_membership_model, get_organization_model
 
+from tests.payers import make_payer, payers_are_organizations
+from vinta_billing.conf import get_scope_model
 from vinta_billing.constants import BillingInterval, BillingState, LimitKind
-from vinta_billing.models import BillingPlan, BillingScope, PlanLimit, Subscription
+from vinta_billing.models import BillingPlan, PlanLimit, Subscription
 from vinta_billing.services.container import reset_services
+
+
+def make_scope(payer, **kwargs):
+    """The scope for ``payer``, under whatever ``BILLING_SCOPE_MODEL`` names.
+
+    Goes through the configured model's own ``get_or_create_for`` rather than
+    building rows by hand: the shipped model has a generic key, a swapped-in one
+    may have typed foreign keys, and only the model knows how to name a payer.
+    """
+    return get_scope_model()._default_manager.get_or_create_for(payer, **kwargs)[0]
 
 
 @pytest.fixture(autouse=True)
@@ -37,12 +48,20 @@ def _reset_service_cache():
 
 @pytest.fixture
 def organization(db):
-    return get_organization_model().objects.create(name="Acme", slug="acme")
+    """The payer a scope names.
+
+    Still called ``organization`` because that is what it is under the default
+    settings and in most of the suite's prose. Under a settings module that
+    swapped the scope model it is a ``testapp.Company`` instead -- see
+    ``tests/payers.py``. Tests that need a real ``vinta-django-orgs``
+    organization specifically say so with ``needs_organization_payers``.
+    """
+    return make_payer("Acme")
 
 
 @pytest.fixture
 def other_organization(db):
-    return get_organization_model().objects.create(name="Globex", slug="globex")
+    return make_payer("Globex")
 
 
 @pytest.fixture
@@ -58,7 +77,7 @@ def scope(db, organization, user):
     read it -- it is what the membership row used to be for. A test that wants
     a scope nobody manages asks for ``unowned_scope``.
     """
-    scope = BillingScope.objects.get_or_create_for(organization)[0]
+    scope = make_scope(organization)
     scope.owner = user
     scope.save(update_fields=["owner", "modified"])
     return scope
@@ -71,13 +90,13 @@ def other_scope(db, other_organization):
     Every "is another tenant's billing refused?" test leans on this, and an
     owner here would make some of them pass for the wrong reason.
     """
-    return BillingScope.objects.get_or_create_for(other_organization)[0]
+    return make_scope(other_organization)
 
 
 @pytest.fixture
 def unowned_scope(db, organization):
     """``organization``'s scope with no billing owner set."""
-    return BillingScope.objects.get_or_create_for(organization)[0]
+    return make_scope(organization)
 
 
 @pytest.fixture
@@ -87,6 +106,16 @@ def user(db):
 
 @pytest.fixture
 def membership(db, organization, user):
+    """A ``vinta-django-orgs`` membership.
+
+    Only meaningful where the payer is an organization, so it skips rather than
+    erroring under a settings module whose payers are something else -- the
+    tests that ask for it are about ``vinta_billing.contrib.orgs``.
+    """
+    if not payers_are_organizations():
+        pytest.skip("payers are not vinta-django-orgs organizations under these settings")
+    from vinta_orgs.conf import get_organization_membership_model
+
     return get_organization_membership_model().objects.create(organization=organization, user=user)
 
 

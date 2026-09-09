@@ -27,6 +27,8 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.recorder import MigrationRecorder
 from django.test import override_settings
 
+from vinta_billing.conf import DEFAULT_SCOPE_MODEL, scope_model_string
+
 
 # Rewinding and replaying migrations needs a real, non-transactional database:
 # `migrate` manages its own transactions and the usual test wrapper would fight
@@ -44,6 +46,10 @@ pytestmark = [
         getattr(settings, "ORGANIZATION_MODEL", "vinta_orgs.Organization")
         != "vinta_orgs.Organization",
         reason="the 0.7 upgrade fixtures are written against the stock organization model",
+    ),
+    pytest.mark.skipif(
+        scope_model_string() != DEFAULT_SCOPE_MODEL,
+        reason="the backfill writes rows into the shipped scope model",
     ),
 ]
 

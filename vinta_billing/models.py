@@ -104,12 +104,23 @@ class AbstractBillingScope(BaseModel):
     # because more than one concrete scope model can be *defined* in a project
     # even though only one is ever active, and two bare ``children`` accessors
     # on one target would clash.
+    #
+    # ``swappable=False`` is about how this field *deconstructs*, and it is not
+    # optional. A foreign key whose target is a swappable model normally
+    # deconstructs to the setting rather than to the model, so ``"self"`` here
+    # would come out as ``to=settings.BILLING_SCOPE_MODEL`` -- meaning "whatever
+    # scope model is configured" rather than "this one". The moment a project
+    # points that setting elsewhere, the shipped model's own ``parent`` reads as
+    # having changed and ``makemigrations`` asks for a migration nobody can
+    # sensibly write. A scope's parent is always its own concrete class, so say
+    # that instead.
     parent = models.ForeignKey(
         "self",
         null=True,
         blank=True,
         on_delete=models.PROTECT,
         related_name="%(app_label)s_%(class)s_children",
+        swappable=False,
     )
 
     class Meta(BaseModel.Meta):

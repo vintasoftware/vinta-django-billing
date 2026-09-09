@@ -37,8 +37,11 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from tests.conftest import make_scope
+from tests.payers import make_payer
+from vinta_billing.conf import get_scope_model
 from vinta_billing.constants import BillingInterval, BillingState, LimitKind
-from vinta_billing.models import BillingPlan, BillingScope, PlanLimit, Subscription
+from vinta_billing.models import BillingPlan, PlanLimit, Subscription
 
 
 pytestmark = pytest.mark.django_db
@@ -55,7 +58,7 @@ def resolve_scope_by_owner(request):
     user = getattr(request, "user", None)
     if user is None or not user.is_authenticated:
         return None
-    return BillingScope.objects.filter(owner=user).first()
+    return get_scope_model()._default_manager.filter(owner=user).first()
 
 
 reseller_settings = override_settings(
@@ -72,39 +75,26 @@ def _reseller_hierarchy():
         yield
 
 
+def _owned_scope(payer_name, username, parent=None):
+    """A scope with an owner, built through whatever model is configured."""
+    owner = get_user_model().objects.create_user(username=username, password="pw")
+    scope = make_scope(make_payer(payer_name))
+    scope.owner = owner
+    scope.parent = parent
+    scope.save(update_fields=["owner", "parent", "modified"])
+    return scope
+
+
 @pytest.fixture
 def reseller_root(db):
     """The paying root. Parentless, so ``ParentFieldHierarchy`` calls it a root."""
-    owner = get_user_model().objects.create_user(username="root-owner", password="pw")
-    return BillingScope.objects.create(
-        scope_type="organization",
-        scope_key="reseller-root",
-        label="Reseller",
-        owner=owner,
-        content_type=_user_content_type(),
-        object_id=str(owner.pk),
-    )
+    return _owned_scope("Reseller", "root-owner")
 
 
 @pytest.fixture
 def child(db, reseller_root):
     """A scope that bills against ``reseller_root`` and owns only itself."""
-    owner = get_user_model().objects.create_user(username="child-owner", password="pw")
-    return BillingScope.objects.create(
-        scope_type="organization",
-        scope_key="child",
-        label="Child",
-        owner=owner,
-        parent=reseller_root,
-        content_type=_user_content_type(),
-        object_id=str(owner.pk),
-    )
-
-
-def _user_content_type():
-    from django.contrib.contenttypes.models import ContentType
-
-    return ContentType.objects.get_for_model(get_user_model())
+    return _owned_scope("Child", "child-owner", parent=reseller_root)
 
 
 @pytest.fixture
