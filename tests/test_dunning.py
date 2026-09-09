@@ -324,7 +324,7 @@ class TestProcessGrace:
         assert subscription_service.retries == []
 
     def test_the_reminder_is_sent_after_the_retry_commits(
-        self, service, notifier, subscription, membership, django_capture_on_commit_callbacks
+        self, service, notifier, subscription, django_capture_on_commit_callbacks
     ):
         """Queued through `on_commit`, so a rolled-back retry never emails the
         customer about a charge that did not happen."""
@@ -339,7 +339,7 @@ class TestProcessGrace:
         assert len(notifier.calls) == 1
 
     def test_no_reminder_is_sent_when_the_tick_is_throttled(
-        self, service, notifier, subscription, membership, django_capture_on_commit_callbacks
+        self, service, notifier, subscription, django_capture_on_commit_callbacks
     ):
         started = datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC)
         self._in_grace(subscription, started=started)

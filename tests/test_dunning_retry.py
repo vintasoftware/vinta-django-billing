@@ -301,7 +301,7 @@ class TestTheBeatTickToleratesWhatItCannotFix:
         assert payment_service.calls == ["pay_outstanding_invoice"]
 
     def test_the_ladders_bookkeeping_still_advances_through_a_swallowed_outcome(
-        self, dunning_service, payment_service, in_grace, membership
+        self, dunning_service, payment_service, in_grace
     ):
         """The swallow is not "the tick did not happen". ``last_dunning_attempt_at``
         is stamped and the rung's reminder is sent regardless, which is what walks
@@ -340,9 +340,7 @@ class TestGraceLeavesTheCardAlone:
     going through the transition.
     """
 
-    def test_a_card_on_file_survives_entering_grace(
-        self, dunning_service, subscription, scope, membership
-    ):
+    def test_a_card_on_file_survives_entering_grace(self, dunning_service, subscription, scope):
         entitlement_service = EntitlementService()
         PaymentMethod.objects.create(
             scope=scope,

@@ -75,9 +75,7 @@ class TestLevelThresholds:
 
 
 class TestCheckSubscription:
-    def test_warns_when_usage_crosses_the_threshold(
-        self, service, notifier, scope, subscription, membership
-    ):
+    def test_warns_when_usage_crosses_the_threshold(self, service, notifier, scope, subscription):
         make_widgets(scope, 3)  # ceiling 3 -> reached
 
         service.check_subscription(subscription)
@@ -85,9 +83,7 @@ class TestCheckSubscription:
         assert len(notifier.calls) == 1
         assert notifier.calls[0]["context_kwargs"]["resource_key"] == "widgets"
 
-    def test_stays_silent_below_the_threshold(
-        self, service, notifier, scope, subscription, membership
-    ):
+    def test_stays_silent_below_the_threshold(self, service, notifier, scope, subscription):
         make_widgets(scope, 1)  # 1/3 = 33%
 
         service.check_subscription(subscription)
@@ -95,7 +91,7 @@ class TestCheckSubscription:
         assert notifier.calls == []
 
     def test_writes_a_marker_so_the_next_tick_is_debounced(
-        self, service, notifier, scope, subscription, membership
+        self, service, notifier, scope, subscription
     ):
         make_widgets(scope, 3)
 
@@ -111,7 +107,7 @@ class TestCheckSubscription:
         )
 
     def test_approaching_and_reached_debounce_independently(
-        self, service, notifier, scope, plan, make_subscription, membership
+        self, service, notifier, scope, plan, make_subscription
     ):
         """An scope gets exactly one "you're close" and, separately, one
         "you're at your limit" per resource per cycle -- not one or the other.
@@ -140,7 +136,7 @@ class TestCheckSubscription:
         assert len(notifier.calls) == 2
 
     def test_a_second_tick_at_the_same_level_stays_silent(
-        self, service, notifier, scope, plan, make_subscription, membership
+        self, service, notifier, scope, plan, make_subscription
     ):
         """The marker is per (resource, level, cycle), so re-checking while still
         approaching sends nothing further."""
@@ -155,7 +151,7 @@ class TestCheckSubscription:
         assert len(notifier.calls) == 1
 
     def test_a_new_billing_period_warns_again(
-        self, service, notifier, scope, plan, make_subscription, membership
+        self, service, notifier, scope, plan, make_subscription
     ):
         """The debounce is per cycle, not forever."""
         subscription = make_subscription(
@@ -174,7 +170,7 @@ class TestCheckSubscription:
         assert len(notifier.calls) == 2
 
     def test_an_unlimited_resource_never_warns(
-        self, service, notifier, scope, unlimited_plan, make_subscription, membership
+        self, service, notifier, scope, unlimited_plan, make_subscription
     ):
         subscription = make_subscription(scope, unlimited_plan)
         make_widgets(scope, 50)
@@ -185,7 +181,7 @@ class TestCheckSubscription:
 
     @pytest.mark.parametrize("state", [BillingState.RESTRICTED, BillingState.CANCELLED])
     def test_restricted_and_cancelled_subscriptions_are_skipped(
-        self, service, notifier, scope, subscription, membership, state
+        self, service, notifier, scope, subscription, state
     ):
         """A restricted scope already knows it is blocked; a cancelled one
         is running out the clock, not accruing toward anything."""
@@ -198,7 +194,7 @@ class TestCheckSubscription:
         assert notifier.calls == []
 
     def test_one_resource_failing_does_not_stop_the_others(
-        self, notifier, scope, subscription, membership, monkeypatch
+        self, notifier, scope, subscription, monkeypatch
     ):
         """The sweep is best-effort per resource: a failure on one must not cost
         the scope its warnings on every other."""
@@ -218,7 +214,7 @@ class TestCheckSubscription:
         assert len(notifier.calls) == 1
 
     def test_the_notification_carries_the_usage_and_the_ceiling(
-        self, service, notifier, scope, subscription, membership
+        self, service, notifier, scope, subscription
     ):
         make_widgets(scope, 3)
 
@@ -229,7 +225,7 @@ class TestCheckSubscription:
         assert context["limit_value"] == 3
 
     def test_it_goes_to_the_configured_recipients(
-        self, service, notifier, scope, subscription, user, membership
+        self, service, notifier, scope, subscription, user
     ):
         make_widgets(scope, 3)
 
