@@ -423,9 +423,25 @@ class BillingProfileViewSet(
         return queryset.filter(scope=scope)
 
     def get_billing_profile(self):
-        scope = self.request.scope  # type: ignore[attr-defined]
-        scope_pk = scope.pk if scope is not None else None
-        return get_object_or_404(self.get_queryset(), pk=scope_pk)
+        """The active scope's billing profile, or 404.
+
+        No ``pk`` filter. ``get_queryset`` already narrows to
+        ``scope=self.request.scope`` and returns ``none()`` when the scope did
+        not resolve, and ``BillingProfile.scope`` is a ``OneToOneField`` -- so
+        that queryset holds at most one row and there is nothing left to
+        disambiguate.
+
+        This used to read ``get_object_or_404(self.get_queryset(), pk=scope_pk)``,
+        which was correct only while ``BillingProfile.organization`` was
+        ``primary_key=True`` and a profile's pk *was* its payer's. Giving the
+        model a surrogate key broke the identity that lookup relied on: it now
+        asks for a profile whose id happens to equal a scope id. The two agree
+        only by coincidence -- often on a fresh database, where both sequences
+        start at 1, and essentially never on one upgraded from 0.7, where
+        profiles keep their original organization-derived keys while scopes are
+        numbered fresh.
+        """
+        return get_object_or_404(self.get_queryset())
 
     @extend_schema(
         summary="Retrieve billing profile",

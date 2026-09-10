@@ -1,5 +1,43 @@
 # History
 
+## 0.8.1
+
+- **Every read and write of a billing profile 404s on a database upgraded from
+  0.7.** `BillingProfileViewSet.get_billing_profile` looked the row up as
+  `get_object_or_404(self.get_queryset(), pk=scope.pk)` -- by the **scope's**
+  primary key. That was right until 0.8.0: `BillingProfile.organization` was
+  `primary_key=True`, so a profile's pk *was* its payer's, and the two were the
+  same number by construction. 0.8.0 gave the model a surrogate key -- for the
+  reasons its own comment gives, that re-pointing a profile at a different payer
+  should not rewrite its pk and every `Payment` row hanging off it -- and the
+  lookup was carried across unchanged. It now asks for a profile whose id
+  happens to equal a scope id.
+
+  The two agree only by coincidence. On a **fresh** database they often do:
+  both sequences start at 1, which is why this survived a suite that never sent
+  a request through the endpoint. On an **upgraded** one they essentially never
+  do -- `0005` carries existing profile keys across untouched (they are the old
+  organization ids) while scopes are created fresh and numbered independently.
+  So all four actions under the billing-profile route -- retrieve, create,
+  update, partial update -- answer `404` for effectively every tenant.
+
+  The fix drops the `pk` filter rather than translating it. `get_queryset`
+  already narrows to `scope=self.request.scope` and returns `none()` when the
+  scope did not resolve, and `BillingProfile.scope` is a `OneToOneField`, so
+  that queryset holds at most one row -- the `pk` lookup was redundant even
+  while it was correct. **What an adopter must do:** nothing beyond upgrading.
+  **What changes in the document:** nothing. `id` is still the scope id, which
+  the serializer sources from `scope_id` deliberately so the payload keeps the
+  shape it had when a profile's pk was its payer's; only the lookup behind it
+  changed.
+
+  `tests/test_billing_profile_views.py` drives all four actions as real
+  requests, which is the coverage that was missing -- `tests/test_routing.py`
+  asserted the four routes reverse, and nothing called them. One of its cases
+  pulls the two id sequences apart before building the caller's scope, so it
+  fails against the old lookup on a fresh database too rather than only against
+  an upgraded one.
+
 ## 0.8.0
 
 - **Billing hangs off a swappable scope instead of an organization, and
