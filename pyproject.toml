@@ -223,7 +223,7 @@ ignore_errors = true
 django_settings_module = "tests.settings"
 
 [tool.bumpversion]
-current_version = "0.8.1"
+current_version = "0.8.2"
 commit = true
 tag = true
 # The publish workflow triggers on unprefixed tags (0.2.0), so drop the default
