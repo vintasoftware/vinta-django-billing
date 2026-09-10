@@ -1,5 +1,43 @@
 # History
 
+## 0.8.2
+
+- **A project that swapped `BILLING_SCOPE_MODEL` could not reverse
+  `0005_backfill_scopes`, on a database with no billing data at all.** `0003`
+  creates `BillingScope` with `options={"swappable": "BILLING_SCOPE_MODEL"}`, so
+  Django skips it and no table exists behind that name. `0005` reached for
+  `apps.get_model("vinta_billing", "BillingScope")` anyway, and its manager
+  raises `Manager isn't available; 'vinta_billing.BillingScope' has been swapped
+  for ...`.
+
+  Forwards got away with it: there is nothing to migrate on a fresh database, so
+  it returns before touching the model. `backwards` read the scope table
+  unconditionally, so **rolling a deploy back failed** — and reversing is
+  reachable for exactly the installation that never had anything to backfill.
+
+  `0005` now resolves whatever `BILLING_SCOPE_MODEL` names, and asks whether
+  that model carries the generic key everything here reads and writes
+  (`content_type` / `object_id`). Where it does, nothing changes. Where it does
+  not, unwinding a database with no scoped rows is the no-op it should always
+  have been, and the two cases the package genuinely cannot infer — a swapped
+  model with rows to migrate, in either direction — raise a message saying what
+  to do instead of writing to a table that is not there.
+
+  **What an adopter must do:** nothing. The shipped scope model's path through
+  this migration is byte-for-byte what it was.
+
+  **On upgrading from 0.7 *and* swapping the model in one step:** still not
+  something this migration does. It cannot know how a project's own scope model
+  names a payer, so it now says so plainly rather than failing at the database.
+  Backfill those scopes in your own data migration and fake this one. If that
+  combination turns out to be common, the seam to add is a configurable
+  adapter — it was left out here rather than designed on speculation.
+
+  `tests/test_scope_migration_swapped.py` covers the chain under a swapped
+  model, which `tests/test_scope_migration.py` skips by design. The gap was
+  structural: every other suite runs against a database built by applying every
+  migration to no data, which is the one shape this bug does not show up in.
+
 ## 0.8.1
 
 - **Every read and write of a billing profile 404s on a database upgraded from
