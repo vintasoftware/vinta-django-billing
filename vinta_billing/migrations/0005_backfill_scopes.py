@@ -20,6 +20,8 @@ own.
 
 from django.db import migrations
 
+from vinta_billing.conf import DEFAULT_SCOPE_MODEL
+
 
 #: Tables whose ``organization_id`` becomes a ``scope_id``.
 SCOPED_MODELS = (
@@ -29,6 +31,36 @@ SCOPED_MODELS = (
     "MeteredOccurrence",
     "BillingPeriodSummary",
 )
+
+
+def _scope_model(apps):
+    """The scope model this installation actually uses.
+
+    ``apps.get_model("vinta_billing", "BillingScope")`` is wrong here: that name
+    is swappable, and a project that pointed ``BILLING_SCOPE_MODEL`` at its own
+    model has no table behind it -- Django skips ``0003``'s ``CreateModel`` for
+    a swapped-out model, and its manager raises rather than querying.
+    """
+    from django.conf import settings
+
+    label = getattr(settings, "BILLING_SCOPE_MODEL", DEFAULT_SCOPE_MODEL)
+    app_label, model_name = label.split(".")
+    return apps.get_model(app_label, model_name)
+
+
+def _generic_key_scope_model(apps):
+    """The configured scope model, or ``None`` when it does not carry a generic key.
+
+    Everything this migration does to *create* or *read back* a scope goes
+    through ``content_type``/``object_id``, which only the shipped model has. A
+    project that swapped in a model with real foreign keys names its payers some
+    other way, and nothing here can guess how -- so the callers below check for
+    ``None`` and either do nothing (there was no data to move) or say plainly
+    what the project has to do.
+    """
+    model = _scope_model(apps)
+    field_names = {field.name for field in model._meta.get_fields()}
+    return model if {"content_type", "object_id"} <= field_names else None
 
 
 def _legacy_content_type(apps, schema_editor):
@@ -52,7 +84,6 @@ def _legacy_content_type(apps, schema_editor):
 
 
 def forwards(apps, schema_editor):
-    BillingScope = apps.get_model("vinta_billing", "BillingScope")
     db = schema_editor.connection.alias
 
     # Every organization id referenced anywhere, gathered before a single write
@@ -71,6 +102,20 @@ def forwards(apps, schema_editor):
         # there is nothing to name and no reason to demand LEGACY_SCOPE_MODEL.
         _migrate_usage_breakdowns(apps, db)
         return
+
+    BillingScope = _generic_key_scope_model(apps)
+    if BillingScope is None:
+        raise RuntimeError(
+            "vinta_billing has %d organization(s) to migrate onto scopes, but "
+            "BILLING_SCOPE_MODEL points at a scope model with no generic key, "
+            "so this migration cannot name their payers. Backfill those scopes "
+            "in your own data migration and point the billing rows at them, "
+            "then re-run with this one faked (`migrate vinta_billing "
+            "0005_backfill_scopes --fake`). A project swapping the scope model "
+            "on a *fresh* database needs none of this -- there is nothing to "
+            "migrate and this branch is never reached."
+            % len(organization_ids)
+        )
 
     content_type = _legacy_content_type(apps, schema_editor)
     if content_type is None:
@@ -141,6 +186,31 @@ def backwards(apps, schema_editor):
     """
     db = schema_editor.connection.alias
 
+    BillingScope = _generic_key_scope_model(apps)
+    if BillingScope is None:
+        # A swapped scope model has no generic key to read an organization back
+        # out of. On the database this can actually happen to -- one that swapped
+        # the model, which means it never ran the forward pass above -- there is
+        # nothing pointing at a scope and nothing to restore, so unwinding is a
+        # no-op rather than an error. Reversing *is* reachable there: rolling a
+        # deploy back walks this migration whether or not it ever moved a row.
+        scoped = any(
+            apps.get_model("vinta_billing", model_name)
+            .objects.using(db)
+            .filter(scope_id__isnull=False)
+            .exists()
+            for model_name in SCOPED_MODELS
+        )
+        if scoped:
+            raise RuntimeError(
+                "vinta_billing cannot unwind onto organization ids: "
+                "BILLING_SCOPE_MODEL points at a scope model with no generic "
+                "key, so there is no way to read back which organization each "
+                "scope named. Restore the organization columns in your own "
+                "data migration, then re-run this one faked."
+            )
+        return
+
     for model_name in SCOPED_MODELS:
         model = apps.get_model("vinta_billing", model_name)
         for row in model.objects.using(db).filter(scope_id__isnull=False).iterator():
@@ -149,7 +219,6 @@ def backwards(apps, schema_editor):
             )
 
     Usage = apps.get_model("vinta_billing", "BillingPeriodResourceUsage")
-    BillingScope = apps.get_model("vinta_billing", "BillingScope")
     organization_by_scope = {
         pk: int(object_id)
         for pk, object_id in BillingScope.objects.using(db).values_list("pk", "object_id")
