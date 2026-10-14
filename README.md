@@ -427,8 +427,42 @@ different root depending on where the walk started.
 
 Transitions are published as Django signals rather than written to an audit log
 this package would have to invent. See [`vinta_billing/signals.py`](vinta_billing/signals.py).
-They are sent inside the caller's transaction, so a receiver that raises rolls
-the transition back with it.
+Most are sent once the transaction commits, exactly once per change, and never
+for a same-value write such as a webhook redelivery:
+
+```python
+from django.dispatch import receiver
+from vinta_billing.constants import PaymentStatuses
+from vinta_billing.signals import payment_status_changed
+
+
+@receiver(payment_status_changed)
+def on_payment_status_changed(sender, payment, from_status, to_status, **kwargs):
+    if to_status == PaymentStatuses.APPROVED:
+        enqueue_fulfilment(payment.pk)
+```
+
+A receiver that raises is logged and does not undo the change or stop the other
+receivers. `payment_provider_repointed` is the exception: it is still sent
+inside the caller's transaction. Which status a provider update may overwrite is
+documented in
+[`vinta_billing/services/payment_status_machine.py`](vinta_billing/services/payment_status_machine.py).
+
+### Pix (MercadoPago)
+
+```python
+payment = payment_service.create_payment(
+    scope,
+    "BRL",
+    amount,
+    "Order 42",
+    payment_method="pix",
+    expires_at=timezone.now() + datetime.timedelta(minutes=30),
+)
+pix = payment_service.get_pix_charge(payment)  # qr_code, qr_code_base64, ticket_url, expires_at
+```
+
+No card token is needed. An unpaid charge that runs out moves to `expired`.
 
 ## REST API
 

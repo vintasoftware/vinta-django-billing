@@ -1,7 +1,7 @@
 import datetime
 import logging
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from dateutil.relativedelta import relativedelta
 from django.db import transaction
@@ -10,7 +10,12 @@ from django.utils import timezone
 
 from vinta_billing import hierarchy
 from vinta_billing.conf import get_setting
-from vinta_billing.constants import BillingInterval, BillingState, PaymentProviders
+from vinta_billing.constants import (
+    BillingInterval,
+    BillingState,
+    BillingStateChangeReason,
+    PaymentProviders,
+)
 from vinta_billing.exceptions import (
     AddOnNotPurchasableError,
     BillingPeriodResolutionError,
@@ -41,7 +46,11 @@ from vinta_billing.services.billing_state_machine import transition_billing_stat
 from vinta_billing.services.dataclasses import CreatedPlan, Plan
 from vinta_billing.services.dunning_service import is_downgrade_grace
 from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
-from vinta_billing.signals import payment_provider_repointed
+from vinta_billing.signals import (
+    payment_provider_repointed,
+    send_on_commit,
+    subscription_plan_changed,
+)
 
 
 if TYPE_CHECKING:
@@ -421,7 +430,14 @@ class SubscriptionService:
         return plan
 
     @transaction.atomic
-    def change_plan(self, subscription: Subscription, plan: BillingPlan) -> Subscription:
+    def change_plan(
+        self,
+        subscription: Subscription,
+        plan: BillingPlan,
+        *,
+        actor: Any = None,
+        proration: bool = False,
+    ) -> Subscription:
         """Move ``subscription`` onto ``plan`` and re-copy its limits/entitlements.
 
         Non-overridden ``SubscriptionPlanLimit`` / ``SubscriptionEntitlement`` rows
@@ -437,13 +453,39 @@ class SubscriptionService:
         resource, *before* anything is written — see
         ``assert_plan_is_complete``. A downgrade onto an incomplete plan has no
         correct outcome, so it is refused rather than resolved arbitrarily.
+
+        Sends :data:`vinta_billing.signals.subscription_plan_changed` on commit
+        when ``plan`` is not the plan ``subscription`` was already on -- re-copying
+        the limits of the current plan (``confirm_plan_change`` on every renewal)
+        announces nothing. ``actor`` and ``proration`` are passed through to it.
         """
         assert_plan_is_complete(plan)
+        from_plan = subscription.plan
         subscription.plan = plan
         subscription.save(update_fields=["plan"])
         self._sync_limits(subscription, plan)
         self._sync_entitlements(subscription, plan)
+        if from_plan.pk != plan.pk:
+            self._announce_plan_change(subscription, from_plan, plan, actor, proration)
         return subscription
+
+    def _announce_plan_change(
+        self,
+        subscription: Subscription,
+        from_plan: BillingPlan,
+        to_plan: BillingPlan,
+        actor: Any,
+        proration: bool,
+    ) -> None:
+        send_on_commit(
+            subscription_plan_changed,
+            sender=Subscription,
+            subscription=subscription,
+            from_plan=from_plan,
+            to_plan=to_plan,
+            actor=actor,
+            proration=proration,
+        )
 
     def _plan_price(self, plan: BillingPlan, billing_interval: str) -> Decimal:
         """The price ``plan`` is sold at on ``billing_interval``.
@@ -463,6 +505,8 @@ class SubscriptionService:
         billing_interval: str,
         payment_token: str = "",
         idempotency_key: str = "",
+        *,
+        actor: Any = None,
     ) -> Subscription:
         """Move ``subscription`` toward ``plan`` — the single entry point behind
         ``POST /billing/subscription/change-plan/``.
@@ -501,6 +545,10 @@ class SubscriptionService:
         ``external_id`` and would otherwise re-drive the provider on retry —
         cannot produce a second subscription/charge.
 
+        ``actor`` -- the user asking, from a request -- is passed to the signals
+        the change sends (``subscription_plan_changed`` on an upgrade,
+        ``subscription_state_changed`` when a downgrade enters grace).
+
         :raises UnconfirmedPlanChangeError: a *different* plan change was already
             initiated and its charge is still awaiting webhook confirmation
             (see ``Subscription.plan_change_pending_confirmation``). Re-requesting
@@ -528,9 +576,14 @@ class SubscriptionService:
             new_price = self._plan_price(plan, billing_interval)
             if new_price > current_price:
                 return self._initiate_upgrade(
-                    subscription, plan, billing_interval, payment_token, idempotency_key
+                    subscription,
+                    plan,
+                    billing_interval,
+                    payment_token,
+                    idempotency_key,
+                    actor=actor,
                 )
-            return self._schedule_downgrade(subscription, plan, billing_interval)
+            return self._schedule_downgrade(subscription, plan, billing_interval, actor=actor)
 
     def _initiate_upgrade(
         self,
@@ -539,6 +592,8 @@ class SubscriptionService:
         billing_interval: str,
         payment_token: str,
         idempotency_key: str = "",
+        *,
+        actor: Any = None,
     ) -> Subscription:
         # Checked *before* any write: a subscription with no provider-side
         # instrument yet needs a token to attach one, and that is knowable
@@ -558,6 +613,10 @@ class SubscriptionService:
         subscription.pending_plan = None
         subscription.pending_billing_interval = ""
         subscription.pending_plan_effective_at = None
+        from_plan = subscription.plan
+        # Prorated only when there is a provider-side subscription to move: a
+        # first upgrade creates one from scratch, and there is nothing to prorate.
+        proration = bool(subscription.external_id)
         subscription.plan = plan
         subscription.billing_interval = billing_interval
         subscription.plan_change_pending_confirmation = True
@@ -571,6 +630,8 @@ class SubscriptionService:
                 "plan_change_pending_confirmation",
             ]
         )
+        if from_plan.pk != plan.pk:
+            self._announce_plan_change(subscription, from_plan, plan, actor, proration)
         # NOTE deliberately *not* called here: `_sync_limits`/`_sync_entitlements`
         # are what grant capacity, and this method must not grant it
         # synchronously. `subscription.plan` alone grants nothing --
@@ -979,7 +1040,12 @@ class SubscriptionService:
         return subscription
 
     def _schedule_downgrade(
-        self, subscription: Subscription, plan: BillingPlan, billing_interval: str
+        self,
+        subscription: Subscription,
+        plan: BillingPlan,
+        billing_interval: str,
+        *,
+        actor: Any = None,
     ) -> Subscription:
         """No cash refund: schedule ``plan`` to take over at the next period
         boundary while applying its (lower, or equal-price) limits immediately.
@@ -1033,7 +1099,12 @@ class SubscriptionService:
                 ]
             )
             try:
-                transition_billing_state(subscription, BillingState.GRACE)
+                transition_billing_state(
+                    subscription,
+                    BillingState.GRACE,
+                    actor=actor,
+                    reason=BillingStateChangeReason.DOWNGRADE_SCHEDULED,
+                )
             except IllegalBillingStateTransitionError:
                 logger.warning(
                     "_schedule_downgrade: Subscription %s requested a downgrade while "
@@ -1104,7 +1175,11 @@ class SubscriptionService:
             subscription.save(update_fields=["plan_change_pending_confirmation"])
 
         try:
-            transition_billing_state(subscription, BillingState.ACTIVE)
+            transition_billing_state(
+                subscription,
+                BillingState.ACTIVE,
+                reason=BillingStateChangeReason.PLAN_CHANGE_CONFIRMED,
+            )
         except IllegalBillingStateTransitionError:
             logger.warning(
                 "confirm_plan_change: Subscription %s received an approved payment "
@@ -1127,7 +1202,7 @@ class SubscriptionService:
             and subscription.pending_plan_effective_at > timezone.now()
         )
 
-    def cancel_subscription(self, subscription: Subscription) -> Subscription:
+    def cancel_subscription(self, subscription: Subscription, *, actor: Any = None) -> Subscription:
         """Cancel ``subscription``. Runs the provider-side cancellation
         (best-effort skipped when the org never attached a payment method) and
         moves ``billing_state`` to ``CANCELLED`` immediately.
@@ -1145,15 +1220,28 @@ class SubscriptionService:
         FREE" lifecycle is handled by the cycle-close sweep (the
         ``CANCELLED -> FREE`` edge) -- this method only exposes the immediate
         cancel action the endpoint needs.
+
+        The local transition is written first and the provider is called last,
+        inside one transaction: a provider call that fails rolls the transition
+        back with it, so nothing announces a cancellation that did not happen.
+        ``PaymentService.cancel_subscription`` routes its own write through the
+        same transition, which is a same-state no-op by then, so
+        ``subscription_state_changed`` and ``subscription_cancelled`` are sent
+        once, carrying ``actor``.
         """
         payment_service = self._require_payment_service()
-        if subscription.external_id:
-            payment_service.cancel_subscription(subscription)
         with transaction.atomic():
-            transition_billing_state(subscription, BillingState.CANCELLED)
+            transition_billing_state(
+                subscription,
+                BillingState.CANCELLED,
+                actor=actor,
+                reason=BillingStateChangeReason.CANCELLED,
+            )
             subscription.grace_period_ends_at = None
             subscription.last_dunning_attempt_at = None
             subscription.save(update_fields=["grace_period_ends_at", "last_dunning_attempt_at"])
+            if subscription.external_id:
+                payment_service.cancel_subscription(subscription)
         return subscription
 
     def _resolve_add_on_unit_price(self, subscription: Subscription, resource_key: str) -> Decimal:

@@ -407,6 +407,7 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
             status=mapped_status,
             description=payment_payload["response"]["status_detail"],
             update_external_id=payment_payload["response"]["id"],
+            original_status=original_status,
         )
 
     def is_payment_update(self, update_payload: dict) -> bool:

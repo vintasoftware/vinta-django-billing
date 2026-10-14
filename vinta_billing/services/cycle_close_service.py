@@ -70,7 +70,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from vinta_billing.constants import BillingState
+from vinta_billing.constants import BillingState, BillingStateChangeReason
 from vinta_billing.counting import count_by_scope
 from vinta_billing.exceptions import IllegalBillingStateTransitionError
 from vinta_billing.models import (
@@ -702,7 +702,11 @@ class CycleCloseService:
         if subscription.billing_state != BillingState.CANCELLED:
             return
         try:
-            transition_billing_state(subscription, BillingState.FREE)
+            transition_billing_state(
+                subscription,
+                BillingState.FREE,
+                reason=BillingStateChangeReason.CANCELLATION_PERIOD_ENDED,
+            )
         except IllegalBillingStateTransitionError:
             logger.warning(
                 "Cycle close: subscription %s is CANCELLED but the CANCELLED -> FREE edge was "

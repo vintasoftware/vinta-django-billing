@@ -35,12 +35,12 @@ from django.db import transaction
 from django.utils import timezone
 
 from vinta_billing.conf import get_setting
-from vinta_billing.constants import BillingState, PaymentStatuses
+from vinta_billing.constants import BillingState, BillingStateChangeReason, PaymentStatuses
 from vinta_billing.models import BillingPlan, Subscription
 from vinta_billing.notifications import NotificationTypes, Notifier, get_notifier
 from vinta_billing.recipients import get_billing_recipients
 from vinta_billing.services.billing_state_machine import transition_billing_state
-from vinta_billing.signals import billing_restriction_lifted
+from vinta_billing.signals import billing_restriction_lifted, send_on_commit
 
 
 if TYPE_CHECKING:
@@ -260,7 +260,9 @@ class DunningService:
             return subscription
 
         with transaction.atomic():
-            transition_billing_state(subscription, BillingState.GRACE)
+            transition_billing_state(
+                subscription, BillingState.GRACE, reason=BillingStateChangeReason.PAYMENT_FAILED
+            )
             grace_days = grace_period_days(subscription)
             subscription.grace_period_ends_at = timezone.now() + datetime.timedelta(days=grace_days)
             subscription.last_dunning_attempt_at = None
@@ -290,7 +292,11 @@ class DunningService:
 
         was_restricted = subscription.billing_state == BillingState.RESTRICTED
         with transaction.atomic():
-            transition_billing_state(subscription, BillingState.ACTIVE)
+            transition_billing_state(
+                subscription,
+                BillingState.ACTIVE,
+                reason=BillingStateChangeReason.PAYMENT_SUCCEEDED,
+            )
             subscription.grace_period_ends_at = None
             subscription.last_dunning_attempt_at = None
             subscription.save(update_fields=["grace_period_ends_at", "last_dunning_attempt_at"])
@@ -327,12 +333,11 @@ class DunningService:
         # able to pick it up before the transaction that moved `billing_state`
         # off RESTRICTED has committed, or the worker reads the subscription as
         # still restricted and undoes its own trigger.
-        transaction.on_commit(
-            lambda: billing_restriction_lifted.send(
-                sender=type(subscription),
-                subscription=subscription,
-                scope_ids=scope_ids,
-            )
+        send_on_commit(
+            billing_restriction_lifted,
+            sender=type(subscription),
+            subscription=subscription,
+            scope_ids=scope_ids,
         )
 
     # ------------------------------------------------------------------
@@ -471,7 +476,9 @@ class DunningService:
             return subscription
 
         with transaction.atomic():
-            transition_billing_state(subscription, BillingState.RESTRICTED)
+            transition_billing_state(
+                subscription, BillingState.RESTRICTED, reason=BillingStateChangeReason.GRACE_EXPIRED
+            )
             transaction.on_commit(lambda: self._notify_restricted(subscription))
         return subscription
 
@@ -499,14 +506,20 @@ class DunningService:
         """
         if self._fits_under_current_limits(subscription):
             with transaction.atomic():
-                transition_billing_state(subscription, BillingState.ACTIVE)
+                transition_billing_state(
+                    subscription,
+                    BillingState.ACTIVE,
+                    reason=BillingStateChangeReason.DOWNGRADE_GRACE_RESOLVED,
+                )
                 subscription.grace_period_ends_at = None
                 subscription.last_dunning_attempt_at = None
                 subscription.save(update_fields=["grace_period_ends_at", "last_dunning_attempt_at"])
             return subscription
 
         with transaction.atomic():
-            transition_billing_state(subscription, BillingState.RESTRICTED)
+            transition_billing_state(
+                subscription, BillingState.RESTRICTED, reason=BillingStateChangeReason.GRACE_EXPIRED
+            )
             transaction.on_commit(lambda: self._notify_restricted(subscription))
         return subscription
 
@@ -568,7 +581,9 @@ class DunningService:
 
         was_restricted = subscription.billing_state == BillingState.RESTRICTED
         with transaction.atomic():
-            transition_billing_state(subscription, BillingState.FREE)
+            transition_billing_state(
+                subscription, BillingState.FREE, reason=BillingStateChangeReason.FREE_FALLBACK
+            )
             subscription.grace_period_ends_at = None
             subscription.last_dunning_attempt_at = None
             subscription.save(update_fields=["grace_period_ends_at", "last_dunning_attempt_at"])
@@ -593,7 +608,7 @@ class DunningService:
     # Cancellation
     # ------------------------------------------------------------------
 
-    def cancel(self, subscription: Subscription) -> Subscription:
+    def cancel(self, subscription: Subscription, *, actor: Any = None) -> Subscription:
         """-> CANCELLED, validated against the diagram's cancellation edges.
 
         A thin validated transition kept as an alternative entry point. The live
@@ -603,7 +618,12 @@ class DunningService:
         source states may cancel (``ACTIVE``/``FREE``/``GRACE``/``RESTRICTED`` --
         see ``LEGAL_BILLING_STATE_TRANSITIONS``).
         """
-        transition_billing_state(subscription, BillingState.CANCELLED)
+        transition_billing_state(
+            subscription,
+            BillingState.CANCELLED,
+            actor=actor,
+            reason=BillingStateChangeReason.CANCELLED,
+        )
         return subscription
 
     # ------------------------------------------------------------------

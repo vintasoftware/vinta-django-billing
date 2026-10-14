@@ -74,6 +74,7 @@ def mock_refund(mock_payment):
     refund.currency = "USD"
     refund.payment = mock_payment
     refund.external_id = None
+    refund.idempotency_key = ""
     return refund
 
 
@@ -329,3 +330,24 @@ def test_payment_intent_status_mapping_values_are_valid_payment_statuses(mapped_
 @pytest.mark.parametrize("mapped_status", REFUND_STATUS_MAPPING.values())
 def test_refund_status_mapping_values_are_valid_refund_statuses(mapped_status):
     assert mapped_status in RefundStatuses.values
+
+
+@patch("vinta_billing.services.payment_adapters.stripe_payment_adapter.stripe.Refund.create")
+def test_refund_forwards_the_callers_idempotency_key(mock_create, adapter, mock_refund):
+    mock_create.return_value = Mock(id="re_1", status="succeeded")
+    mock_refund.idempotency_key = "refund-key-1"
+
+    adapter.refund(mock_refund)
+
+    assert mock_create.call_args.kwargs["idempotency_key"] == "refund-key-1"
+
+
+@patch("vinta_billing.services.payment_adapters.stripe_payment_adapter.stripe.Refund.create")
+def test_refund_without_a_key_sends_none(mock_create, adapter, mock_refund):
+    """No fallback key for Stripe: it remembers keys account-wide, and a local id is
+    not unique across environments sharing an account."""
+    mock_create.return_value = Mock(id="re_1", status="succeeded")
+
+    adapter.refund(mock_refund)
+
+    assert "idempotency_key" not in mock_create.call_args.kwargs

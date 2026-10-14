@@ -712,6 +712,14 @@ class Payment(BaseModel):
     subscription = models.ForeignKey(
         Subscription, on_delete=models.CASCADE, related_name="billing", null=True, blank=True
     )
+    #: What the provider handed back for the payer to complete the charge -- for a
+    #: Pix charge, ``qr_code``/``qr_code_base64``/``ticket_url``. ``None`` for a
+    #: charge that needs nothing further (a card). Read it through
+    #: ``PaymentService.get_pix_charge`` rather than by key.
+    provider_data = models.JSONField(null=True, blank=True)
+    #: When the provider stops accepting payment for this charge (a Pix QR
+    #: code's expiry). ``None`` for a charge that does not expire.
+    expires_at = models.DateTimeField(null=True, blank=True)
 
     status_updates: "RelatedManager[PaymentStatusUpdate]"
 
@@ -734,6 +742,19 @@ class Refund(BaseModel):
     status = models.CharField(
         max_length=50, choices=RefundStatuses, default=RefundStatuses.PENDING_SEND
     )
+    #: The caller's key for this refund, when it supplied one. Unique among the
+    #: refunds that have one, so ``PaymentService.create_refund`` called again
+    #: with the same key returns this row instead of refunding twice.
+    idempotency_key = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta(BaseModel.Meta):
+        constraints: ClassVar = [
+            UniqueConstraint(
+                fields=["idempotency_key"],
+                condition=~Q(idempotency_key=""),
+                name="vinta_billing_refund_unique_idempotency_key",
+            ),
+        ]
 
     def __str__(self):
         return (

@@ -1,3 +1,4 @@
+import datetime
 import inspect
 import json
 import logging
@@ -6,6 +7,7 @@ from collections.abc import Mapping
 
 from vinta_billing.exceptions import ProviderWebhookEventIdMissingError
 from vinta_billing.services.dataclasses import (
+    ChargeResult,
     Payment,
     PaymentStatusUpdate,
     Refund,
@@ -116,6 +118,32 @@ class BasePaymentAdapter:
         """
         raise NotImplementedError
 
+    def process_charge(
+        self,
+        payment: Payment,
+        payment_token: str,
+        idempotency_key: str = "",
+        *,
+        expires_at: datetime.datetime | None = None,
+    ) -> ChargeResult:
+        """Create the charge, and report everything the provider said about it.
+
+        What ``PaymentService.create_payment`` calls. ``process`` returns only the
+        provider's id, which is all a card charge needed; a charge the payer still
+        has to complete somewhere else (a Pix QR code) also needs its initial
+        status, the data to show the payer, and when it expires, so this returns
+        a ``ChargeResult`` instead.
+
+        The default wraps ``process`` and reports the id alone, so an adapter
+        written against ``process`` keeps working unchanged. Override it to
+        report more. ``expires_at`` asks the provider to stop accepting payment
+        at that moment; an adapter that cannot express an expiry ignores it,
+        which the default does.
+        """
+        return ChargeResult(
+            external_id=self.process(payment, payment_token, idempotency_key=idempotency_key)
+        )
+
     @abstractmethod
     def check_status(
         self, payment_external_id: str, update_id: str | None = None
@@ -133,6 +161,9 @@ class BasePaymentAdapter:
 
         :param refund: Refund object. ``refund.external_id`` is not yet set at
             this point — assigning it is what this call does.
+            ``refund.idempotency_key``, when set, is the caller's stable key and
+            must be forwarded as the provider's own idempotency key, **as a
+            string**, so a retried refund cannot refund twice.
         :return: A ``RefundResult`` carrying both the provider's external id and
             the refund's initial status. MercadoPago and Stripe both return the
             status synchronously in the same response body that carries the id,

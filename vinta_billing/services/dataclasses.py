@@ -1,3 +1,4 @@
+import datetime
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -78,6 +79,12 @@ class PaymentStatusUpdate:
     status: str
     description: str | None
     update_external_id: str | None
+    # The provider's own, unmapped status (MercadoPago's ``"authorized"``,
+    # Stripe's ``"succeeded"``), persisted as ``Payment.original_status``
+    # alongside the mapped ``status``. Defaulted so an adapter written before it
+    # existed still constructs this the same way; ``None`` leaves the column as
+    # it was.
+    original_status: str | None = None
 
     def __str__(self):
         return f"{self.id} {self.status} - {self.description}"
@@ -110,6 +117,11 @@ class Refund:
     # parent payment's own external id, via `payment.external_id`) must both be
     # available at that point.
     external_id: str | None = None
+    # Caller-supplied, stable across retries: forwarded as the provider's own
+    # idempotency key so a retried refund resolves to the refund the first
+    # attempt created. Empty means the caller supplied none; each adapter
+    # documents its own fallback.
+    idempotency_key: str = ""
 
     def __str__(self):
         return f"{self.id} {self.payment} - {self.value} - {self.currency}"
@@ -130,6 +142,45 @@ class RefundResult:
 
     external_id: str
     status: str
+
+
+@dataclass
+class ChargeResult:
+    """What the provider said when a charge was created.
+
+    Returned by ``BasePaymentAdapter.process_charge``. Only ``external_id`` is
+    required: the base implementation wraps an adapter's plain ``process()`` and
+    knows nothing else, so every other field is optional and ``None`` means "the
+    provider did not say".
+    """
+
+    external_id: str
+    #: Mapped to ``PaymentStatuses``. Written to ``Payment.status`` through the
+    #: same rules as a webhook update, so a charge approved synchronously is not
+    #: reported a second time when the webhook confirms it.
+    status: str | None = None
+    #: The provider's own, unmapped status.
+    original_status: str | None = None
+    #: Provider-specific data a caller needs to complete the charge -- for a Pix
+    #: charge, the QR code and the ticket URL. Persisted as
+    #: ``Payment.provider_data``.
+    provider_data: dict | None = None
+    #: When the provider will stop accepting payment for this charge.
+    expires_at: datetime.datetime | None = None
+
+
+@dataclass
+class PixCharge:
+    """What a payer needs to pay a Pix charge, as returned by
+    ``PaymentService.get_pix_charge``."""
+
+    payment_id: int
+    external_id: str
+    status: str
+    qr_code: str
+    qr_code_base64: str
+    ticket_url: str
+    expires_at: datetime.datetime | None
 
 
 @dataclass

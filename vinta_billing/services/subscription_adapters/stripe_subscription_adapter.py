@@ -569,6 +569,7 @@ class StripeSubscriptionAdapter(BaseSubscriptionAdapter):
             status=mapped_status,
             description=description,
             update_external_id=payment_payload.get("id"),
+            original_status=original_status,
         )
 
     def is_payment_update(self, update_payload: dict) -> bool:

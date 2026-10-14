@@ -1,3 +1,4 @@
+import datetime
 import logging
 from collections.abc import Mapping
 
@@ -5,11 +6,13 @@ import mercadopago
 import mercadopago.config
 from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from vinta_billing.conf import get_site_domain
 from vinta_billing.constants import PaymentProviders, PaymentStatuses, RefundStatuses
 from vinta_billing.exceptions import ProviderWebhookEventIdMissingError
-from vinta_billing.services.dataclasses import Refund, RefundResult
+from vinta_billing.services.dataclasses import ChargeResult, Refund, RefundResult
 from vinta_billing.services.mercadopago_signature import verify_mercadopago_signature
 from vinta_billing.services.payment_adapters.base import (
     BasePaymentAdapter,
@@ -68,11 +71,30 @@ PAYMENT_STATUS_MAPPING: dict[str, str] = {
     "refunded": PaymentStatuses.REFUNDED,
     "charged_back": PaymentStatuses.CHARGED_BACK,
 }
+#: MercadoPago has no ``expired`` status. A Pix charge nobody paid in time comes
+#: back ``cancelled`` with this ``status_detail``, and is mapped to
+#: ``PaymentStatuses.EXPIRED`` rather than ``CANCELLED`` so a caller can tell "the
+#: QR code ran out" from "the charge was called off".
+EXPIRED_STATUS_DETAIL = "expired"
+#: Payment methods charged without a card token: the payer completes them
+#: outside the checkout, so the response carries what to show them instead.
+TOKENLESS_PAYMENT_METHODS: frozenset[str] = frozenset({"pix"})
+#: The keys of a Pix charge's ``point_of_interaction.transaction_data`` persisted
+#: as ``Payment.provider_data``.
+PIX_TRANSACTION_DATA_KEYS: tuple[str, ...] = ("qr_code", "qr_code_base64", "ticket_url")
 REFUND_STATUS_MAPPING: dict[str, str] = {
     "pending": RefundStatuses.PENDING,
     "approved": RefundStatuses.APPROVED,
     "rejected": RefundStatuses.REJECTED,
 }
+
+
+def map_payment_status(original_status: str, status_detail: str | None = None) -> str:
+    """MercadoPago's ``status`` (and, for an expired Pix charge, its
+    ``status_detail``) as a ``PaymentStatuses`` value; ``UNKNOWN`` when unmapped."""
+    if original_status == "cancelled" and status_detail == EXPIRED_STATUS_DETAIL:
+        return PaymentStatuses.EXPIRED
+    return PAYMENT_STATUS_MAPPING.get(original_status, PaymentStatuses.UNKNOWN)
 
 
 class MercadoPagoPaymentAdapter(BasePaymentAdapter):
@@ -98,6 +120,28 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
         return bool(self.access_token)
 
     def process(self, payment: Payment, payment_token: str, idempotency_key: str = "") -> str:
+        return self.process_charge(
+            payment, payment_token, idempotency_key=idempotency_key
+        ).external_id
+
+    def process_charge(
+        self,
+        payment: Payment,
+        payment_token: str,
+        idempotency_key: str = "",
+        *,
+        expires_at: datetime.datetime | None = None,
+    ) -> ChargeResult:
+        """Create the charge. See ``BasePaymentAdapter.process_charge``.
+
+        A Pix charge (``payment_method="pix"``) is sent without a card token or
+        an installment count, which MercadoPago rejects on Pix. The payer is
+        identified by the billing profile's email, and ``expires_at`` becomes the
+        charge's ``date_of_expiration``. The QR code and ticket URL MercadoPago
+        answers with come back as ``provider_data``.
+        """
+        if expires_at is not None and timezone.is_naive(expires_at):
+            raise ValueError("expires_at must be timezone-aware.")
         request_options = mercadopago.config.RequestOptions()
         # A caller-supplied stable key (survives a Payment row being re-created on
         # retry) takes precedence over the local payment id; see
@@ -117,15 +161,14 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
                 "must be set."
             )
 
-        payment_data = {
+        payment_method_id = PAYMENT_METHODS_MAPPING.get(
+            payment.payment_method, payment.payment_method
+        )
+        payment_data: dict = {
             "transaction_amount": str(payment.value),
-            "token": payment_token,
             "description": payment.description,
-            "payment_method_id": PAYMENT_METHODS_MAPPING.get(
-                payment.payment_method, payment.payment_method
-            ),
+            "payment_method_id": payment_method_id,
             "notification_url": f"https://{site_domain}{notification_url}",
-            "installments": 1,
             "payer": {
                 "email": payment.billing_profile.email,
                 "identification": {
@@ -148,12 +191,49 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
                 },
             },
         }
+        if payment_method_id not in TOKENLESS_PAYMENT_METHODS:
+            payment_data["token"] = payment_token
+            payment_data["installments"] = 1
+        if expires_at is not None:
+            payment_data["date_of_expiration"] = expires_at.isoformat(timespec="milliseconds")
         result = self.sdk.payment().create(payment_data, request_options)
-        return result["response"]["id"]
+        return self._charge_result(result["response"], expires_at)
+
+    def _charge_result(
+        self, response: dict, requested_expires_at: datetime.datetime | None
+    ) -> ChargeResult:
+        original_status = response.get("status")
+        status = None
+        if original_status:
+            status = map_payment_status(original_status, response.get("status_detail"))
+        transaction_data = (response.get("point_of_interaction") or {}).get(
+            "transaction_data"
+        ) or {}
+        provider_data = {
+            key: transaction_data[key]
+            for key in PIX_TRANSACTION_DATA_KEYS
+            if transaction_data.get(key)
+        }
+        expires_at = requested_expires_at
+        if response.get("date_of_expiration"):
+            expires_at = parse_datetime(response["date_of_expiration"]) or expires_at
+        return ChargeResult(
+            external_id=str(response["id"]),
+            status=status,
+            original_status=original_status,
+            provider_data=provider_data or None,
+            expires_at=expires_at,
+        )
 
     def refund(self, refund: Refund) -> RefundResult:
         request_options = mercadopago.config.RequestOptions()
-        request_options.custom_headers = {"x-idempotency-key": {refund.id}}
+        # A string, always: the header value used to be the set literal
+        # `{refund.id}`, which the SDK serialized as "{5}" -- a key that changed
+        # with nothing the caller controlled. The caller's key wins; the local
+        # refund id is the per-attempt fallback, like `process` above.
+        request_options.custom_headers = {
+            "x-idempotency-key": refund.idempotency_key or str(refund.id)
+        }
         response = self.sdk.refund().create(
             refund.payment.external_id, {"amount": str(refund.value)}, request_options
         )
@@ -176,7 +256,9 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
     ) -> PaymentStatusUpdate:
         response = self.sdk.payment().get(payment_external_id)
         original_status = response["response"]["status"]
-        mapped_status = PAYMENT_STATUS_MAPPING.get(original_status, PaymentStatuses.UNKNOWN)
+        mapped_status = map_payment_status(
+            original_status, response["response"].get("status_detail")
+        )
         if mapped_status == PaymentStatuses.UNKNOWN:
             logger.error(
                 "Unknown payment status: payment_external_id=%s original_status=%s",
@@ -192,6 +274,7 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
             # covered by MercadoPago's signature and must not be persisted as an
             # external id (see `get_event_id` below).
             update_external_id=response["response"].get("id"),
+            original_status=original_status,
         )
 
     def get_payment_external_id_from_update(self, update_payload: dict) -> str | None:
