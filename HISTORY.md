@@ -1,5 +1,153 @@
 # History
 
+## 0.9.0
+
+Five gaps a project charging through MercadoPago runs into, closed together.
+Every change is additive: existing calls keep their meaning, new parameters are
+keyword-only with defaults, and the one migration (`0007`) adds nullable or
+defaulted columns and reverses cleanly.
+
+### `Payment.status` follows the provider
+
+**`Payment.status` was written once, as `pending_send`, and never again.**
+`create_payment` saved only the provider's id, and both webhook paths
+(`receive_payment_update`, `receive_subscription_payment_update`) recorded a
+`PaymentStatusUpdate` row without touching the payment itself. Anything reading
+`Payment.status` -- a project's own "is this paid?" check, the admin -- saw
+`pending_send` forever.
+
+Every provider update now writes `Payment.status` and `Payment.original_status`
+(the provider's raw status) in the same transaction as its `PaymentStatusUpdate`
+row, and `create_payment` writes the status the charge response carried. A
+charge first seen on the subscription-payment webhook is created as `pending`
+and moved from there -- it used to be created with the adapter's raw status
+string (Stripe's `succeeded`), which is not a `PaymentStatuses` value.
+
+Providers deliver at least once and out of order, so an update is checked
+before it overwrites anything (`vinta_billing/services/payment_status_machine.py`):
+
+- the same status again is not a change;
+- `rejected`, `rejected_by_bank`, `cancelled`, `expired`, `refunded` and
+  `charged_back` are final and never move;
+- `approved` only moves forward, to `partially_refunded`, `refunded`,
+  `charged_back` or `in_mediation` (and a dispute can resolve back to
+  `approved`);
+- an open charge can move anywhere, but never back to `pending_send`, and an
+  unmapped (`unknown`) status never overwrites one the provider reported.
+
+A refused update is still kept as a `PaymentStatusUpdate` row -- the history of
+what the provider said -- but leaves the status alone. Refunds follow the same
+shape: `approved` and `rejected` are final, and a poll that cannot find the
+refund (`unknown`) no longer overwrites what the provider said before. The
+payment row is locked while it is checked, so two deliveries racing each other
+cannot both apply the same change.
+
+### The declared signals are sent
+
+**`signals.py` promised a signal "at every billing-significant transition"; two
+were ever sent.** Now sent, each through `transaction.on_commit`, only when the
+value actually changed, and exactly once per change:
+
+- `payment_status_changed(payment, from_status, to_status)` -- on **every**
+  status change, not only terminal ones; filter on `to_status`. The module's
+  "reached a terminal status" comment now says so.
+- `refund_status_changed(refund, from_status, to_status)` -- from the
+  create-refund response and from `check_refund_status`.
+- `subscription_state_changed(subscription, from_state, to_state, actor, reason)`
+  -- from `transition_billing_state`, the one place `billing_state` is written,
+  so grace, restriction, recovery, free fallback, plan-change confirmation,
+  cancellation and the cycle-close revert all send it. `reason` is a new
+  `BillingStateChangeReason` value; `actor` is the requesting user where there
+  is one (the change-plan and cancel endpoints pass `request.user`) and `None`
+  for the system.
+- `subscription_plan_changed(subscription, from_plan, to_plan, actor, proration)`
+  -- when `Subscription.plan` actually moves: on upgrade initiation
+  (`proration=True` when an existing provider subscription is moved) and when a
+  scheduled downgrade takes over at the period boundary.
+- `subscription_cancelled(subscription, actor, at_period_end)` -- with every move
+  into `cancelled`; `at_period_end` is `True` because a cancelled subscription
+  runs to the end of its paid cycle.
+- `limit_warning_raised(scope, resource_key, level, usage, limit)` -- from
+  `UsageWarningService`, alongside the in-app notification and under the same
+  debounce: once per resource, level and billing cycle. A notification that
+  fails to send rolls the marker back and sends no signal; the next tick retries
+  both.
+- `billing_period_closed(subscription, period_start, period_end, summary)` --
+  from `CycleCloseService`, once per closed period, when its
+  `BillingPeriodSummary` is created (`summary` is that row). A period whose
+  statement fails to persist -- logged, and never allowed to undo the charge --
+  closes without it.
+
+No signal was renamed and no kwarg changed. Sent on commit, a receiver that
+raises is logged by Django and can no longer roll the change back; it also no
+longer stops the other receivers. `billing_restriction_lifted` moves to the same
+helper. `payment_provider_repointed` is unchanged and still sent inside the
+caller's transaction. Every signal `signals.py` declares is now sent.
+
+`transition_billing_state`, `SubscriptionService.change_plan`,
+`request_plan_change`, `cancel_subscription` and `DunningService.cancel` gain
+keyword-only `actor` (and, for the first, `reason`) parameters.
+
+### `PaymentService.cancel_subscription` moves `billing_state`
+
+**It set `status=cancelled` and left `billing_state` where it was**, so a
+project calling it directly got a subscription the provider had cancelled and
+the entitlement engine still treated as live. It now routes through
+`transition_billing_state` as well, in the same transaction as the status
+write, and takes a keyword-only `actor`. `SubscriptionService.cancel_subscription`
+remains the fuller action (it also clears the dunning bookkeeping); it now
+writes the local transition first and calls the provider last inside one
+transaction, so a failed provider call announces nothing.
+
+### Pix through MercadoPago
+
+**The adapter mapped `pix` but always sent a card token and `installments: 1`,
+and kept only the payment id**, so a Pix charge either failed at MercadoPago or
+came back with no QR code to show anyone.
+
+- `create_payment(..., payment_method="pix", expires_at=...)` charges without a
+  token, identifies the payer by the billing profile's email, and sends
+  `expires_at` (timezone-aware) as `date_of_expiration`. `payment_token` now
+  defaults to `""`; `expires_at` is keyword-only.
+- The response's `point_of_interaction.transaction_data` (`qr_code`,
+  `qr_code_base64`, `ticket_url`) is stored on the new `Payment.provider_data`
+  and the expiry on `Payment.expires_at`.
+- `PaymentService.get_pix_charge(payment)` returns them as a `PixCharge`
+  dataclass, or `None` for a charge with no Pix data. It makes no provider call.
+- A Pix charge MercadoPago reports as `cancelled` with `status_detail="expired"`
+  maps to `PaymentStatuses.EXPIRED`.
+
+Underneath, adapters gain `BasePaymentAdapter.process_charge`, returning a
+`ChargeResult` (id, status, raw status, provider data, expiry). Its default
+wraps `process()`, so a project's own adapter keeps working unchanged and simply
+reports the id alone. `PaymentStatusUpdate` gains an optional `original_status`.
+
+### Idempotent refunds
+
+**`create_refund` took no idempotency key, and the MercadoPago adapter sent
+`{"x-idempotency-key": {refund.id}}`** -- a set literal, serialized as `"{5}"`,
+the same bug already fixed for charges. `create_refund` takes a keyword-only
+`idempotency_key`, stored on the new `Refund.idempotency_key` (unique when set):
+calling again with the same key returns the existing refund without calling the
+provider, and reusing a key for a different payment raises `ValueError`. The key
+reaches MercadoPago as a string, falling back to `str(refund.id)`, and Stripe as
+its `Idempotency-Key` (no fallback there: Stripe remembers keys account-wide,
+and a local id is not unique across environments sharing an account).
+
+### Upgrading from 0.8
+
+1. Upgrade and run `migrate` (`0007`: adds `Payment.provider_data`,
+   `Payment.expires_at`, `Refund.idempotency_key` and a partial unique
+   constraint; reversible).
+2. If a receiver relied on raising to roll back a billing-state change, move
+   that check before the call: receivers now run after commit.
+3. Receivers of `payment_status_changed` hear every change -- filter on
+   `to_status` for outcomes.
+4. Existing `Payment` rows keep whatever status they had (most likely
+   `pending_send`); the next provider update for each one moves it. Nothing is
+   backfilled.
+5. Pass `idempotency_key=` to `create_refund` wherever a refund can be retried.
+
 ## 0.8.2
 
 - **A project that swapped `BILLING_SCOPE_MODEL` could not reverse

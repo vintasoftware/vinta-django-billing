@@ -26,6 +26,33 @@ class BillingState(TextChoices):
     CANCELLED = ("cancelled", _("Cancelled"))
 
 
+class BillingStateChangeReason(TextChoices):
+    """Why a subscription's ``billing_state`` moved.
+
+    Sent as ``reason`` with ``vinta_billing.signals.subscription_state_changed``,
+    so a receiver can branch on it rather than on the shape of the transition:
+    ``ACTIVE -> GRACE`` is a failed charge or a downgrade, and only the reason
+    says which.
+    """
+
+    PAYMENT_FAILED = ("payment_failed", _("A charge failed"))
+    PAYMENT_SUCCEEDED = ("payment_succeeded", _("A charge succeeded"))
+    PLAN_CHANGE_CONFIRMED = ("plan_change_confirmed", _("A plan change's charge was confirmed"))
+    DOWNGRADE_SCHEDULED = ("downgrade_scheduled", _("A downgrade was scheduled"))
+    DOWNGRADE_GRACE_RESOLVED = (
+        "downgrade_grace_resolved",
+        _("Usage fits the downgraded plan again"),
+    )
+    GRACE_EXPIRED = ("grace_expired", _("The grace period ran out"))
+    FREE_FALLBACK = ("free_fallback", _("Usage fits the free plan"))
+    CANCELLED = ("cancelled", _("The subscription was cancelled"))
+    CANCELLATION_PERIOD_ENDED = (
+        "cancellation_period_ended",
+        _("A cancelled subscription reached the end of its paid cycle"),
+    )
+    UNSPECIFIED = ("unspecified", _("Unspecified"))
+
+
 class BillingInterval(TextChoices):
     """Billing cadence for a ``Subscription``."""
 

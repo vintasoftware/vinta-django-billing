@@ -149,14 +149,21 @@ class StripePaymentAdapter(BasePaymentAdapter):
             # symmetric across adapters so nothing downstream has to special-case
             # which provider it's talking to.
             update_external_id=intent.id,
+            original_status=original_status,
         )
 
     def refund(self, refund: Refund) -> RefundResult:
-        stripe_refund = stripe.Refund.create(
-            payment_intent=refund.payment.external_id,
-            amount=to_stripe_amount(refund.value, refund.currency),
-            api_key=self.api_key,
-        )
+        params: dict = {
+            "payment_intent": refund.payment.external_id,
+            "amount": to_stripe_amount(refund.value, refund.currency),
+            "api_key": self.api_key,
+        }
+        # Only the caller's key, never a fallback: Stripe remembers a key for
+        # every request on the account, and a local refund id is not unique
+        # across the environments that may share one.
+        if refund.idempotency_key:
+            params["idempotency_key"] = refund.idempotency_key
+        stripe_refund = stripe.Refund.create(**params)
         mapped_status = REFUND_STATUS_MAPPING.get(
             stripe_refund.status or "", RefundStatuses.UNKNOWN
         )

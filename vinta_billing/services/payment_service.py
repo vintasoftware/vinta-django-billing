@@ -3,12 +3,14 @@ import logging
 from collections.abc import Mapping
 from dataclasses import asdict
 from decimal import Decimal
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from django.db import transaction
 
 from vinta_billing.constants import (
     BillingInterval,
+    BillingState,
+    BillingStateChangeReason,
     PaymentStatuses,
     ProviderWebhookRoute,
     RefundStatuses,
@@ -29,12 +31,15 @@ from vinta_billing.models import PaymentStatusUpdate as PaymentStatusUpdateModel
 from vinta_billing.models import ProviderWebhookEvent as ProviderWebhookEventModel
 from vinta_billing.models import Refund as RefundModel
 from vinta_billing.models import Subscription as SubscriptionModel
+from vinta_billing.services.billing_state_machine import transition_billing_state
 from vinta_billing.services.dataclasses import (
     BillingAddress,
     BillingProfile,
+    ChargeResult,
     CreatedPlan,
     Payment,
     PaymentStatusUpdate,
+    PixCharge,
     Plan,
     Refund,
     Subscription,
@@ -42,6 +47,10 @@ from vinta_billing.services.dataclasses import (
 from vinta_billing.services.payment_adapters import get_payment_provider_registry
 from vinta_billing.services.payment_adapters.base import BasePaymentAdapter
 from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
+from vinta_billing.services.payment_status_machine import (
+    record_payment_status,
+    record_refund_status,
+)
 from vinta_billing.services.subscription_adapters import get_subscription_provider_registry
 from vinta_billing.services.subscription_adapters.base import BaseSubscriptionAdapter
 from vinta_billing.services.subscription_plan_factory.base import BaseSubscriptionPlanFactory
@@ -209,9 +218,25 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         amount: Decimal,
         description: str,
         payment_method: str,
-        payment_token: str,
+        payment_token: str = "",
         idempotency_key: str = "",
+        *,
+        expires_at: datetime.datetime | None = None,
     ) -> PaymentModel:
+        """Charge ``scope``'s billing profile through its resolved provider.
+
+        ``payment_token`` is the card token for a card charge and empty for a
+        method the payer completes elsewhere (``payment_method="pix"``).
+        ``expires_at`` (timezone-aware) asks the provider to stop accepting
+        payment at that moment -- a Pix QR code's lifetime; see
+        ``get_pix_charge`` for what to show the payer.
+
+        Whatever the provider reports synchronously is written before this
+        returns: its id, the status it answered with -- through the same rules
+        as a webhook update, so ``payment_status_changed`` is sent on commit and
+        a webhook confirming the same status later sends nothing -- and, for a
+        Pix charge, the QR code data and expiry.
+        """
         try:
             billing_profile = scope.billing_profile
         except BillingProfileModel.DoesNotExist as e:
@@ -239,15 +264,56 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         # transaction resolves to the same provider-side charge rather than a
         # second one -- the local `Payment` row above is re-created on retry and
         # so cannot itself dedupe across the rollback.
-        external_id = adapter.process(
-            payment=self._serialize_payment(payment),
-            payment_token=payment_token,
-            idempotency_key=idempotency_key,
-        )
+        serialized_payment = self._serialize_payment(payment)
+        if hasattr(adapter, "process_charge"):
+            charge = adapter.process_charge(
+                serialized_payment,
+                payment_token,
+                idempotency_key=idempotency_key,
+                expires_at=expires_at,
+            )
+        else:
+            # A project adapter that duck-types the interface rather than
+            # subclassing `BasePaymentAdapter` predates `process_charge`; it
+            # reports the id alone, exactly as before 0.9.
+            charge = ChargeResult(
+                external_id=adapter.process(
+                    payment=serialized_payment,
+                    payment_token=payment_token,
+                    idempotency_key=idempotency_key,
+                )
+            )
 
-        payment.external_id = external_id
-        payment.save(update_fields=["external_id"])
+        payment.external_id = charge.external_id
+        payment.provider_data = charge.provider_data
+        payment.expires_at = charge.expires_at
+        payment.save(update_fields=["external_id", "provider_data", "expires_at", "modified"])
+        if charge.status:
+            record_payment_status(payment, charge.status, charge.original_status or "")
         return payment
+
+    def get_pix_charge(self, payment: PaymentModel) -> PixCharge | None:
+        """What the payer needs to pay ``payment`` by Pix: the copy-and-paste
+        code, the QR code image (base64 PNG), the provider's ticket URL, and when
+        the code stops working. ``None`` when ``payment`` carries no Pix data --
+        a card charge, or a charge created before 0.9.
+
+        Reads only what ``create_payment`` stored; it makes no provider call, so
+        it is safe on every page load. ``status`` is the charge's current status,
+        so a caller can stop showing the code once it is no longer ``pending``.
+        """
+        data = payment.provider_data or {}
+        if not data.get("qr_code"):
+            return None
+        return PixCharge(
+            payment_id=payment.pk,
+            external_id=payment.external_id,
+            status=payment.status,
+            qr_code=data["qr_code"],
+            qr_code_base64=data.get("qr_code_base64", ""),
+            ticket_url=data.get("ticket_url", ""),
+            expires_at=payment.expires_at,
+        )
 
     def _serialize_billing_address(self, billing_address: BillingAddressModel) -> BillingAddress:
         return BillingAddress(
@@ -322,7 +388,29 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         payment_id: int,
         value: Decimal,
         currency: str,
+        *,
+        idempotency_key: str = "",
     ) -> RefundModel:
+        """Refund ``value`` of the payment ``payment_id``.
+
+        ``idempotency_key`` makes the call safe to retry. It is forwarded to the
+        provider as its own idempotency key, so the provider refunds at most once
+        for it, and stored on the ``Refund`` row, so calling this again with the
+        same key returns that row without calling the provider at all. Reusing a
+        key for a different payment raises ``ValueError``.
+
+        ``refund_status_changed`` is sent on commit once the provider's answer
+        moves the refund off ``pending_send``.
+        """
+        if idempotency_key:
+            existing = RefundModel.objects.filter(idempotency_key=idempotency_key).first()
+            if existing is not None:
+                if existing.payment_id != payment_id:
+                    raise ValueError(
+                        "This idempotency key was already used to refund a different payment."
+                    )
+                return existing
+
         # Existing row: resolve from the payment being refunded's own stored
         # provider, never the scope's current pin -- and resolve (and look
         # up the adapter for) it *before* any `Refund` row exists, so an
@@ -344,6 +432,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
             value=value,
             currency=currency,
             status=RefundStatuses.PENDING_SEND,
+            idempotency_key=idempotency_key,
         )
         RefundStatusUpdate.objects.create(
             refund=refund,
@@ -357,10 +446,12 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
                     value=refund.value,
                     currency=refund.currency,
                     payment=serialized_payment,
+                    idempotency_key=idempotency_key,
                 )
             )
             refund.external_id = refund_result.external_id
-            refund.status = refund_result.status
+            refund.save(update_fields=["external_id", "modified"])
+            new_status = refund_result.status
             RefundStatusUpdate.objects.create(
                 refund=refund,
                 status=refund_result.status,
@@ -379,10 +470,9 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
                 status=RefundStatuses.FAILED,
                 description="Failed to process refund",
             )
-            refund.status = RefundStatuses.FAILED
-            pass
+            new_status = RefundStatuses.FAILED
 
-        refund.save()
+        record_refund_status(refund, new_status)
         return refund
 
     def check_payment_status(self, payment: PaymentModel) -> PaymentStatusUpdate:
@@ -394,8 +484,11 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
     def check_refund_status(self, refund: RefundModel) -> None:
         # Existing row: resolve from the refunded payment's own stored provider,
         # never the scope's current pin.
+        # Written through the refund status rules: a poll that cannot find the
+        # refund (`UNKNOWN`) does not overwrite what the provider already said,
+        # and a change sends `refund_status_changed` on commit.
         adapter = self.get_configured_payment_adapter(refund.payment.payment_provider)
-        refund.status = adapter.check_refund_status(
+        to_status = adapter.check_refund_status(
             Refund(
                 id=refund.id,
                 value=refund.value,
@@ -404,7 +497,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
                 external_id=refund.external_id,
             )
         )
-        refund.save()
+        record_refund_status(refund, to_status)
 
     def get_payment_by_external_id(self, external_id: str) -> PaymentModel | None:
         return PaymentModel.objects.filter(external_id=external_id).first()
@@ -422,12 +515,27 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         if not payment:
             return None
 
-        return PaymentStatusUpdateModel.objects.create(
-            status=payment_status_update_data.status,
-            description=payment_status_update_data.description or "",
-            external_id=payment_status_update_data.update_external_id or "",
-            payment=payment,
-        )
+        return self._record_status_update(payment, payment_status_update_data)
+
+    def _record_status_update(
+        self, payment: PaymentModel, update: PaymentStatusUpdate
+    ) -> PaymentStatusUpdateModel:
+        """Keep the provider's update as history and move ``payment`` to it.
+
+        One transaction for both: the ``PaymentStatusUpdate`` row is written
+        whatever it says, and ``Payment.status``/``original_status`` follow it
+        only where ``payment_status_machine``'s rules allow -- a stale or
+        repeated update is history, not a change, and sends no signal.
+        """
+        with transaction.atomic():
+            status_update = PaymentStatusUpdateModel.objects.create(
+                status=update.status,
+                description=update.description or "",
+                external_id=update.update_external_id or "",
+                payment=payment,
+            )
+            record_payment_status(payment, update.status, update.original_status or "")
+        return status_update
 
     def get_subscription_by_external_id(self, external_id: str) -> SubscriptionModel | None:
         return SubscriptionModel.objects.filter(external_id=external_id).first()
@@ -464,7 +572,13 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
                 billing_profile=billing_profile,
                 value=subscription_payment_data.value,
                 currency=subscription_payment_data.currency,
-                status=subscription_payment_data.status,
+                # Recorded as `pending` and then moved to what the update says,
+                # through the same rules as every other status write, rather than
+                # created on the final status: that way a charge first learned
+                # about here announces `pending -> approved` like any other.
+                # (The adapter's own `status` field is the provider's raw value,
+                # not a `PaymentStatuses` member, so it was never right here.)
+                status=PaymentStatuses.PENDING,
                 description=subscription_payment_data.description,
                 payment_method=subscription_payment_data.payment_method,
                 subscription=subscription,
@@ -481,12 +595,7 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
                 payment_provider=subscription_payment_data.payment_provider or provider,
             )
 
-        return PaymentStatusUpdateModel.objects.create(
-            status=payment_status_update_data.status,
-            description=payment_status_update_data.description or "",
-            external_id=payment_status_update_data.update_external_id or "",
-            payment=payment,
-        )
+        return self._record_status_update(payment, payment_status_update_data)
 
     def verify_payment_webhook_signature(
         self, provider: str, raw_body: bytes, headers: Mapping[str, str]
@@ -789,14 +898,33 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
             idempotency_key=idempotency_key,
         )
 
-    def cancel_subscription(self, subscription: SubscriptionModel) -> None:
+    def cancel_subscription(self, subscription: SubscriptionModel, *, actor: Any = None) -> None:
+        """Cancel ``subscription`` at its provider and record it locally.
+
+        Moves both columns: ``status`` (the provider-side subscription) to
+        ``CANCELLED``, and ``billing_state`` to ``CANCELLED`` through
+        ``transition_billing_state`` -- so the transition is validated and
+        ``subscription_state_changed``/``subscription_cancelled`` are sent on
+        commit, carrying ``actor``. Before 0.9 only ``status`` moved.
+
+        ``SubscriptionService.cancel_subscription`` is the fuller action -- it
+        also clears the dunning bookkeeping -- and calls this one for the
+        provider side; prefer it.
+        """
         # Existing row: resolves from `subscription`'s own stored provider.
         adapter = self.get_configured_subscription_adapter(subscription.payment_provider)
         adapter.cancel_subscription(self._serialize_subscription(subscription))
-        SubscriptionStatusUpdate.objects.create(
-            subscription=subscription,
-            status=SubscriptionStatuses.CANCELLED,
-            description="Subscription cancelled",
-        )
-        subscription.status = SubscriptionStatuses.CANCELLED
-        subscription.save()
+        with transaction.atomic():
+            SubscriptionStatusUpdate.objects.create(
+                subscription=subscription,
+                status=SubscriptionStatuses.CANCELLED,
+                description="Subscription cancelled",
+            )
+            subscription.status = SubscriptionStatuses.CANCELLED
+            subscription.save(update_fields=["status", "modified"])
+            transition_billing_state(
+                subscription,
+                BillingState.CANCELLED,
+                actor=actor,
+                reason=BillingStateChangeReason.CANCELLED,
+            )

@@ -70,7 +70,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from vinta_billing.constants import BillingState
+from vinta_billing.constants import BillingState, BillingStateChangeReason
 from vinta_billing.counting import count_by_scope
 from vinta_billing.exceptions import IllegalBillingStateTransitionError
 from vinta_billing.models import (
@@ -90,6 +90,7 @@ from vinta_billing.services.entitlement_service import (
 from vinta_billing.services.metering_service import MeteringService
 from vinta_billing.services.payment_service import PaymentService
 from vinta_billing.services.subscription_service import SubscriptionService, overage_settlement_step
+from vinta_billing.signals import billing_period_closed, send_on_commit
 
 
 logger = logging.getLogger(__name__)
@@ -587,6 +588,19 @@ class CycleCloseService:
                         )
                     )
                 BillingPeriodResourceUsage.objects.bulk_create(resource_rows, ignore_conflicts=True)
+                # Only for the write that created the statement: the repair path
+                # above re-enters an already-announced period. Queued inside the
+                # savepoint, so a statement that fails to persist -- swallowed
+                # below -- announces nothing.
+                if created:
+                    send_on_commit(
+                        billing_period_closed,
+                        sender=BillingPeriodSummary,
+                        subscription=subscription,
+                        period_start=period_start,
+                        period_end=period_end,
+                        summary=summary,
+                    )
         except Exception:
             logger.exception(
                 "Cycle close: failed to persist the billing period statement for "
@@ -702,7 +716,11 @@ class CycleCloseService:
         if subscription.billing_state != BillingState.CANCELLED:
             return
         try:
-            transition_billing_state(subscription, BillingState.FREE)
+            transition_billing_state(
+                subscription,
+                BillingState.FREE,
+                reason=BillingStateChangeReason.CANCELLATION_PERIOD_ENDED,
+            )
         except IllegalBillingStateTransitionError:
             logger.warning(
                 "Cycle close: subscription %s is CANCELLED but the CANCELLED -> FREE edge was "

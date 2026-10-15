@@ -1,3 +1,4 @@
+import datetime
 import hashlib
 import hmac
 import json
@@ -94,6 +95,7 @@ def mock_refund(mock_payment):
     refund.id = "refund-123"
     refund.value = Decimal("50.25")
     refund.payment = mock_payment
+    refund.idempotency_key = ""
     return refund
 
 
@@ -240,7 +242,7 @@ def test_refund_success(mock_request_options, adapter, mock_refund):
 
     # Verify
     assert result == RefundResult(external_id="refund-456", status=RefundStatuses.APPROVED)
-    mock_options.custom_headers = {"x-idempotency-key": {"refund-123"}}
+    assert mock_options.custom_headers == {"x-idempotency-key": "refund-123"}
     adapter.sdk.refund().create.assert_called_once_with(
         "mp-payment-456", {"amount": "50.25"}, mock_options
     )
@@ -622,3 +624,141 @@ def test_refund_status_mapping_values_are_valid_refund_statuses(mapped_status):
     """Every `REFUND_STATUS_MAPPING` value must be writeable to the
     `choices`-constrained `Refund.status` column."""
     assert mapped_status in RefundStatuses.values
+
+
+# --- Refund idempotency key ---
+
+
+@patch(
+    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+)
+def test_refund_idempotency_header_is_a_string(mock_request_options, adapter, mock_refund):
+    """Regression: the header used to be the set literal ``{refund.id}``, which the
+    SDK serialized as ``"{refund-123}"``. It must be a plain ``str``."""
+    mock_options = Mock()
+    mock_request_options.return_value = mock_options
+    adapter.sdk.refund().create.return_value = {"response": {"id": "r-1", "status": "approved"}}
+
+    adapter.refund(mock_refund)
+
+    header_value = mock_options.custom_headers["x-idempotency-key"]
+    assert isinstance(header_value, str)
+    assert header_value == "refund-123"
+
+
+@patch(
+    "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.config.RequestOptions"
+)
+def test_refund_forwards_the_callers_idempotency_key(mock_request_options, adapter, mock_refund):
+    mock_options = Mock()
+    mock_request_options.return_value = mock_options
+    adapter.sdk.refund().create.return_value = {"response": {"id": "r-1", "status": "approved"}}
+    mock_refund.idempotency_key = "refund-key-1"
+
+    adapter.refund(mock_refund)
+
+    assert mock_options.custom_headers == {"x-idempotency-key": "refund-key-1"}
+
+
+# --- Pix ---
+
+
+PIX_RESPONSE = {
+    "id": 123456789,
+    "status": "pending",
+    "status_detail": "pending_waiting_transfer",
+    "date_of_expiration": "2026-10-14T12:30:00.000-03:00",
+    "point_of_interaction": {
+        "transaction_data": {
+            "qr_code": "00020126580014br.gov.bcb.pix-synthetic",
+            "qr_code_base64": "iVBORw0KGgo-synthetic",
+            "ticket_url": "https://www.mercadopago.com.br/payments/123456789/ticket",
+        }
+    },
+}
+
+
+@pytest.fixture
+def mock_pix_payment(mock_payment):
+    mock_payment.payment_method = "pix"
+    return mock_payment
+
+
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
+@override_settings(SITE_DOMAIN="example.com")
+def test_process_charge_sends_pix_without_a_card_token(mock_reverse, adapter, mock_pix_payment):
+    mock_reverse.return_value = "/payment/update/mercadopago/payment-123/"
+    adapter.sdk.payment().create.return_value = {"response": PIX_RESPONSE}
+    expires_at = datetime.datetime(2026, 10, 14, 15, 30, tzinfo=datetime.UTC)
+
+    adapter.process_charge(mock_pix_payment, "", expires_at=expires_at)
+
+    payment_data = adapter.sdk.payment().create.call_args.args[0]
+    assert payment_data["payment_method_id"] == "pix"
+    assert "token" not in payment_data
+    assert "installments" not in payment_data
+    assert payment_data["payer"]["email"] == "test@example.com"
+    assert payment_data["date_of_expiration"] == "2026-10-14T15:30:00.000+00:00"
+
+
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
+@override_settings(SITE_DOMAIN="example.com")
+def test_process_charge_returns_the_pix_qr_code_and_expiry(mock_reverse, adapter, mock_pix_payment):
+    mock_reverse.return_value = "/payment/update/mercadopago/payment-123/"
+    adapter.sdk.payment().create.return_value = {"response": PIX_RESPONSE}
+
+    result = adapter.process_charge(mock_pix_payment, "")
+
+    assert result.external_id == "123456789"
+    assert result.status == PaymentStatuses.PENDING
+    assert result.original_status == "pending"
+    assert result.provider_data == PIX_RESPONSE["point_of_interaction"]["transaction_data"]
+    assert result.expires_at == datetime.datetime(2026, 10, 14, 15, 30, tzinfo=datetime.UTC)
+
+
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
+@override_settings(SITE_DOMAIN="example.com")
+def test_process_charge_keeps_sending_the_card_token(mock_reverse, adapter, mock_payment):
+    mock_reverse.return_value = "/payment/update/mercadopago/payment-123/"
+    adapter.sdk.payment().create.return_value = {
+        "response": {"id": 1, "status": "approved", "status_detail": "accredited"}
+    }
+
+    result = adapter.process_charge(mock_payment, "card-token")
+
+    payment_data = adapter.sdk.payment().create.call_args.args[0]
+    assert payment_data["token"] == "card-token"
+    assert payment_data["installments"] == 1
+    assert "date_of_expiration" not in payment_data
+    assert result.status == PaymentStatuses.APPROVED
+    assert result.provider_data is None
+    assert result.expires_at is None
+
+
+@override_settings(SITE_DOMAIN="example.com")
+def test_process_charge_refuses_a_naive_expiry(adapter, mock_pix_payment):
+    with pytest.raises(ValueError, match="timezone-aware"):
+        adapter.process_charge(
+            mock_pix_payment, "", expires_at=datetime.datetime(2026, 10, 14, 12, 30)
+        )
+
+
+def test_check_status_maps_an_expired_pix_charge_to_expired(adapter):
+    """MercadoPago reports an unpaid Pix charge that ran out as ``cancelled`` with
+    ``status_detail="expired"``."""
+    adapter.sdk.payment().get.return_value = {
+        "response": {"id": "1", "status": "cancelled", "status_detail": "expired"}
+    }
+
+    result = adapter.check_status("1")
+
+    assert result.status == PaymentStatuses.EXPIRED
+    assert result.original_status == "cancelled"
+
+
+def test_check_status_keeps_a_called_off_charge_cancelled(adapter):
+    adapter.sdk.payment().get.return_value = {
+        "response": {"id": "1", "status": "cancelled", "status_detail": "by_collector"}
+    }
+
+    assert adapter.check_status("1").status == PaymentStatuses.CANCELLED

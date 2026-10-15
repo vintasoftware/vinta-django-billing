@@ -686,6 +686,7 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
             data["billing_interval"],
             payment_token=data.get("payment_token", ""),
             idempotency_key=data["idempotency_key"],
+            actor=request.user,
         )
 
         # Re-fetched through the virtual-model-optimized queryset rather than
@@ -715,7 +716,7 @@ class SubscriptionViewSet(TenantScopedViewMixin, GenericVirtualModelViewMixin, G
     @action(methods=["post"], detail=False, url_path="cancel", url_name="cancel")
     def cancel(self, request, *args, **kwargs):
         subscription = self.get_subscription(check_object_perms=True)
-        self.subscription_service.cancel_subscription(subscription)
+        self.subscription_service.cancel_subscription(subscription, actor=request.user)
         return Response(self.get_serializer(self.get_subscription()).data)
 
     @extend_schema(

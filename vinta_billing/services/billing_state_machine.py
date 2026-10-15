@@ -25,10 +25,16 @@ transition of an existing row, so it has no ``from_state`` to validate against.
 """
 
 import logging
+from typing import Any
 
-from vinta_billing.constants import BillingState
+from vinta_billing.constants import BillingState, BillingStateChangeReason
 from vinta_billing.exceptions import IllegalBillingStateTransitionError
 from vinta_billing.models import Subscription
+from vinta_billing.signals import (
+    send_on_commit,
+    subscription_cancelled,
+    subscription_state_changed,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -85,7 +91,11 @@ def is_legal_billing_state_transition(from_state: str, to_state: str) -> bool:
 
 
 def transition_billing_state(
-    subscription: Subscription, to_state: str
+    subscription: Subscription,
+    to_state: str,
+    *,
+    actor: Any = None,
+    reason: str = BillingStateChangeReason.UNSPECIFIED,
 ) -> tuple[Subscription, bool]:
     """Validate and, if needed, write ``subscription.billing_state = to_state``.
 
@@ -95,6 +105,16 @@ def transition_billing_state(
     ``grace_period_ends_at``) alongside the transition knows not to re-stamp it.
     This is what makes entering GRACE twice, or a dunning retry firing twice
     under at-least-once delivery redelivery, safe rather than a double-send.
+
+    **Announces the change.** When ``changed`` is ``True``,
+    :data:`vinta_billing.signals.subscription_state_changed` is queued for commit
+    with ``actor`` and ``reason`` (a ``BillingStateChangeReason``), and a move
+    into ``CANCELLED`` also queues
+    :data:`vinta_billing.signals.subscription_cancelled`. Being the one place
+    ``billing_state`` is written is what makes this the one place to send them:
+    every transition sends exactly once, and a no-op sends nothing. ``actor`` is
+    whoever drove the change when a caller knows -- a user, from a request --
+    and ``None`` for the system (a webhook, the dunning sweep, cycle close).
 
     :raises IllegalBillingStateTransitionError: ``to_state`` is reachable from
         ``subscription``'s current state only through an edge that is not on the
@@ -118,4 +138,21 @@ def transition_billing_state(
         from_state,
         to_state,
     )
+    send_on_commit(
+        subscription_state_changed,
+        sender=Subscription,
+        subscription=subscription,
+        from_state=from_state,
+        to_state=to_state,
+        actor=actor,
+        reason=reason,
+    )
+    if to_state == BillingState.CANCELLED:
+        send_on_commit(
+            subscription_cancelled,
+            sender=Subscription,
+            subscription=subscription,
+            actor=actor,
+            at_period_end=True,
+        )
     return subscription, True
