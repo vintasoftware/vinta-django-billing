@@ -67,13 +67,22 @@ value actually changed, and exactly once per change:
 - `subscription_cancelled(subscription, actor, at_period_end)` -- with every move
   into `cancelled`; `at_period_end` is `True` because a cancelled subscription
   runs to the end of its paid cycle.
+- `limit_warning_raised(scope, resource_key, level, usage, limit)` -- from
+  `UsageWarningService`, alongside the in-app notification and under the same
+  debounce: once per resource, level and billing cycle. A notification that
+  fails to send rolls the marker back and sends no signal; the next tick retries
+  both.
+- `billing_period_closed(subscription, period_start, period_end, summary)` --
+  from `CycleCloseService`, once per closed period, when its
+  `BillingPeriodSummary` is created (`summary` is that row). A period whose
+  statement fails to persist -- logged, and never allowed to undo the charge --
+  closes without it.
 
 No signal was renamed and no kwarg changed. Sent on commit, a receiver that
 raises is logged by Django and can no longer roll the change back; it also no
 longer stops the other receivers. `billing_restriction_lifted` moves to the same
 helper. `payment_provider_repointed` is unchanged and still sent inside the
-caller's transaction. `limit_warning_raised` and `billing_period_closed` remain
-declared but unsent, and now say so.
+caller's transaction. Every signal `signals.py` declares is now sent.
 
 `transition_billing_state`, `SubscriptionService.change_plan`,
 `request_plan_change`, `cancel_subscription` and `DunningService.cancel` gain

@@ -256,3 +256,74 @@ class TestDefaultNotifier:
         from vinta_billing.notifications import LoggingNotifier
 
         assert isinstance(UsageWarningService().notification_service, LoggingNotifier)
+
+
+class TestLimitWarningRaisedSignal:
+    """``limit_warning_raised`` follows the in-app notification: on commit, and
+    under the same debounce, so a re-run of the check sends nothing new."""
+
+    @pytest.fixture
+    def received(self):
+        from vinta_billing.signals import limit_warning_raised
+
+        calls = []
+
+        def receiver(sender, **kwargs):
+            kwargs.pop("signal")
+            calls.append(kwargs)
+
+        limit_warning_raised.connect(receiver)
+        yield calls
+        limit_warning_raised.disconnect(receiver)
+
+    def test_sent_once_on_commit_with_its_kwargs(
+        self, service, scope, subscription, received, django_capture_on_commit_callbacks
+    ):
+        make_widgets(scope, 3)  # ceiling 3 -> reached
+
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            service.check_subscription(subscription)
+        assert received == []
+
+        for callback in callbacks:
+            callback()
+        assert received == [
+            {
+                "scope": scope,
+                "resource_key": "widgets",
+                "level": LimitWarningLevel.REACHED,
+                "usage": 3,
+                "limit": 3,
+            }
+        ]
+
+    def test_a_debounced_re_run_sends_nothing(
+        self, service, scope, subscription, received, django_capture_on_commit_callbacks
+    ):
+        make_widgets(scope, 3)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            service.check_subscription(subscription)
+            service.check_subscription(subscription)
+
+        assert len(received) == 1
+
+    def test_a_failed_notification_sends_nothing(
+        self, scope, subscription, received, django_capture_on_commit_callbacks
+    ):
+        """The send and the marker roll back together, so the signal must too --
+        the next tick retries both."""
+
+        class FailingNotifier:
+            def create_notification(self, **kwargs):
+                raise RuntimeError("transport down")
+
+        make_widgets(scope, 3)
+
+        with django_capture_on_commit_callbacks(execute=True):
+            UsageWarningService(notification_service=FailingNotifier()).check_subscription(
+                subscription
+            )
+
+        assert received == []
+        assert not LimitWarningNotification.objects.filter(subscription=subscription).exists()

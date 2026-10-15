@@ -64,13 +64,17 @@ payment_status_changed = Signal()
 #: kwargs: ``refund``, ``from_status``, ``to_status``
 refund_status_changed = Signal()
 
-#: An scope crossed a warning threshold on a limited resource. Declared, not yet
-#: sent by the engine.
+#: An scope crossed a warning threshold on a limited resource. Sent on commit by
+#: ``UsageWarningService`` alongside the in-app notification, once per resource,
+#: ``level`` (a ``LimitWarningLevel``) and billing cycle -- the same debounce the
+#: notification uses, so a re-run of the check sends nothing new.
 #: kwargs: ``scope``, ``resource_key``, ``level``, ``usage``, ``limit``
 limit_warning_raised = Signal()
 
-#: A billing period was closed and its summary written. Declared, not yet sent
-#: by the engine.
+#: A billing period was closed and its summary written. Sent on commit by
+#: ``CycleCloseService``, once per period, when its ``BillingPeriodSummary`` is
+#: created; ``summary`` is that row. A period whose statement failed to persist
+#: (logged, never allowed to undo the charge) closes without it.
 #: kwargs: ``subscription``, ``period_start``, ``period_end``, ``summary``
 billing_period_closed = Signal()
 

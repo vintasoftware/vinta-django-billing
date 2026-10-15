@@ -295,3 +295,68 @@ class TestPostpaidPlanShape:
         closed = service.close_subscription(subscription, now=utc(2026, 4, 2))
 
         assert len(closed) == 1
+
+
+class TestBillingPeriodClosedSignal:
+    """``billing_period_closed`` is sent on commit, once per period whose
+    statement was written, and never again for a period already closed."""
+
+    @pytest.fixture
+    def received(self):
+        from vinta_billing.signals import billing_period_closed
+
+        calls = []
+
+        def receiver(sender, **kwargs):
+            kwargs.pop("signal")
+            calls.append(kwargs)
+
+        billing_period_closed.connect(receiver)
+        yield calls
+        billing_period_closed.disconnect(receiver)
+
+    def test_sent_once_on_commit_with_the_statement(
+        self, service, closable, received, django_capture_on_commit_callbacks
+    ):
+        with django_capture_on_commit_callbacks(execute=True):
+            service.close_subscription(closable, now=utc(2026, 4, 2))
+
+        assert len(received) == 1
+        call = received[0]
+        # The locked re-read of the row, not the caller's instance.
+        assert call["subscription"].pk == closable.pk
+        assert call["period_start"] == utc(2026, 3, 1)
+        assert call["period_end"] == utc(2026, 4, 1)
+        assert call["summary"] == BillingPeriodSummary.objects.get(subscription=closable)
+
+    def test_one_per_caught_up_period(
+        self, service, closable, received, django_capture_on_commit_callbacks
+    ):
+        with django_capture_on_commit_callbacks(execute=True):
+            service.close_subscription(closable, now=utc(2026, 6, 2))
+
+        assert [call["period_start"] for call in received] == [
+            utc(2026, 3, 1),
+            utc(2026, 4, 1),
+            utc(2026, 5, 1),
+        ]
+
+    def test_a_re_run_sends_nothing(
+        self, service, closable, received, django_capture_on_commit_callbacks
+    ):
+        with django_capture_on_commit_callbacks(execute=True):
+            service.close_subscription(closable, now=utc(2026, 4, 2))
+        closable.refresh_from_db()
+        with django_capture_on_commit_callbacks(execute=True):
+            service.close_subscription(closable, now=utc(2026, 4, 2))
+
+        assert len(received) == 1
+
+    def test_not_sent_before_commit(
+        self, service, closable, received, django_capture_on_commit_callbacks
+    ):
+        with django_capture_on_commit_callbacks(execute=False) as callbacks:
+            service.close_subscription(closable, now=utc(2026, 4, 2))
+
+        assert received == []
+        assert callbacks

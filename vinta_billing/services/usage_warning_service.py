@@ -26,6 +26,7 @@ from vinta_billing.recipients import get_billing_recipients
 from vinta_billing.registry import resources
 from vinta_billing.services.entitlement_service import EntitlementService
 from vinta_billing.services.subscription_service import current_billing_period_start
+from vinta_billing.signals import limit_warning_raised, send_on_commit
 
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,19 @@ class UsageWarningService:
             if not is_new:
                 return
             self._notify(subscription, resource_key, level, current_usage, limit_value)
+            # Queued after `_notify`, inside the same claim: a send that raises
+            # rolls the marker back and discards this with it, so a project
+            # hears about a warning exactly when its users did -- once per
+            # resource, level and cycle.
+            send_on_commit(
+                limit_warning_raised,
+                sender=LimitWarningNotification,
+                scope=scope,
+                resource_key=resource_key,
+                level=level,
+                usage=current_usage,
+                limit=limit_value,
+            )
 
     @staticmethod
     def _level_for(current_usage: int, limit_value: int) -> str | None:
