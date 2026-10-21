@@ -45,7 +45,7 @@ from vinta_billing.services.dataclasses import (
     Subscription,
 )
 from vinta_billing.services.payment_adapters import get_payment_provider_registry
-from vinta_billing.services.payment_adapters.base import BasePaymentAdapter
+from vinta_billing.services.payment_adapters.base import BasePaymentAdapter, query_params_kwargs
 from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 from vinta_billing.services.payment_status_machine import (
     record_payment_status,
@@ -598,29 +598,46 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         return self._record_status_update(payment, payment_status_update_data)
 
     def verify_payment_webhook_signature(
-        self, provider: str, raw_body: bytes, headers: Mapping[str, str]
+        self,
+        provider: str,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        query_params: Mapping[str, str] | None = None,
     ) -> bool:
         """Verify an inbound ``payment-update`` webhook against *raw_body*.
 
         ``raw_body`` must be the literal bytes the provider sent (see
         ``BasePaymentAdapter.verify_signature``) — callers must capture
-        ``request.body`` before touching ``request.data``.
+        ``request.body`` before touching ``request.data``. ``query_params`` is
+        the request's query string, which MercadoPago's signature covers.
         """
-        return self.get_payment_adapter(provider).verify_signature(raw_body, headers)
+        verify = self.get_payment_adapter(provider).verify_signature
+        return verify(raw_body, headers, **query_params_kwargs(verify, query_params))
 
     def verify_subscription_webhook_signature(
-        self, provider: str, raw_body: bytes, headers: Mapping[str, str]
+        self,
+        provider: str,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        query_params: Mapping[str, str] | None = None,
     ) -> bool:
         """Verify an inbound ``subscription-payment-update`` webhook against *raw_body*.
 
         ``raw_body`` must be the literal bytes the provider sent (see
         ``BaseSubscriptionAdapter.verify_signature``) — callers must capture
-        ``request.body`` before touching ``request.data``.
+        ``request.body`` before touching ``request.data``. See
+        ``verify_payment_webhook_signature`` for ``query_params``.
         """
-        return self.get_subscription_adapter(provider).verify_signature(raw_body, headers)
+        verify = self.get_subscription_adapter(provider).verify_signature
+        return verify(raw_body, headers, **query_params_kwargs(verify, query_params))
 
     def handle_payment_webhook(
-        self, provider: str, raw_body: bytes, headers: Mapping[str, str], payload: dict
+        self,
+        provider: str,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        payload: dict,
+        query_params: Mapping[str, str] | None = None,
     ) -> PaymentStatusUpdateModel | None:
         """Idempotently process an inbound ``payment-update`` webhook notification.
 
@@ -643,7 +660,9 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         event to be retried instead of being permanently burned.
         """
         adapter = self.get_payment_adapter(provider)
-        event_id = adapter.get_event_id(raw_body, headers, payload)
+        event_id = adapter.get_event_id(
+            raw_body, headers, payload, **query_params_kwargs(adapter.get_event_id, query_params)
+        )
         with transaction.atomic():
             event, is_new_delivery = ProviderWebhookEventModel.objects.get_or_create_pending(
                 provider=provider,
@@ -660,7 +679,12 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         return result
 
     def handle_subscription_payment_webhook(
-        self, provider: str, raw_body: bytes, headers: Mapping[str, str], payload: dict
+        self,
+        provider: str,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        payload: dict,
+        query_params: Mapping[str, str] | None = None,
     ) -> PaymentStatusUpdateModel | None:
         """Idempotently process an inbound ``subscription-payment-update`` webhook.
 
@@ -679,7 +703,9 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         why a ``None`` result must not permanently burn the delivery.
         """
         adapter = self.get_subscription_adapter(provider)
-        event_id = adapter.get_event_id(raw_body, headers, payload)
+        event_id = adapter.get_event_id(
+            raw_body, headers, payload, **query_params_kwargs(adapter.get_event_id, query_params)
+        )
         with transaction.atomic():
             event, is_new_delivery = ProviderWebhookEventModel.objects.get_or_create_pending(
                 provider=provider,

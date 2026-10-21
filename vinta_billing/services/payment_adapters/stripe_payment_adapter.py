@@ -212,10 +212,23 @@ class StripePaymentAdapter(BasePaymentAdapter):
             return None
         return super().receive_update(update_payload)
 
-    def verify_signature(self, raw_body: bytes, headers: Mapping[str, str]) -> bool:
+    def verify_signature(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> bool:
         return verify_stripe_event(raw_body, headers, self.webhook_secret) is not None
 
-    def get_event_id(self, raw_body: bytes, headers: Mapping[str, str], payload: dict) -> str:
+    def get_event_id(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        payload: dict,
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> str:
         """
         Stripe's `Stripe-Signature` authenticates the whole body, unlike
         MercadoPago's narrow manifest — but the ledger key is still derived from

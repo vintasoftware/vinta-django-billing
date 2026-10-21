@@ -231,7 +231,13 @@ class BaseSubscriptionAdapter:
         raise NotImplementedError
 
     @abstractmethod
-    def verify_signature(self, raw_body: bytes, headers: Mapping[str, str]) -> bool:
+    def verify_signature(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> bool:
         """
         Verify that an inbound webhook request actually came from the provider.
 
@@ -243,11 +249,23 @@ class BaseSubscriptionAdapter:
 
         :param raw_body: The raw, unparsed HTTP request body.
         :param headers: The HTTP request headers.
+        :param query_params: The request URL's query string, by parameter name.
+            For a provider that signs something carried in the URL
+            (MercadoPago's ``data.id``); others ignore it. The service passes it
+            only to an override that declares it, so an adapter written before
+            0.10.1 keeps working.
         :return: True if the signature is valid, False otherwise.
         """
         raise NotImplementedError
 
-    def get_event_id(self, raw_body: bytes, headers: Mapping[str, str], payload: dict) -> str:
+    def get_event_id(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        payload: dict,
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> str:
         """
         Stable identifier for this specific webhook delivery, used as the
         idempotency ledger key so a provider redelivery of the same event is only
