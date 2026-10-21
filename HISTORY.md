@@ -1,5 +1,50 @@
 # History
 
+## 0.9.1
+
+The MercadoPago Payments API adapter could not charge a card or a Pix code:
+every request carried something `/v1/payments` refuses, and every refusal
+crashed the adapter instead of reaching the caller as a billing error.
+
+### Charges MercadoPago accepts
+
+- **Amounts are JSON numbers.** `transaction_amount` was sent as a string
+  (`"150.00"`), which `/v1/payments` answers with `400 "transaction_amount
+  attribute must be numeric"`. It is now a number rounded to cents, and so are
+  the refund `amount` and the subscription plans' `auto_recurring.transaction_amount`.
+- **No `payer.address.country`.** `/v1/payments` rejects the key ("The name of
+  the following parameters is wrong"). The other address fields are still sent,
+  and empty ones are left out, since MercadoPago validates every key it gets.
+- **No `notification_url` on a local host.** MercadoPago refuses a whole charge
+  whose `notification_url` is on `localhost` (code 4020). When the notification
+  host is `localhost`, `127.0.0.1` or ends in `.localhost`, the field is now left
+  out, and that is logged once at `info`. The new provider setting
+  `VINTA_BILLING["PROVIDERS"]["mercadopago"]["NOTIFICATION_URL_HOST"]` sends
+  notifications somewhere other than `SITE_DOMAIN` (a tunnel, an API host).
+
+### Refusals are billing errors
+
+The SDK does not raise on an error answer, and the adapters read
+`response["id"]` off whatever came back, so a `400` surfaced as `KeyError: 'id'`
+and a 500. A non-2xx answer, or a success without an `id`, now raises
+`ProviderRequestRejectedError` -- a `PaymentAdapterError`, so a `PaymentError` --
+carrying the HTTP status, MercadoPago's `message` and its `cause[]` codes and
+descriptions, and no payer data. It renders as `502` through the shipped
+exception handler. This covers `process_charge`, `refund`, `check_status` and
+`check_refund_status` on the payment adapter, and `create_subscription_plan`,
+`update_subscription_plan` and `create_subscription` on the subscription
+adapter.
+
+A card MercadoPago created and declined (`201`, `status: rejected`) is still not
+an error: `create_payment` returns the `Payment` with status `rejected`.
+
+### Subscription payments without an address
+
+`MercadoPagoSubscriptionAdapter.create_subscription_payment_from_payment_payload`
+indexed `payer.address` and `payer.identification` directly, and a card
+payment's payload usually has no address, so it raised `KeyError`. Missing payer
+fields now read as empty strings.
+
 ## 0.9.0
 
 Five gaps a project charging through MercadoPago runs into, closed together.

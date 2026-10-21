@@ -57,6 +57,40 @@ class PaymentAdapterError(PaymentError):
     pass
 
 
+class ProviderRequestRejectedError(PaymentAdapterError):
+    """The provider answered a request with an error instead of the resource.
+
+    Raised when the HTTP status is not 2xx, or a success carries no id -- a
+    request the provider refused outright (a malformed field, a credential for the
+    wrong API), as opposed to a charge it created and then declined, which comes
+    back as a ``ChargeResult`` with a ``rejected`` status.
+
+    Carries the provider's own message and cause codes, never anything from the
+    request body, so it is safe to log and to show an operator.
+    """
+
+    code = "provider_request_rejected"
+
+    def __init__(
+        self,
+        provider: str,
+        http_status: int | None,
+        provider_message: str = "",
+        causes: tuple[tuple[str, str], ...] = (),
+    ):
+        self.provider = provider
+        self.http_status = http_status
+        self.provider_message = provider_message
+        #: ``(code, description)`` pairs, as the provider reported them.
+        self.causes = causes
+        detail = f"{provider} refused the request (HTTP {http_status})"
+        if provider_message:
+            detail += f": {provider_message}"
+        if causes:
+            detail += " [" + "; ".join(f"{code}: {text}" for code, text in causes) + "]"
+        super().__init__(detail)
+
+
 class SubscriptionExternalIdMissingInNotificationError(PaymentAdapterError):
     pass
 

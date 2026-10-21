@@ -13,6 +13,11 @@ from vinta_billing.conf import get_site_domain
 from vinta_billing.constants import PaymentProviders, PaymentStatuses, RefundStatuses
 from vinta_billing.exceptions import ProviderWebhookEventIdMissingError
 from vinta_billing.services.dataclasses import ChargeResult, Refund, RefundResult
+from vinta_billing.services.mercadopago_api import (
+    is_local_host,
+    numeric_amount,
+    response_or_raise,
+)
 from vinta_billing.services.mercadopago_signature import verify_mercadopago_signature
 from vinta_billing.services.payment_adapters.base import (
     BasePaymentAdapter,
@@ -23,6 +28,10 @@ from vinta_billing.urls_helpers import namespaced
 
 
 logger = logging.getLogger(__name__)
+
+#: Local notification hosts already reported, so each is logged once per process
+#: rather than on every charge.
+_reported_local_hosts: set[str] = set()
 
 
 # Our internal `payment_method` / `document_type` values are already stored using
@@ -89,6 +98,35 @@ REFUND_STATUS_MAPPING: dict[str, str] = {
 }
 
 
+#: ``payer.address`` keys sent to MercadoPago, and the ``BillingAddress`` field
+#: each one reads. ``country`` is deliberately absent: ``/v1/payments`` answers it
+#: with ``400 "The name of the following parameters is wrong"``.
+PAYER_ADDRESS_FIELDS: tuple[tuple[str, str], ...] = (
+    ("zip_code", "zip_code"),
+    ("street_name", "street_name"),
+    ("street_number", "street_number"),
+    ("neighborhood", "neighborhood"),
+    ("city", "city"),
+    ("federal_unit", "state"),
+)
+
+
+def payer_address(billing_address) -> dict[str, str]:
+    """The non-empty ``payer.address`` fields of ``billing_address``.
+
+    Empty values are left out rather than sent blank, because MercadoPago
+    validates every key it receives.
+    """
+    if billing_address is None:
+        return {}
+    address = {}
+    for key, field in PAYER_ADDRESS_FIELDS:
+        value = getattr(billing_address, field, None)
+        if value:
+            address[key] = value
+    return address
+
+
 def map_payment_status(original_status: str, status_detail: str | None = None) -> str:
     """MercadoPago's ``status`` (and, for an expired Pix charge, its
     ``status_detail``) as a ``PaymentStatuses`` value; ``UNKNOWN`` when unmapped."""
@@ -104,13 +142,22 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
     #: `vinta_billing.services.mercadopago_signature.verify_mercadopago_signature`.
     verifies_full_body = False
 
-    def __init__(self, access_token: str = "", webhook_secret: str = ""):
+    def __init__(
+        self,
+        access_token: str = "",
+        webhook_secret: str = "",
+        notification_url_host: str = "",
+    ):
         # Retained (not only handed to the SDK) so `is_configured` can answer off
         # the credential itself -- `mercadopago.SDK` accepts an empty token
         # happily and only fails much later, mid-charge, with a 401.
         self.access_token = access_token
         self.sdk = mercadopago.SDK(access_token)
         self.webhook_secret = webhook_secret
+        #: The provider entry's ``NOTIFICATION_URL_HOST``: where MercadoPago
+        #: sends payment notifications, when that is not ``SITE_DOMAIN`` (a
+        #: tunnel in development, a separate API host).
+        self.notification_url_host = notification_url_host
 
     @property
     def is_configured(self) -> bool:
@@ -148,27 +195,15 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
         # `BasePaymentAdapter.process`. Must be a string header value — the prior
         # `{payment.id}` set literal serialized wrong.
         request_options.custom_headers = {"x-idempotency-key": idempotency_key or str(payment.id)}
-        notification_url = reverse(
-            namespaced("Payments-payment-update"),
-            kwargs={"provider": PaymentProviders.MERCADOPAGO, "pk": payment.id},
-        )
-
-        site_domain = get_site_domain()
-        if not site_domain:
-            raise ImproperlyConfigured(
-                "MercadoPagoPaymentAdapter builds an absolute notification_url, so "
-                "VINTA_BILLING['SITE_DOMAIN'] (or a top-level SITE_DOMAIN setting) "
-                "must be set."
-            )
+        notification_url = self._notification_url(payment)
 
         payment_method_id = PAYMENT_METHODS_MAPPING.get(
             payment.payment_method, payment.payment_method
         )
         payment_data: dict = {
-            "transaction_amount": str(payment.value),
+            "transaction_amount": numeric_amount(payment.value),
             "description": payment.description,
             "payment_method_id": payment_method_id,
-            "notification_url": f"https://{site_domain}{notification_url}",
             "payer": {
                 "email": payment.billing_profile.email,
                 "identification": {
@@ -180,24 +215,54 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
                 },
                 "first_name": payment.billing_profile.first_name,
                 "last_name": payment.billing_profile.last_name,
-                "address": {
-                    "street_name": payment.billing_profile.billing_address.street_name,
-                    "street_number": payment.billing_profile.billing_address.street_number,
-                    "neighborhood": payment.billing_profile.billing_address.neighborhood,
-                    "city": payment.billing_profile.billing_address.city,
-                    "federal_unit": payment.billing_profile.billing_address.state,
-                    "country": payment.billing_profile.billing_address.country,
-                    "zip_code": payment.billing_profile.billing_address.zip_code,
-                },
             },
         }
+        if notification_url:
+            payment_data["notification_url"] = notification_url
+        address = payer_address(payment.billing_profile.billing_address)
+        if address:
+            payment_data["payer"]["address"] = address
         if payment_method_id not in TOKENLESS_PAYMENT_METHODS:
             payment_data["token"] = payment_token
             payment_data["installments"] = 1
         if expires_at is not None:
             payment_data["date_of_expiration"] = expires_at.isoformat(timespec="milliseconds")
         result = self.sdk.payment().create(payment_data, request_options)
-        return self._charge_result(result["response"], expires_at)
+        # A charge MercadoPago created and declined is a 201 with
+        # `status: rejected`, and comes back as a `ChargeResult`; only a request
+        # it refused to create anything for raises.
+        return self._charge_result(response_or_raise(result), expires_at)
+
+    def _notification_url(self, payment: Payment) -> str | None:
+        """The absolute URL MercadoPago notifies about ``payment``, or ``None``
+        when the host is a local one.
+
+        MercadoPago refuses the whole charge when ``notification_url`` points at
+        ``localhost`` (code 4020), and could not deliver to it anyway, so a local
+        host leaves the field out instead.
+        """
+        host = self.notification_url_host or get_site_domain()
+        if not host:
+            raise ImproperlyConfigured(
+                "MercadoPagoPaymentAdapter builds an absolute notification_url, so "
+                "VINTA_BILLING['PROVIDERS']['mercadopago']['NOTIFICATION_URL_HOST'] "
+                "or VINTA_BILLING['SITE_DOMAIN'] (or a top-level SITE_DOMAIN setting) "
+                "must be set."
+            )
+        if is_local_host(host):
+            if host not in _reported_local_hosts:
+                _reported_local_hosts.add(host)
+                logger.info(
+                    "MercadoPago notification host %s is local; charges are sent "
+                    "without a notification_url, so no webhooks will arrive.",
+                    host,
+                )
+            return None
+        path = reverse(
+            namespaced("Payments-payment-update"),
+            kwargs={"provider": PaymentProviders.MERCADOPAGO, "pk": payment.id},
+        )
+        return f"https://{host}{path}"
 
     def _charge_result(
         self, response: dict, requested_expires_at: datetime.datetime | None
@@ -234,14 +299,17 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
         request_options.custom_headers = {
             "x-idempotency-key": refund.idempotency_key or str(refund.id)
         }
-        response = self.sdk.refund().create(
-            refund.payment.external_id, {"amount": str(refund.value)}, request_options
+        result = self.sdk.refund().create(
+            refund.payment.external_id,
+            {"amount": numeric_amount(refund.value)},
+            request_options,
         )
+        response = response_or_raise(result)
         # MercadoPago's create-refund response already carries the refund's
         # status (see https://www.mercadopago.com/developers/en/reference/.../create-refund/post)
         # — no need to force a second round trip through `check_refund_status`
         # just to learn what this response already told us.
-        original_status = response["response"].get("status")
+        original_status = response.get("status")
         mapped_status = REFUND_STATUS_MAPPING.get(original_status, RefundStatuses.UNKNOWN)
         if mapped_status == RefundStatuses.UNKNOWN:
             logger.error(
@@ -249,16 +317,14 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
                 refund.id,
                 original_status,
             )
-        return RefundResult(external_id=response["response"]["id"], status=mapped_status)
+        return RefundResult(external_id=str(response["id"]), status=mapped_status)
 
     def check_status(
         self, payment_external_id: str, update_id: str | None = None
     ) -> PaymentStatusUpdate:
-        response = self.sdk.payment().get(payment_external_id)
-        original_status = response["response"]["status"]
-        mapped_status = map_payment_status(
-            original_status, response["response"].get("status_detail")
-        )
+        response = response_or_raise(self.sdk.payment().get(payment_external_id))
+        original_status = response.get("status")
+        mapped_status = map_payment_status(original_status, response.get("status_detail"))
         if mapped_status == PaymentStatuses.UNKNOWN:
             logger.error(
                 "Unknown payment status: payment_external_id=%s original_status=%s",
@@ -268,12 +334,12 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
         return PaymentStatusUpdate(
             id=None,
             status=mapped_status,
-            description=response["response"]["status_detail"],
+            description=response.get("status_detail"),
             # Sourced from the authenticated API response, not the caller-supplied
             # `update_id` — the webhook notification's own top-level id is never
             # covered by MercadoPago's signature and must not be persisted as an
             # external id (see `get_event_id` below).
-            update_external_id=response["response"].get("id"),
+            update_external_id=response.get("id"),
             original_status=original_status,
         )
 
@@ -304,8 +370,10 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
             )
             return RefundStatuses.UNKNOWN
 
-        refunds_payload = self.sdk.refund().list_all(refund.payment.external_id)
-        for item in refunds_payload.get("response", []):
+        refunds = response_or_raise(
+            self.sdk.refund().list_all(refund.payment.external_id), require_id=False
+        )
+        for item in refunds or []:
             if str(item.get("id")) == str(refund.external_id):
                 original_status = item.get("status")
                 mapped_status = REFUND_STATUS_MAPPING.get(original_status, RefundStatuses.UNKNOWN)

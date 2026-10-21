@@ -448,6 +448,36 @@ inside the caller's transaction. Which status a provider update may overwrite is
 documented in
 [`vinta_billing/services/payment_status_machine.py`](vinta_billing/services/payment_status_machine.py).
 
+### MercadoPago
+
+```python
+VINTA_BILLING = {
+    "PROVIDERS": {
+        "mercadopago": {
+            "ACCESS_TOKEN": env("MERCADOPAGO_ACCESS_TOKEN"),
+            "PUBLIC_KEY": env("MERCADOPAGO_PUBLIC_KEY"),
+            "WEBHOOK_SECRET": env("MERCADOPAGO_WEBHOOK_SECRET"),
+            # Optional. The host MercadoPago sends payment notifications to,
+            # when it is not SITE_DOMAIN (a tunnel in development, a separate
+            # API host). Defaults to SITE_DOMAIN.
+            "NOTIFICATION_URL_HOST": env("MERCADOPAGO_NOTIFICATION_URL_HOST", default=""),
+        },
+    },
+}
+```
+
+MercadoPago refuses a whole charge whose `notification_url` points at a local
+host, so when the notification host is `localhost`, `127.0.0.1` or ends in
+`.localhost`, charges are sent without one (logged once at `info`). No webhooks
+reach a local machine anyway; point `NOTIFICATION_URL_HOST` at a tunnel to
+receive them.
+
+A request MercadoPago refuses (a `4xx`, or a `401` for credentials meant for
+another API) raises `ProviderRequestRejectedError`, a `PaymentError` carrying the
+HTTP status, MercadoPago's message and its cause codes, and renders as `502`. A
+card MercadoPago charged and declined is not an error: `create_payment` returns
+the `Payment` with status `rejected`.
+
 ### Pix (MercadoPago)
 
 ```python

@@ -190,6 +190,9 @@ _DEFAULTS: dict[str, Any] = {
     #             'ACCESS_TOKEN': env('MERCADOPAGO_ACCESS_TOKEN'),
     #             'WEBHOOK_SECRET': env('MERCADOPAGO_WEBHOOK_SECRET'),
     #             'PUBLIC_KEY': env('MERCADOPAGO_PUBLIC_KEY'),
+    #             # Optional; defaults to SITE_DOMAIN. A local host sends
+    #             # charges without a notification_url.
+    #             'NOTIFICATION_URL_HOST': env('MERCADOPAGO_NOTIFICATION_URL_HOST'),
     #         },
     #     }
     #

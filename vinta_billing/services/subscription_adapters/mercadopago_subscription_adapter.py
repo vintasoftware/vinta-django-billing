@@ -22,6 +22,7 @@ from vinta_billing.services.dataclasses import (
     Subscription,
     SubscriptionPayment,
 )
+from vinta_billing.services.mercadopago_api import numeric_amount, response_or_raise
 from vinta_billing.services.mercadopago_signature import verify_mercadopago_signature
 from vinta_billing.services.subscription_adapters.base import BaseSubscriptionAdapter
 from vinta_billing.urls_helpers import namespaced
@@ -92,7 +93,7 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
                 "auto_recurring": {
                     "frequency": frequency,
                     "frequency_type": frequency_type,
-                    "transaction_amount": str(plan.value),
+                    "transaction_amount": numeric_amount(plan.value),
                     "currency_id": plan.currency,
                     "billing_day": plan.billing_day,
                     "billing_day_proportional": True,
@@ -110,7 +111,7 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
                 },
             }
         )
-        return response["response"]["id"]
+        return response_or_raise(response)["id"]
 
     def update_subscription_plan(self, external_id: str, plan: Plan) -> str:
         frequency, frequency_type = _auto_recurring_frequency(plan.billing_interval)
@@ -122,7 +123,7 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
                 "auto_recurring": {
                     "frequency": frequency,
                     "frequency_type": frequency_type,
-                    "transaction_amount": str(plan.value),
+                    "transaction_amount": numeric_amount(plan.value),
                     "currency_id": plan.currency,
                     "billing_day": plan.billing_day,
                     "billing_day_proportional": True,
@@ -140,7 +141,7 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
                 },
             },
         )
-        return response["response"]["id"]
+        return response_or_raise(response)["id"]
 
     def create_subscription(
         self, subscription: Subscription, payment_token: str, idempotency_key: str = ""
@@ -172,7 +173,7 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
             if options is not None
             else self.sdk.preapproval().create(data)
         )
-        return response["response"]["id"]
+        return response_or_raise(response)["id"]
 
     @staticmethod
     def _idempotency_options(idempotency_key: str):
@@ -323,7 +324,7 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
                 "auto_recurring": {
                     "frequency": frequency,
                     "frequency_type": frequency_type,
-                    "transaction_amount": str(plan.value),
+                    "transaction_amount": numeric_amount(plan.value),
                     "currency_id": plan.currency,
                     "billing_day": plan.billing_day,
                     "billing_day_proportional": True,
@@ -355,32 +356,38 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
     def create_subscription_payment_from_payment_payload(
         self, subscription_external_id: str, payment_payload: dict
     ) -> SubscriptionPayment:
+        response = payment_payload["response"]
+        # A card payment usually carries no `payer.address`, and may carry no
+        # `identification` either: missing fields read as empty, not KeyError.
+        payer = response.get("payer") or {}
+        identification = payer.get("identification") or {}
+        address = payer.get("address") or {}
         return SubscriptionPayment(
             id=None,
             subscription_external_id=subscription_external_id,
-            external_id=payment_payload["response"]["id"],
-            value=payment_payload["response"]["transaction_amount"],
-            currency=payment_payload["response"]["currency_id"],
+            external_id=response["id"],
+            value=response["transaction_amount"],
+            currency=response["currency_id"],
             payment_provider=PaymentProviders.MERCADOPAGO,
-            status=payment_payload["response"]["status"],
-            payment_method=payment_payload["response"]["payment_method_id"],
-            description=payment_payload["response"]["description"],
+            status=response["status"],
+            payment_method=response["payment_method_id"],
+            description=response.get("description") or "",
             status_updates=[],
             billing_profile=BillingProfile(
-                email=payment_payload["response"]["payer"]["email"],
-                first_name=payment_payload["response"]["payer"]["first_name"],
-                last_name=payment_payload["response"]["payer"]["last_name"],
-                document_type=payment_payload["response"]["payer"]["identification"]["type"],
-                document_number=payment_payload["response"]["payer"]["identification"]["number"],
+                email=payer.get("email") or "",
+                first_name=payer.get("first_name") or "",
+                last_name=payer.get("last_name") or "",
+                document_type=identification.get("type") or "",
+                document_number=identification.get("number") or "",
                 billing_address=BillingAddress(
                     id=None,
-                    street_name=payment_payload["response"]["payer"]["address"]["street_name"],
-                    street_number=payment_payload["response"]["payer"]["address"]["street_number"],
-                    neighborhood=payment_payload["response"]["payer"]["address"]["neighborhood"],
-                    city=payment_payload["response"]["payer"]["address"]["city"],
-                    state=payment_payload["response"]["payer"]["address"]["federal_unit"],
-                    country=payment_payload["response"]["payer"]["address"]["country"],
-                    zip_code=payment_payload["response"]["payer"]["address"]["zip_code"],
+                    street_name=address.get("street_name") or "",
+                    street_number=address.get("street_number") or "",
+                    neighborhood=address.get("neighborhood") or "",
+                    city=address.get("city") or "",
+                    state=address.get("federal_unit") or "",
+                    country=address.get("country") or "",
+                    zip_code=address.get("zip_code") or "",
                     address_line_2="",
                 ),
                 phone=None,
