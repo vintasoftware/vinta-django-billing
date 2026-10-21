@@ -193,6 +193,9 @@ _DEFAULTS: dict[str, Any] = {
     #             # Optional; defaults to SITE_DOMAIN. A local host sends
     #             # charges without a notification_url.
     #             'NOTIFICATION_URL_HOST': env('MERCADOPAGO_NOTIFICATION_URL_HOST'),
+    #             # Optional; "payments" (/v1/payments, the default, for TEST-
+    #             # credentials) or "orders" (/v1/orders, for APP_USR- test ones).
+    #             'API': 'payments',
     #         },
     #     }
     #

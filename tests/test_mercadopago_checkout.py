@@ -6,10 +6,12 @@ as a ``Payment`` with the mapped status, and a request MercadoPago refuses comes
 back as a ``PaymentError`` -- never a ``KeyError``.
 """
 
+import datetime
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
 import pytest
+from django.utils import timezone
 
 from vinta_billing.constants import PaymentProviders, PaymentStatuses
 from vinta_billing.exceptions import PaymentError, ProviderRequestRejectedError
@@ -32,8 +34,7 @@ def adapter():
     return adapter
 
 
-@pytest.fixture
-def service(adapter):
+def service_for(adapter):
     resolver = Mock()
     resolver.resolve_for_scope.return_value = MP
     return PaymentService(
@@ -41,6 +42,11 @@ def service(adapter):
         payment_provider_registry={MP: adapter},
         subscription_provider_registry={},
     )
+
+
+@pytest.fixture
+def service(adapter):
+    return service_for(adapter)
 
 
 def charge(service, scope):
@@ -118,3 +124,94 @@ class TestMercadoPagoCardCheckout:
 
         assert isinstance(excinfo.value, ProviderRequestRejectedError)
         assert excinfo.value.http_status == answer["status"]
+
+
+@pytest.fixture
+def orders_adapter():
+    with patch(
+        "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.SDK"
+    ) as mock_sdk:
+        adapter = MercadoPagoPaymentAdapter.from_config(
+            {"ACCESS_TOKEN": "APP_USR-access-token", "API": "orders"}
+        )
+    adapter.sdk = mock_sdk.return_value
+    return adapter
+
+
+@pytest.mark.django_db
+class TestMercadoPagoOrdersCheckout:
+    """The same checkout with ``"API": "orders"``."""
+
+    def test_an_approved_card(self, orders_adapter, scope, billing_profile):
+        orders_adapter.sdk.order().create.return_value = {
+            "status": 201,
+            "response": {
+                "id": "ORD01APRO",
+                "status": "processed",
+                "status_detail": "accredited",
+                "transactions": {"payments": [{"id": "PAY01APRO", "status": "processed"}]},
+            },
+        }
+
+        payment = charge(service_for(orders_adapter), scope)
+
+        payment.refresh_from_db()
+        assert payment.external_id == "ORD01APRO"
+        assert payment.status == PaymentStatuses.APPROVED
+        assert payment.provider_data == {"transaction_id": "PAY01APRO"}
+
+    def test_a_declined_card(self, orders_adapter, scope, billing_profile):
+        orders_adapter.sdk.order().create.return_value = {
+            "status": 402,
+            "response": {
+                "errors": [{"code": "failed", "message": "The following transactions failed"}],
+                "data": {"id": "ORD01OTHE", "status": "failed", "status_detail": "failed"},
+            },
+        }
+
+        payment = charge(service_for(orders_adapter), scope)
+
+        payment.refresh_from_db()
+        assert payment.external_id == "ORD01OTHE"
+        assert payment.status == PaymentStatuses.REJECTED
+
+    def test_a_pix_charge(self, orders_adapter, scope, billing_profile):
+        orders_adapter.sdk.order().create.return_value = {
+            "status": 201,
+            "response": {
+                "id": "ORD01PIX",
+                "status": "action_required",
+                "status_detail": "waiting_payment",
+                "transactions": {
+                    "payments": [
+                        {
+                            "id": "PAY01PIX",
+                            "payment_method": {
+                                "id": "pix",
+                                "type": "bank_transfer",
+                                "qr_code": "000201-synthetic",
+                                "qr_code_base64": "iVBOR-synthetic",
+                                "ticket_url": "https://example.com/ticket",
+                            },
+                        }
+                    ]
+                },
+            },
+        }
+        service = service_for(orders_adapter)
+
+        payment = service.create_payment(
+            scope,
+            "BRL",
+            Decimal("150.00"),
+            "Course",
+            "pix",
+            "",
+            expires_at=timezone.now() + datetime.timedelta(minutes=30),
+        )
+
+        pix = service.get_pix_charge(payment)
+        assert pix is not None
+        assert pix.qr_code == "000201-synthetic"
+        assert pix.ticket_url == "https://example.com/ticket"
+        assert pix.status == PaymentStatuses.PENDING

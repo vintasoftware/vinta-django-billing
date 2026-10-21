@@ -461,10 +461,44 @@ VINTA_BILLING = {
             # when it is not SITE_DOMAIN (a tunnel in development, a separate
             # API host). Defaults to SITE_DOMAIN.
             "NOTIFICATION_URL_HOST": env("MERCADOPAGO_NOTIFICATION_URL_HOST", default=""),
+            # Optional. Which API one-time payments go through: "payments"
+            # (/v1/payments, the default) or "orders" (/v1/orders).
+            "API": "payments",
         },
     },
 }
 ```
+
+`API` has to match the credentials. Mercado Pago gives each app one kind of test
+credential:
+
+| Test credentials | `API` |
+|---|---|
+| `TEST-...` | `"payments"` (the default) |
+| `APP_USR-...` test credentials (Checkout Transparente apps on newer accounts) | `"orders"` |
+
+The wrong pairing fails on every charge. For example, `APP_USR-` test keys on
+`/v1/payments` answer `401 "Unauthorized use of live credentials"`. Projects that
+don't set `API` keep using the Payments API. Subscriptions (`/preapproval`) use
+the same credentials whatever `API` says, because the Orders API does not cover
+them.
+
+With `"orders"`:
+
+- `Payment.external_id` is the order id (`ORD...`). The order's payment
+  transaction id (`PAY...`) is kept in `provider_data["transaction_id"]`.
+- A refused card is a declined charge (`402` from Mercado Pago): `create_payment`
+  returns the `Payment` with status `rejected`.
+- Pix works the same way: `get_pix_charge` returns the QR code, and `expires_at`
+  becomes the order's `expiration_time`.
+- Refunds go through `POST /v1/orders/{id}/refund`. A refund of the whole amount
+  is sent without a body; any other refund names the transaction and the amount.
+- An order's create request has no `notification_url`. Set the webhook in the
+  app's Mercado Pago panel instead: select the **Order (Mercado Pago)** event and
+  point it at the payment-update route, e.g.
+  `https://api.example.com/billing/payments/0/payment-update/mercadopago/`. The
+  `pk` segment is only a correlation aid, so any value works. Notifications use
+  the same `x-signature` and `WEBHOOK_SECRET` as before.
 
 MercadoPago refuses a whole charge whose `notification_url` points at a local
 host, so when the notification host is `localhost`, `127.0.0.1` or ends in
