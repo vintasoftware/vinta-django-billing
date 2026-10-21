@@ -3,7 +3,7 @@ import inspect
 import json
 import logging
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from vinta_billing.exceptions import ProviderWebhookEventIdMissingError
 from vinta_billing.services.dataclasses import (
@@ -31,6 +31,26 @@ def select_init_kwargs(adapter_class: type, config: Mapping[str, object]) -> dic
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return {key.lower(): value for key, value in config.items()}
     return {key.lower(): value for key, value in config.items() if key.lower() in parameters}
+
+
+def query_params_kwargs(
+    method: Callable[..., object], query_params: Mapping[str, str] | None
+) -> dict[str, object]:
+    """``{"query_params": query_params}`` when ``method`` accepts it, else ``{}``.
+
+    ``verify_signature`` and ``get_event_id`` gained ``query_params`` in 0.10.1.
+    An adapter a project wrote against the earlier two- and three-argument
+    signatures would raise ``TypeError`` on the new keyword, so the service
+    passes it only to a method that declares it (or takes ``**kwargs``).
+    """
+    if query_params is None:
+        return {}
+    parameters = inspect.signature(method).parameters
+    if "query_params" in parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+    ):
+        return {"query_params": query_params}
+    return {}
 
 
 class BasePaymentAdapter:
@@ -209,7 +229,13 @@ class BasePaymentAdapter:
         raise NotImplementedError
 
     @abstractmethod
-    def verify_signature(self, raw_body: bytes, headers: Mapping[str, str]) -> bool:
+    def verify_signature(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> bool:
         """
         Verify that an inbound webhook request actually came from the provider.
 
@@ -221,11 +247,23 @@ class BasePaymentAdapter:
 
         :param raw_body: The raw, unparsed HTTP request body.
         :param headers: The HTTP request headers.
+        :param query_params: The request URL's query string, by parameter name.
+            For a provider that signs something carried in the URL
+            (MercadoPago's ``data.id``); others ignore it. The service passes it
+            only to an override that declares it, so an adapter written before
+            0.10.1 keeps working.
         :return: True if the signature is valid, False otherwise.
         """
         raise NotImplementedError
 
-    def get_event_id(self, raw_body: bytes, headers: Mapping[str, str], payload: dict) -> str:
+    def get_event_id(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        payload: dict,
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> str:
         """
         Stable identifier for this specific webhook delivery, used as the
         idempotency ledger key so a provider redelivery of the same event is only

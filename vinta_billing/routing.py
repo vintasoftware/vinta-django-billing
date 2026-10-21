@@ -167,6 +167,18 @@ def get_extra_patterns(trailing_slash: bool = True) -> list[URLPattern]:
             DefaultPaymentProviderView.as_view(),
             name="payment-provider-default",
         ),
+        # One fixed URL per provider, for a webhook configured in the provider's
+        # dashboard rather than per charge (MercadoPago's Orders API takes no
+        # `notification_url`). The view finds the payment from the
+        # notification, so it needs no payment id. It cannot match a
+        # per-payment path above.
+        re_path(
+            r"^billing/payments/payment-update/(?P<provider>[^/.]+)" + slash + "$",
+            PaymentsViewSet.as_view(
+                {"post": "provider_payment_update"}, detail=False, basename="Payments"
+            ),
+            name="Payments-provider-payment-update",
+        ),
     ]
 
 

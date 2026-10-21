@@ -428,17 +428,35 @@ class MercadoPagoSubscriptionAdapter(BaseSubscriptionAdapter):
     ) -> str | None:
         return subscription_payload.get("response", {}).get("last_payment_id")
 
-    def verify_signature(self, raw_body: bytes, headers: Mapping[str, str]) -> bool:
-        return verify_mercadopago_signature(raw_body, headers, self.webhook_secret) is not None
+    def verify_signature(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> bool:
+        return (
+            verify_mercadopago_signature(raw_body, headers, self.webhook_secret, query_params)
+            is not None
+        )
 
-    def get_event_id(self, raw_body: bytes, headers: Mapping[str, str], payload: dict) -> str:
+    def get_event_id(
+        self,
+        raw_body: bytes,
+        headers: Mapping[str, str],
+        payload: dict,
+        *,
+        query_params: Mapping[str, str] | None = None,
+    ) -> str:
         """MercadoPago's HMAC never covers the notification payload's top-level
         ``id`` (only ``data.id`` + ``x-request-id`` + ``ts``), so it cannot be used
         as the idempotency ledger key — an attacker can vary it freely across
         replays of one captured valid signature. Derive the key entirely from the
         verified manifest instead.
         """
-        manifest = verify_mercadopago_signature(raw_body, headers, self.webhook_secret)
+        manifest = verify_mercadopago_signature(
+            raw_body, headers, self.webhook_secret, query_params
+        )
         if manifest is None:
             raise ProviderWebhookEventIdMissingError
         return manifest.event_id

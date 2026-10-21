@@ -493,12 +493,17 @@ With `"orders"`:
   becomes the order's `expiration_time`.
 - Refunds go through `POST /v1/orders/{id}/refund`. A refund of the whole amount
   is sent without a body; any other refund names the transaction and the amount.
-- An order's create request has no `notification_url`. Set the webhook in the
-  app's Mercado Pago panel instead: select the **Order (Mercado Pago)** event and
-  point it at the payment-update route, e.g.
-  `https://api.example.com/billing/payments/0/payment-update/mercadopago/`. The
-  `pk` segment is only a correlation aid, so any value works. Notifications use
-  the same `x-signature` and `WEBHOOK_SECRET` as before.
+- The Orders API has no per-order notification URL, so `NOTIFICATION_URL_HOST`
+  does not apply to it. Notifications go only to the URL in the app's Mercado
+  Pago panel. Under **Webhooks > Configurar notificações**, select the
+  **Order (Mercado Pago)** event and point it at the provider-level route
+  `Payments-provider-payment-update`, e.g.
+  `https://api.example.com/billing/payments/payment-update/mercadopago/`. That
+  route takes no payment id; the payment is found from the notification. The
+  per-payment route (`.../payments/<id>/payment-update/mercadopago/`) keeps
+  working, so a panel already pointed at `.../payments/0/...` needs no change.
+  Notifications use the same `x-signature` and `WEBHOOK_SECRET` as the Payments
+  API.
 
 MercadoPago refuses a whole charge whose `notification_url` points at a local
 host, so when the notification host is `localhost`, `127.0.0.1` or ends in

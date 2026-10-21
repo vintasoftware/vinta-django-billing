@@ -1,5 +1,50 @@
 # History
 
+## 0.10.1
+
+MercadoPago Orders API webhooks were all refused, so a Pix charge made through
+`"API": "orders"` was never confirmed.
+
+### Uppercase ids were signed differently from how they were checked
+
+**Every `order` notification failed its `x-signature` check with `403`.**
+`verify_mercadopago_signature` built the manifest with `data.id` lowercased, as
+MercadoPago's docs describe for alphanumeric ids. The Orders API signs its
+`ORD...` ids exactly as sent, so the HMAC never matched. Numeric Payments API ids
+(`123456`) were unaffected, because lowercasing doesn't change digits.
+
+The manifest is now checked with the id as sent, and also with it lowercased, so
+a notification signed the documented way still verifies. Both are HMACs under
+the same secret, compared with `hmac.compare_digest`. The `ts` tolerance, the
+optional `request-id` segment and the ledger key derived from the verified
+manifest are unchanged. The fix is in the shared helper, so it covers the
+Payments, Orders and subscription adapters alike.
+
+### The signed `data.id` comes from the URL
+
+MercadoPago's manifest is defined over the notification URL's `data.id`. The
+webhook views now pass the query string to `verify_signature` and `get_event_id`
+(a new keyword-only `query_params` argument), and the URL's `data.id` is used,
+falling back to the body's when the URL has none. A notification whose two ids
+differ is refused with a warning: the adapter acts on the body's id, so that
+must be the one that was signed.
+
+MercadoPago's notification simulator sends the query string HTML-escaped
+(`?data.id=...&amp;type=order`). The views unescape `&amp;` before parsing, so
+`data.id` is read by its own name wherever it falls.
+
+The service passes `query_params` only to an adapter method that declares it, so
+a project adapter written against the old `verify_signature(raw_body, headers)`
+keeps working unchanged.
+
+### A webhook route without a payment id
+
+`billing/payments/payment-update/<provider>/` (`Payments-provider-payment-update`)
+is served by the same view as the per-payment route, which keeps working since
+it is in every `notification_url` sent so far. Use it as the webhook URL in a
+provider's dashboard. The Orders API has no per-order notification URL, so the
+dashboard is the only place its notifications are configured.
+
 ## 0.10.0
 
 ### MercadoPago one-time payments through the Orders API

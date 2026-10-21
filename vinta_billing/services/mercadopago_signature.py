@@ -48,7 +48,10 @@ class MercadoPagoSignatureManifest:
 
 
 def verify_mercadopago_signature(
-    raw_body: bytes, headers: Mapping[str, str], webhook_secret: str
+    raw_body: bytes,
+    headers: Mapping[str, str],
+    webhook_secret: str,
+    query_params: Mapping[str, str] | None = None,
 ) -> MercadoPagoSignatureManifest | None:
     """Verify MercadoPago's ``x-signature`` HMAC over an inbound webhook notification.
 
@@ -61,10 +64,18 @@ def verify_mercadopago_signature(
     it proves the notification (and specifically the ``data.id`` it points at) is
     authentic, so an attacker cannot make us re-check an id of their choosing.
 
-    ``data.id`` is read directly out of ``raw_body`` — the literal bytes MercadoPago
-    sent — rather than from an already-parsed-and-reserialized payload, so a
-    tampered id is caught even if the tampered body still parses to a
-    similar-looking dict.
+    The signed ``data.id`` is the one in the notification URL's query string, as
+    MercadoPago's documented manifest defines it, falling back to the body's
+    ``data.id`` (read out of ``raw_body``, the literal bytes MercadoPago sent) when
+    the URL carries none. When both are present they must be the same id: the
+    body's is the one the adapter acts on, so it has to be the one that was
+    signed.
+
+    The manifest is checked with the id **as sent** and with it lowercased.
+    MercadoPago's docs say to lowercase an alphanumeric id, but the Orders API
+    signs its ``ORD...`` ids unchanged; the lowercased form is kept so a
+    notification signed that way still verifies. Both are HMACs under the same
+    secret, so accepting either forges nothing.
 
     A signature whose ``ts`` is older than ``WEBHOOK_SIGNATURE_TOLERANCE_SECONDS``
     (default 300s, Stripe's convention) is rejected as stale — otherwise a single
@@ -73,6 +84,8 @@ def verify_mercadopago_signature(
     :param raw_body: The raw, unparsed HTTP request body.
     :param headers: The HTTP request headers (case-insensitive lookup).
     :param webhook_secret: The ``MERCADOPAGO_WEBHOOK_SECRET`` configured for this environment.
+    :param query_params: The notification URL's query string, by parameter name.
+        Only ``data.id`` is read from it.
     :return: The verified manifest components, or ``None`` if the signature is
         missing, malformed, forged, or stale.
     """
@@ -103,25 +116,27 @@ def verify_mercadopago_signature(
         logger.warning("MercadoPago webhook body is not valid JSON; cannot verify signature")
         return None
 
-    data_id = body.get("data", {}).get("id") if isinstance(body, dict) else None
-    if not data_id:
-        logger.warning("MercadoPago webhook payload missing data.id; cannot verify signature")
+    body_data = body.get("data") if isinstance(body, dict) else None
+    body_id = body_data.get("id") if isinstance(body_data, dict) else None
+    query_id = (query_params or {}).get("data.id")
+    if query_id and body_id and str(query_id) != str(body_id):
+        logger.warning("MercadoPago webhook data.id in the URL differs from the body's; rejecting")
         return None
+    data_id = query_id or body_id
+    if not data_id:
+        logger.warning("MercadoPago webhook carries no data.id; cannot verify signature")
+        return None
+    data_id = str(data_id)
 
-    # MercadoPago's documented manifest template omits segments whose source is
-    # absent (e.g. no `x-request-id` header) rather than emitting them empty — build
-    # it the same way, or a legitimate webhook delivered without that header would
-    # silently 403 against a manifest we computed differently than MercadoPago did.
-    manifest = f"id:{str(data_id).lower()};"
-    if request_id:
-        manifest += f"request-id:{request_id};"
-    manifest += f"ts:{ts};"
-
-    expected_signature = hmac.new(
-        webhook_secret.encode(), manifest.encode(), hashlib.sha256
-    ).hexdigest()
-
-    if not hmac.compare_digest(expected_signature, v1):
+    signature_matches = False
+    for signed_id in dict.fromkeys((data_id, data_id.lower())):
+        expected_signature = hmac.new(
+            webhook_secret.encode(),
+            _manifest(signed_id, request_id, ts).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        signature_matches |= hmac.compare_digest(expected_signature, v1)
+    if not signature_matches:
         logger.warning("MercadoPago webhook signature mismatch")
         return None
 
@@ -140,4 +155,18 @@ def verify_mercadopago_signature(
         logger.warning("MercadoPago webhook signature timestamp is stale: ts=%s", ts)
         return None
 
-    return MercadoPagoSignatureManifest(data_id=str(data_id), request_id=request_id, ts=ts)
+    return MercadoPagoSignatureManifest(data_id=data_id, request_id=request_id, ts=ts)
+
+
+def _manifest(data_id: str, request_id: str, ts: str) -> str:
+    """The string MercadoPago signs for a notification.
+
+    MercadoPago's documented template omits a segment whose source is absent
+    (e.g. no ``x-request-id`` header) rather than emitting it empty -- built the
+    same way here, or a legitimate webhook delivered without that header would
+    403 against a manifest computed differently than MercadoPago's.
+    """
+    manifest = f"id:{data_id};"
+    if request_id:
+        manifest += f"request-id:{request_id};"
+    return manifest + f"ts:{ts};"

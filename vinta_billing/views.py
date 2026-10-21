@@ -1,8 +1,10 @@
+import html
 import logging
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 from django.db.models import QuerySet
+from django.http import QueryDict
 from django.shortcuts import get_object_or_404
 from django_virtual_models.generic_views import GenericVirtualModelViewMixin
 from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
@@ -39,6 +41,22 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def webhook_query_params(request) -> dict[str, str]:
+    """The webhook request's query string, by parameter name (last value wins).
+
+    MercadoPago's notification simulator sends the query string HTML-escaped
+    (``?data.id=ORD...&amp;type=order``), which a plain parse reads as a parameter
+    named ``amp;type``. Unescaping ``&amp;`` first keeps every name intact
+    wherever it falls; percent-encoded values are untouched, since decoding
+    happens after the split.
+    """
+    query_string = html.unescape(request.META.get("QUERY_STRING", ""))
+    return {
+        name: value for name, value in QueryDict(query_string).items() if isinstance(value, str)
+    }
+
 
 #: The two path segments the inbound webhooks carry, declared rather than inferred.
 #:
@@ -190,10 +208,11 @@ class PaymentsViewSet(ViewSet):
         # provider sent, not a re-serialization of the parsed payload.
         raw_body = request.body
         headers = dict(request.headers)
+        query_params = webhook_query_params(request)
 
         try:
             signature_valid = self.payment_service.verify_payment_webhook_signature(
-                provider, raw_body, headers
+                provider, raw_body, headers, query_params
             )
         except UnknownPaymentProviderError:
             return Response(
@@ -207,7 +226,7 @@ class PaymentsViewSet(ViewSet):
 
         try:
             status_update = self.payment_service.handle_payment_webhook(
-                provider, raw_body, headers, request.data
+                provider, raw_body, headers, request.data, query_params
             )
         except ProviderWebhookEventIdMissingError:
             return Response(
@@ -219,6 +238,27 @@ class PaymentsViewSet(ViewSet):
             self._apply_confirmed_payment_side_effects(status_update)
 
         return Response({"message": "Payment update received."})
+
+    @extend_schema(
+        summary="Receive payment updates (provider-level URL)",
+        operation_id="billing_payments_provider_payment_update_create",
+        parameters=WEBHOOK_PATH_PARAMETERS[1:],
+        description=(
+            "The same endpoint as `payment-update`, without a payment id: the one "
+            "fixed URL to configure in a provider's dashboard. The payment is found "
+            "from the notification."
+        ),
+        request=None,
+        responses={
+            200: {"description": "Payment update received."},
+            400: {"description": "Malformed payload."},
+            403: {"description": "Invalid or missing signature."},
+            404: {"description": "Unknown payment provider."},
+        },
+    )
+    def provider_payment_update(self, request, *args, **kwargs):
+        """``payment_update`` at ``billing/payments/payment-update/<provider>/``."""
+        return self.payment_update(request, *args, **kwargs)
 
     def _apply_confirmed_payment_side_effects(
         self, status_update: PaymentStatusUpdateModel
@@ -271,10 +311,11 @@ class PaymentsViewSet(ViewSet):
         # See the comment in `payment_update` — order matters here too.
         raw_body = request.body
         headers = dict(request.headers)
+        query_params = webhook_query_params(request)
 
         try:
             signature_valid = self.payment_service.verify_subscription_webhook_signature(
-                provider, raw_body, headers
+                provider, raw_body, headers, query_params
             )
         except UnknownPaymentProviderError:
             return Response(
@@ -291,7 +332,7 @@ class PaymentsViewSet(ViewSet):
 
         try:
             status_update = self.payment_service.handle_subscription_payment_webhook(
-                provider, raw_body, headers, request.data
+                provider, raw_body, headers, request.data, query_params
             )
         except ProviderWebhookEventIdMissingError:
             return Response(
