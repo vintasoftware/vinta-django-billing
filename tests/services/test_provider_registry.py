@@ -46,6 +46,9 @@ import pytest
 
 from vinta_billing.constants import PaymentProviders
 from vinta_billing.services.payment_adapters.base import BasePaymentAdapter
+from vinta_billing.services.payment_adapters.mercadopago_orders_payment_adapter import (
+    MercadoPagoOrdersPaymentAdapter,
+)
 from vinta_billing.services.payment_adapters.mercadopago_payment_adapter import (
     MercadoPagoPaymentAdapter,
 )
@@ -61,6 +64,9 @@ from vinta_billing.services.subscription_adapters.stripe_subscription_adapter im
 
 PAYMENT_ADAPTER_CLASSES: list[type[BasePaymentAdapter]] = [
     MercadoPagoPaymentAdapter,
+    # Not registered under a slug of its own: `MercadoPagoPaymentAdapter
+    # .from_config` builds it when the entry's `API` is "orders".
+    MercadoPagoOrdersPaymentAdapter,
     StripePaymentAdapter,
 ]
 SUBSCRIPTION_ADAPTER_CLASSES: list[type[BaseSubscriptionAdapter]] = [
@@ -174,6 +180,7 @@ class TestPaymentAdapterConformance:
         "adapter_class,credential_kwarg",
         [
             (MercadoPagoPaymentAdapter, "access_token"),
+            (MercadoPagoOrdersPaymentAdapter, "access_token"),
             (StripePaymentAdapter, "api_key"),
         ],
         ids=lambda c: getattr(c, "__name__", c),
@@ -378,6 +385,10 @@ def _sign_stripe_subscription(data_id: str, ts: str) -> tuple[bytes, dict[str, s
 
 PAYMENT_CONFORMANCE_CASES: list[tuple[BasePaymentAdapter, Callable[[str, str], tuple]]] = [
     (MercadoPagoPaymentAdapter("access-token", webhook_secret=WEBHOOK_SECRET), _sign_mercadopago),
+    (
+        MercadoPagoOrdersPaymentAdapter("access-token", webhook_secret=WEBHOOK_SECRET),
+        _sign_mercadopago,
+    ),
     (StripePaymentAdapter("sk_test", webhook_secret=WEBHOOK_SECRET), _sign_stripe),
 ]
 

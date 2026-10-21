@@ -1,5 +1,47 @@
 # History
 
+## 0.10.0
+
+### MercadoPago one-time payments through the Orders API
+
+Checkout Transparente apps created on newer Mercado Pago accounts get `APP_USR-`
+test credentials. Only the Orders API (`/v1/orders`) accepts them:
+`/v1/payments` answers every charge with `401 "Unauthorized use of live
+credentials"`. A new provider setting picks the API for one-time payments:
+
+```python
+VINTA_BILLING = {"PROVIDERS": {"mercadopago": {..., "API": "orders"}}}
+```
+
+`"payments"` is the default, so a project that doesn't set it sees no change.
+`"orders"` builds the new `MercadoPagoOrdersPaymentAdapter`, and an unknown value
+raises `ImproperlyConfigured`. The new adapter shares the credentials,
+mappings, payer address and webhook signature with `MercadoPagoPaymentAdapter`,
+and it:
+
+- creates an order (`type: online`, `processing_mode: automatic`) with a
+  two-decimal string amount and an `X-Idempotency-Key`. For Pix, `expires_at`
+  becomes the order's `expiration_time` (ISO 8601 duration).
+- stores the order id (`ORD...`) as `Payment.external_id`, and the payment
+  transaction id in `provider_data["transaction_id"]`. A Pix charge's QR code,
+  image and ticket URL land under the same keys as before, so `get_pix_charge`
+  is unchanged.
+- maps the order's `status` / `status_detail` to `PaymentStatuses`. An expired
+  order (`canceled`/`failed` with `expired`) maps to `expired`, and
+  `processed`/`partially_refunded` maps to `partially_refunded`.
+- treats a refused card (`402`) as a declined charge with status `rejected`,
+  keeping the order id when the answer has one. Any other error answer raises
+  `ProviderRequestRejectedError`, with the codes from Mercado Pago's `errors[]`.
+- refunds through `POST /v1/orders/{id}/refund`: a refund of the whole amount
+  without a body, any other refund naming the transaction and the amount. It
+  reads refund status off `GET /v1/orders/{id}`.
+- accepts `type: "order"` notifications with any `order.*` action and reads
+  the order's current state from the API.
+
+Subscriptions keep using `/preapproval`, which the Orders API does not cover.
+`scripts/mercadopago_sandbox_check.py --api orders` runs the release checks
+against the Orders API.
+
 ## 0.9.1
 
 The MercadoPago Payments API adapter could not charge a card or a Pix code:

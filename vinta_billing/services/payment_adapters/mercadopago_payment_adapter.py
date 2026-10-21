@@ -1,6 +1,7 @@
 import datetime
 import logging
 from collections.abc import Mapping
+from typing import Any
 
 import mercadopago
 import mercadopago.config
@@ -8,6 +9,7 @@ from django.core.exceptions import ImproperlyConfigured
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from django.utils.module_loading import import_string
 
 from vinta_billing.conf import get_site_domain
 from vinta_billing.constants import PaymentProviders, PaymentStatuses, RefundStatuses
@@ -98,6 +100,23 @@ REFUND_STATUS_MAPPING: dict[str, str] = {
 }
 
 
+#: The provider entry's ``API`` values, and the adapter each one builds. The
+#: Payments API (``/v1/payments``) is the default and takes ``TEST-`` test
+#: credentials; the Orders API (``/v1/orders``) takes the ``APP_USR-`` test
+#: credentials of a Checkout Transparente app.
+PAYMENTS_API = "payments"
+ORDERS_API = "orders"
+ADAPTERS_BY_API: dict[str, str] = {
+    PAYMENTS_API: (
+        "vinta_billing.services.payment_adapters.mercadopago_payment_adapter"
+        ".MercadoPagoPaymentAdapter"
+    ),
+    ORDERS_API: (
+        "vinta_billing.services.payment_adapters.mercadopago_orders_payment_adapter"
+        ".MercadoPagoOrdersPaymentAdapter"
+    ),
+}
+
 #: ``payer.address`` keys sent to MercadoPago, and the ``BillingAddress`` field
 #: each one reads. ``country`` is deliberately absent: ``/v1/payments`` answers it
 #: with ``400 "The name of the following parameters is wrong"``.
@@ -158,6 +177,27 @@ class MercadoPagoPaymentAdapter(BasePaymentAdapter):
         #: sends payment notifications, when that is not ``SITE_DOMAIN`` (a
         #: tunnel in development, a separate API host).
         self.notification_url_host = notification_url_host
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, object]) -> BasePaymentAdapter:
+        """See ``BasePaymentAdapter.from_config``. The entry's ``API`` picks
+        which MercadoPago API one-time payments go through, and so which adapter
+        is built: ``"payments"`` (the default) or ``"orders"``.
+        """
+        if cls is not MercadoPagoPaymentAdapter:
+            # A subclass -- the Orders adapter, or a project's own -- asked for
+            # itself by name.
+            return super().from_config(config)
+        api = str(config.get("API") or PAYMENTS_API).lower()
+        if api not in ADAPTERS_BY_API:
+            raise ImproperlyConfigured(
+                f"VINTA_BILLING['PROVIDERS']['mercadopago']['API'] is {api!r}; "
+                f"expected one of {sorted(ADAPTERS_BY_API)}."
+            )
+        adapter_class: Any = import_string(ADAPTERS_BY_API[api])
+        if adapter_class is cls:
+            return super().from_config(config)
+        return adapter_class.from_config(config)
 
     @property
     def is_configured(self) -> bool:

@@ -11,12 +11,14 @@ this with production credentials: it creates real charges against them.
 
     MERCADOPAGO_ACCESS_TOKEN=... MERCADOPAGO_PUBLIC_KEY=... \\
     MERCADOPAGO_PAYER_EMAIL=buyer@example.com \\
-    uv run python scripts/mercadopago_sandbox_check.py
+    uv run python scripts/mercadopago_sandbox_check.py [--api orders]
 
-With ``TEST-`` keys use an ordinary email as payer (a test user's email gets
-"Invalid users involved").
+With ``TEST-`` keys (``--api payments``, the default) use an ordinary email as
+payer (a test user's email gets "Invalid users involved"). With ``APP_USR-``
+test keys (``--api orders``) use the app's buyer test account.
 """
 
+import argparse
 import datetime
 import os
 import sys
@@ -89,6 +91,10 @@ def payment(payer_email: str, payment_method: str) -> SimpleNamespace:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="MercadoPago sandbox release checks.")
+    parser.add_argument("--api", choices=["payments", "orders"], default="payments")
+    args = parser.parse_args()
+
     access_token = os.environ["MERCADOPAGO_ACCESS_TOKEN"]
     public_key = os.environ["MERCADOPAGO_PUBLIC_KEY"]
     payer_email = os.environ["MERCADOPAGO_PAYER_EMAIL"]
@@ -97,7 +103,7 @@ def main() -> int:
     settings.SITE_DOMAIN = "localhost"
     settings.VINTA_BILLING = {**getattr(settings, "VINTA_BILLING", {}), "SITE_DOMAIN": "localhost"}
 
-    adapter = MercadoPagoPaymentAdapter.from_config({"ACCESS_TOKEN": access_token})
+    adapter = MercadoPagoPaymentAdapter.from_config({"ACCESS_TOKEN": access_token, "API": args.api})
     print(f"adapter: {type(adapter).__name__}")
     failures = 0
 
