@@ -10,7 +10,11 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
 from vinta_billing.constants import BillingInterval, PaymentProviders, PaymentStatuses
-from vinta_billing.exceptions import CollectionNotSupportedError, ProviderWebhookEventIdMissingError
+from vinta_billing.exceptions import (
+    CollectionNotSupportedError,
+    ProviderRequestRejectedError,
+    ProviderWebhookEventIdMissingError,
+)
 from vinta_billing.services.dataclasses import (
     BillingAddress,
     BillingProfile,
@@ -159,7 +163,7 @@ def test_create_subscription_plan(adapter, mock_plan):
         "auto_recurring": {
             "frequency": 1,
             "frequency_type": "months",
-            "transaction_amount": "99.90",
+            "transaction_amount": 99.9,
             "currency_id": "BRL",
             "billing_day": 15,
             "billing_day_proportional": True,
@@ -198,7 +202,7 @@ def test_update_subscription_plan(adapter, mock_plan):
         "auto_recurring": {
             "frequency": 1,
             "frequency_type": "months",
-            "transaction_amount": "99.90",
+            "transaction_amount": 99.9,
             "currency_id": "BRL",
             "billing_day": 15,
             "billing_day_proportional": True,
@@ -383,7 +387,7 @@ def test_update_plan(adapter, mock_created_plan):
         "auto_recurring": {
             "frequency": 1,
             "frequency_type": "months",
-            "transaction_amount": "99.90",
+            "transaction_amount": 99.9,
             "currency_id": "BRL",
             "billing_day": 15,
             "billing_day_proportional": True,
@@ -760,3 +764,70 @@ def test_verify_signature_rejects_stale_timestamp(adapter):
     raw_body, headers = build_signed_request(data_id="subscription-123", ts=stale_ts)
 
     assert adapter.verify_signature(raw_body, headers) is False
+
+
+# --- Error answers and partial payloads ---
+
+
+@pytest.mark.parametrize(
+    ("call", "sdk_method"),
+    [
+        (lambda adapter, plan: adapter.create_subscription_plan(plan), "create"),
+        (lambda adapter, plan: adapter.update_subscription_plan("mp-plan-456", plan), "update"),
+    ],
+)
+def test_plan_calls_raise_on_an_error_answer(adapter, mock_plan, call, sdk_method):
+    getattr(adapter.sdk.plan(), sdk_method).return_value = {
+        "status": 400,
+        "response": {
+            "message": "auto_recurring.transaction_amount must be numeric",
+            "cause": [{"code": 400, "description": "invalid transaction_amount"}],
+        },
+    }
+
+    with pytest.raises(ProviderRequestRejectedError) as excinfo:
+        call(adapter, mock_plan)
+
+    assert excinfo.value.http_status == 400
+    assert excinfo.value.causes == (("400", "invalid transaction_amount"),)
+
+
+@override_settings(SITE_DOMAIN="example.com")
+@patch("vinta_billing.services.subscription_adapters.mercadopago_subscription_adapter.reverse")
+def test_create_subscription_raises_on_an_error_answer(mock_reverse, adapter, mock_subscription):
+    mock_reverse.return_value = "/subscription-payment-update/mercadopago/subscription-123/"
+    adapter.sdk.preapproval().create.return_value = {
+        "status": 401,
+        "response": {"message": "Unauthorized use of live credentials", "code": 7},
+    }
+
+    with pytest.raises(ProviderRequestRejectedError, match="Unauthorized use of live credentials"):
+        adapter.create_subscription(mock_subscription, "test-token")
+
+
+def test_create_subscription_payment_from_payload_without_address(adapter):
+    """A card payment's payload often has no `payer.address` (and sometimes no
+    `identification`); the missing fields map to empty strings."""
+    payment_payload = {
+        "response": {
+            "id": "payment-456",
+            "transaction_amount": 99.9,
+            "currency_id": "BRL",
+            "status": "approved",
+            "payment_method_id": "visa",
+            "description": "Subscription payment",
+            "payer": {"email": "test@example.com"},
+        }
+    }
+
+    result = adapter.create_subscription_payment_from_payment_payload(
+        "subscription-123", payment_payload
+    )
+
+    assert result.external_id == "payment-456"
+    assert result.billing_profile.email == "test@example.com"
+    assert result.billing_profile.first_name == ""
+    assert result.billing_profile.document_type == ""
+    assert result.billing_profile.document_number == ""
+    assert result.billing_profile.billing_address.street_name == ""
+    assert result.billing_profile.billing_address.zip_code == ""

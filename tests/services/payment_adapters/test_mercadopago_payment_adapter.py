@@ -11,7 +11,10 @@ from django.core.exceptions import ImproperlyConfigured
 from django.test import override_settings
 
 from vinta_billing.constants import PaymentProviders, PaymentStatuses, RefundStatuses
-from vinta_billing.exceptions import ProviderWebhookEventIdMissingError
+from vinta_billing.exceptions import (
+    ProviderRequestRejectedError,
+    ProviderWebhookEventIdMissingError,
+)
 from vinta_billing.services.dataclasses import Refund, RefundResult
 from vinta_billing.services.payment_adapters.base import Payment, PaymentStatusUpdate
 from vinta_billing.services.payment_adapters.mercadopago_payment_adapter import (
@@ -142,7 +145,7 @@ def test_process_success(mock_request_options, mock_reverse, adapter, mock_payme
     mock_options.custom_headers = {"x-idempotency-key": {"payment-123"}}
 
     expected_payment_data = {
-        "transaction_amount": "100.50",
+        "transaction_amount": 100.5,
         "token": "test-token",
         "description": "Test payment",
         "payment_method_id": "credit_card",
@@ -162,7 +165,6 @@ def test_process_success(mock_request_options, mock_reverse, adapter, mock_payme
                 "neighborhood": "Test Neighborhood",
                 "city": "Test City",
                 "federal_unit": "Test State",
-                "country": "BR",
                 "zip_code": "12345-678",
             },
         },
@@ -244,7 +246,7 @@ def test_refund_success(mock_request_options, adapter, mock_refund):
     assert result == RefundResult(external_id="refund-456", status=RefundStatuses.APPROVED)
     assert mock_options.custom_headers == {"x-idempotency-key": "refund-123"}
     adapter.sdk.refund().create.assert_called_once_with(
-        "mp-payment-456", {"amount": "50.25"}, mock_options
+        "mp-payment-456", {"amount": 50.25}, mock_options
     )
 
 
@@ -498,7 +500,7 @@ def test_document_types_mapping_usage(adapter, mock_payment):
 def test_check_status_maps_known_status(adapter):
     """PAYMENT_STATUS_MAPPING is actually wired into check_status."""
     adapter.sdk.payment().get.return_value = {
-        "response": {"status": "authorized", "status_detail": "accredited"}
+        "response": {"id": "mp-payment-456", "status": "authorized", "status_detail": "accredited"}
     }
 
     result = adapter.check_status("mp-payment-456")
@@ -762,3 +764,173 @@ def test_check_status_keeps_a_called_off_charge_cancelled(adapter):
     }
 
     assert adapter.check_status("1").status == PaymentStatuses.CANCELLED
+
+
+# --- Payments API request shape and error answers (0.9.1) ---
+
+
+@pytest.fixture
+def charge_adapter(adapter):
+    """`adapter` with `reverse` stubbed and a public notification host."""
+    with (
+        patch(
+            "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse",
+            return_value="/payment/update/mercadopago/payment-123/",
+        ),
+        override_settings(SITE_DOMAIN="example.com"),
+    ):
+        yield adapter
+
+
+def test_process_charge_sends_a_numeric_amount_and_no_country(charge_adapter, mock_payment):
+    mock_payment.value = Decimal("150.00")
+    charge_adapter.sdk.payment().create.return_value = {
+        "status": 201,
+        "response": {"id": 1, "status": "approved", "status_detail": "accredited"},
+    }
+
+    charge_adapter.process_charge(mock_payment, "card-token")
+
+    payment_data = charge_adapter.sdk.payment().create.call_args.args[0]
+    assert payment_data["transaction_amount"] == 150.0
+    assert isinstance(payment_data["transaction_amount"], float)
+    assert "country" not in payment_data["payer"]["address"]
+    assert json.loads(json.dumps(payment_data))["transaction_amount"] == 150
+
+
+def test_process_charge_keeps_cents_exact(charge_adapter, mock_payment):
+    mock_payment.value = Decimal("100.255")
+    charge_adapter.sdk.payment().create.return_value = {"status": 201, "response": {"id": 1}}
+
+    charge_adapter.process_charge(mock_payment, "card-token")
+
+    assert charge_adapter.sdk.payment().create.call_args.args[0]["transaction_amount"] == 100.26
+
+
+def test_process_charge_leaves_out_empty_address_fields(
+    charge_adapter, mock_payment, mock_billing_address
+):
+    mock_billing_address.neighborhood = ""
+    mock_billing_address.street_number = None
+    charge_adapter.sdk.payment().create.return_value = {"status": 201, "response": {"id": 1}}
+
+    charge_adapter.process_charge(mock_payment, "card-token")
+
+    address = charge_adapter.sdk.payment().create.call_args.args[0]["payer"]["address"]
+    assert address == {
+        "zip_code": "12345-678",
+        "street_name": "Test Street",
+        "city": "Test City",
+        "federal_unit": "Test State",
+    }
+
+
+def test_process_charge_raises_on_a_400_with_the_providers_message(charge_adapter, mock_payment):
+    charge_adapter.sdk.payment().create.return_value = {
+        "status": 400,
+        "response": {
+            "message": "notificaction_url attribute must be url valid",
+            "error": "bad_request",
+            "status": 400,
+            "cause": [
+                {"code": 4020, "description": "notificaction_url attribute must be url valid"}
+            ],
+        },
+    }
+
+    with pytest.raises(ProviderRequestRejectedError) as excinfo:
+        charge_adapter.process_charge(mock_payment, "card-token")
+
+    error = excinfo.value
+    assert error.http_status == 400
+    assert error.provider_message == "notificaction_url attribute must be url valid"
+    assert error.causes == (("4020", "notificaction_url attribute must be url valid"),)
+    assert "4020" in str(error)
+    assert "test@example.com" not in str(error)
+
+
+def test_process_charge_raises_on_a_success_without_an_id(charge_adapter, mock_payment):
+    charge_adapter.sdk.payment().create.return_value = {"status": 200, "response": {}}
+
+    with pytest.raises(ProviderRequestRejectedError):
+        charge_adapter.process_charge(mock_payment, "card-token")
+
+
+def test_process_charge_returns_a_declined_card_as_rejected(charge_adapter, mock_payment):
+    """A charge MercadoPago created and declined is not an error."""
+    charge_adapter.sdk.payment().create.return_value = {
+        "status": 201,
+        "response": {"id": 42, "status": "rejected", "status_detail": "cc_rejected_other_reason"},
+    }
+
+    result = charge_adapter.process_charge(mock_payment, "card-token")
+
+    assert result.external_id == "42"
+    assert result.status == PaymentStatuses.REJECTED
+    assert result.original_status == "rejected"
+
+
+@pytest.mark.parametrize(
+    "host", ["localhost", "localhost:3000", "127.0.0.1:8000", "api.mambu.localhost"]
+)
+def test_process_charge_omits_notification_url_for_a_local_host(adapter, mock_payment, host):
+    adapter.sdk.payment().create.return_value = {"status": 201, "response": {"id": 1}}
+
+    with override_settings(SITE_DOMAIN=host):
+        adapter.process_charge(mock_payment, "card-token")
+
+    assert "notification_url" not in adapter.sdk.payment().create.call_args.args[0]
+
+
+@patch("vinta_billing.services.payment_adapters.mercadopago_payment_adapter.reverse")
+@override_settings(SITE_DOMAIN="localhost:3000")
+def test_notification_url_host_overrides_site_domain(mock_reverse, mock_payment):
+    mock_reverse.return_value = "/payment/update/mercadopago/payment-123/"
+    with patch(
+        "vinta_billing.services.payment_adapters.mercadopago_payment_adapter.mercadopago.SDK"
+    ) as mock_sdk:
+        adapter = MercadoPagoPaymentAdapter.from_config(
+            {"ACCESS_TOKEN": "token", "NOTIFICATION_URL_HOST": "abc.ngrok.app"}
+        )
+    adapter.sdk = mock_sdk.return_value
+    adapter.sdk.payment().create.return_value = {"status": 201, "response": {"id": 1}}
+
+    adapter.process_charge(mock_payment, "card-token")
+
+    assert (
+        adapter.sdk.payment().create.call_args.args[0]["notification_url"]
+        == "https://abc.ngrok.app/payment/update/mercadopago/payment-123/"
+    )
+
+
+def test_refund_raises_on_an_error_answer(adapter, mock_refund):
+    adapter.sdk.refund().create.return_value = {
+        "status": 400,
+        "response": {"message": "Invalid refund amount", "cause": [{"code": 2085}]},
+    }
+
+    with pytest.raises(ProviderRequestRejectedError, match="Invalid refund amount"):
+        adapter.refund(mock_refund)
+
+
+def test_check_status_raises_on_an_error_answer(adapter):
+    adapter.sdk.payment().get.return_value = {
+        "status": 404,
+        "response": {"message": "Payment not found", "error": "not_found"},
+    }
+
+    with pytest.raises(ProviderRequestRejectedError) as excinfo:
+        adapter.check_status("missing")
+
+    assert excinfo.value.http_status == 404
+
+
+def test_check_refund_status_raises_on_an_error_answer(adapter, mock_refund):
+    mock_refund.external_id = "refund-456"
+    adapter.sdk.refund().list_all.return_value = {
+        "status": 401,
+        "response": {"message": "invalid access token"},
+    }
+
+    with pytest.raises(ProviderRequestRejectedError):
+        adapter.check_refund_status(mock_refund)

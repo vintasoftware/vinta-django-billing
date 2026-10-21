@@ -51,6 +51,7 @@ from vinta_billing.exceptions import (
     OverLimitError,
     PaymentProviderNotConfiguredError,
     PaymentTokenRequiredError,
+    ProviderRequestRejectedError,
     RetryPaymentNotApplicableError,
     SubscriptionNotAttachedError,
     UnconfirmedPlanChangeError,
@@ -82,6 +83,10 @@ from vinta_billing.exceptions import (
 #: difference between an unconfigured provider being noticed in an hour and it
 #: being filed under "clients sending bad requests" for a week.
 #:
+#: A request the provider refused outright (``ProviderRequestRejectedError``)
+#: renders as **502 Bad Gateway**: the upstream answered with an error, and its
+#: message -- not the client's request -- says what to fix.
+#:
 #: **This table is the contract, and the shipped ``@extend_schema`` annotations
 #: have to agree with it.** Through 0.5.0 three of them declared
 #: ``PaymentProviderNotConfiguredError`` as a 409 while this table rendered it
@@ -98,6 +103,7 @@ BILLING_ERROR_STATUS: tuple[tuple[type[BillingError], int], ...] = (
     (PaymentProviderNotConfiguredError, status.HTTP_503_SERVICE_UNAVAILABLE),
     (NoDefaultBillingPlanError, status.HTTP_503_SERVICE_UNAVAILABLE),
     (IncompleteBillingPlanError, status.HTTP_503_SERVICE_UNAVAILABLE),
+    (ProviderRequestRejectedError, status.HTTP_502_BAD_GATEWAY),
     (UnconfirmedPlanChangeError, status.HTTP_409_CONFLICT),
     (RetryPaymentNotApplicableError, status.HTTP_409_CONFLICT),
     (SubscriptionNotAttachedError, status.HTTP_409_CONFLICT),
