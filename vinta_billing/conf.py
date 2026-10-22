@@ -22,9 +22,11 @@ and a label rather than a scalar.
 
 from __future__ import annotations
 
+import datetime
 from typing import Any
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from django.dispatch import receiver
 from django.utils.module_loading import import_string
@@ -253,7 +255,80 @@ _DEFAULTS: dict[str, Any] = {
     # on a free plan -- the pin is written on the first confirmed charge, not
     # before.
     "DEFAULT_PROVIDER": "",
+    # When this package asks a provider for a payment's status instead of
+    # waiting for its webhook (`PaymentService.sync_payment_status`). Each value
+    # is a `timedelta` or a number of seconds. A project overriding the block
+    # sets only the keys it changes; the rest keep these defaults.
+    "PAYMENT_STATUS_SYNC": {
+        # `PaymentService.sync_payment_status_on_read` asks the provider about an
+        # open payment at most this often per payment. `None` (the default)
+        # turns it off: right where webhooks arrive. Set it where they don't --
+        # local development, test environments, e2e runs.
+        "ON_READ_INTERVAL": None,
+        # The window `jobs.sync_open_payments` sweeps: open payments created at
+        # least SWEEP_MIN_AGE and at most SWEEP_MAX_AGE ago.
+        "SWEEP_MIN_AGE": datetime.timedelta(minutes=2),
+        "SWEEP_MAX_AGE": datetime.timedelta(days=2),
+    },
 }
+
+
+def _as_timedelta(key: str, value: Any, *, allow_none: bool = False) -> datetime.timedelta | None:
+    """``value`` (a ``timedelta`` or seconds) as a ``timedelta``; raises
+    ``ImproperlyConfigured`` for anything else, or for a negative one."""
+    if value is None and allow_none:
+        return None
+    if isinstance(value, datetime.timedelta):
+        delta = value
+    elif isinstance(value, int | float) and not isinstance(value, bool):
+        delta = datetime.timedelta(seconds=value)
+    else:
+        raise ImproperlyConfigured(
+            f"{SETTINGS_NAME}['PAYMENT_STATUS_SYNC']['{key}'] must be a timedelta or a "
+            f"number of seconds{' or None' if allow_none else ''}, not {value!r}."
+        )
+    if delta < datetime.timedelta(0):
+        raise ImproperlyConfigured(
+            f"{SETTINGS_NAME}['PAYMENT_STATUS_SYNC']['{key}'] must not be negative."
+        )
+    return delta
+
+
+def _payment_status_sync(overrides: Any) -> dict[str, datetime.timedelta | None]:
+    """The ``PAYMENT_STATUS_SYNC`` block, defaults filled in and every value a
+    ``timedelta`` (``ON_READ_INTERVAL`` may be ``None``)."""
+    defaults = _DEFAULTS["PAYMENT_STATUS_SYNC"]
+    if not isinstance(overrides, dict):
+        raise ImproperlyConfigured(
+            f"{SETTINGS_NAME}['PAYMENT_STATUS_SYNC'] must be a dict, not {overrides!r}."
+        )
+    unknown = set(overrides) - set(defaults)
+    if unknown:
+        raise ImproperlyConfigured(
+            "Unknown %s['PAYMENT_STATUS_SYNC'] key(s): %s. Valid keys: %s"
+            % (SETTINGS_NAME, ", ".join(sorted(unknown)), ", ".join(sorted(defaults)))
+        )
+    merged = {**defaults, **overrides}
+    block = {
+        "ON_READ_INTERVAL": _as_timedelta(
+            "ON_READ_INTERVAL", merged["ON_READ_INTERVAL"], allow_none=True
+        ),
+        "SWEEP_MIN_AGE": _as_timedelta("SWEEP_MIN_AGE", merged["SWEEP_MIN_AGE"]),
+        "SWEEP_MAX_AGE": _as_timedelta("SWEEP_MAX_AGE", merged["SWEEP_MAX_AGE"]),
+    }
+    if block["ON_READ_INTERVAL"] == datetime.timedelta(0):
+        raise ImproperlyConfigured(
+            f"{SETTINGS_NAME}['PAYMENT_STATUS_SYNC']['ON_READ_INTERVAL'] must be positive; "
+            "use None to turn it off."
+        )
+    min_age, max_age = block["SWEEP_MIN_AGE"], block["SWEEP_MAX_AGE"]
+    assert min_age is not None and max_age is not None
+    if min_age >= max_age:
+        raise ImproperlyConfigured(
+            f"{SETTINGS_NAME}['PAYMENT_STATUS_SYNC']['SWEEP_MIN_AGE'] must be shorter "
+            "than SWEEP_MAX_AGE."
+        )
+    return block
 
 
 def _build_settings() -> dict[str, Any]:
@@ -267,7 +342,9 @@ def _build_settings() -> dict[str, Any]:
             "Unknown %s key(s): %s. Valid keys: %s"
             % (SETTINGS_NAME, ", ".join(sorted(unknown)), ", ".join(sorted(_DEFAULTS)))
         )
-    return {**_DEFAULTS, **overrides}
+    resolved = {**_DEFAULTS, **overrides}
+    resolved["PAYMENT_STATUS_SYNC"] = _payment_status_sync(resolved["PAYMENT_STATUS_SYNC"])
+    return resolved
 
 
 def get_setting(name: str) -> Any:
@@ -321,6 +398,11 @@ def get_provider_config(slug: str) -> dict[str, Any]:
     route resolves, and the adapter reports itself unconfigured.
     """
     return dict(get_setting("PROVIDERS").get(slug, {}))
+
+
+def get_payment_status_sync_setting(name: str) -> datetime.timedelta | None:
+    """One ``PAYMENT_STATUS_SYNC`` value, as a ``timedelta`` (or ``None``)."""
+    return get_setting("PAYMENT_STATUS_SYNC")[name]
 
 
 def get_site_domain() -> str | None:

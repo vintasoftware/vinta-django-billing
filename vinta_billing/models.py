@@ -16,6 +16,7 @@ from vinta_billing.constants import (
     LimitWarningLevel,
     PaymentProviders,
     PaymentStatuses,
+    PaymentStatusUpdateSource,
     ProviderWebhookRoute,
     RefundStatuses,
     ScopeType,
@@ -768,6 +769,13 @@ class PaymentStatusUpdate(BaseModel):
     status = models.CharField(max_length=50, choices=PaymentStatuses)
     description = models.TextField(blank=True)
     external_id = models.CharField(max_length=255, blank=True)
+    #: Whether a webhook reported this or a sync asked for it. Rows written
+    #: before 0.11 are all webhooks.
+    source = models.CharField(
+        max_length=20,
+        choices=PaymentStatusUpdateSource,
+        default=PaymentStatusUpdateSource.WEBHOOK,
+    )
 
     def __str__(self):
         return f"{self.id} {self.payment} - {self.status} - {self.created.isoformat()}"

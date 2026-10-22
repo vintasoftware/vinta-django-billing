@@ -160,6 +160,14 @@ class RefundStatuses(TextChoices):
     UNKNOWN = ("unknown", _("Unknown"))
 
 
+class PaymentStatusUpdateSource(TextChoices):
+    """What reported a ``PaymentStatusUpdate``: the provider's own notification,
+    or this package asking the provider (``PaymentService.sync_payment_status``)."""
+
+    WEBHOOK = ("webhook", _("Webhook"))
+    SYNC = ("sync", _("Sync"))
+
+
 class SubscriptionStatuses(TextChoices):
     ACTIVE = ("active", _("Active"))
     PAUSED = ("paused", _("Paused"))

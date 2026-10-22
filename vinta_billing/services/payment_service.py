@@ -1,17 +1,21 @@
 import datetime
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import asdict
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
+from django.core.cache import cache
 from django.db import transaction
 
+from vinta_billing.conf import get_payment_status_sync_setting
 from vinta_billing.constants import (
     BillingInterval,
     BillingState,
     BillingStateChangeReason,
     PaymentStatuses,
+    PaymentStatusUpdateSource,
     ProviderWebhookRoute,
     RefundStatuses,
     SubscriptionStatuses,
@@ -19,6 +23,7 @@ from vinta_billing.constants import (
 from vinta_billing.exceptions import (
     BillingProfileContactEmailMissingError,
     MissingBillingProfileError,
+    PaymentError,
     PaymentProviderNotConfiguredError,
     UnknownPaymentProviderError,
 )
@@ -48,6 +53,7 @@ from vinta_billing.services.payment_adapters import get_payment_provider_registr
 from vinta_billing.services.payment_adapters.base import BasePaymentAdapter, query_params_kwargs
 from vinta_billing.services.payment_provider_resolver import PaymentProviderResolver
 from vinta_billing.services.payment_status_machine import (
+    OPEN_PAYMENT_STATUSES,
     record_payment_status,
     record_refund_status,
 )
@@ -518,7 +524,10 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         return self._record_status_update(payment, payment_status_update_data)
 
     def _record_status_update(
-        self, payment: PaymentModel, update: PaymentStatusUpdate
+        self,
+        payment: PaymentModel,
+        update: PaymentStatusUpdate,
+        source: str = PaymentStatusUpdateSource.WEBHOOK,
     ) -> PaymentStatusUpdateModel:
         """Keep the provider's update as history and move ``payment`` to it.
 
@@ -527,15 +536,89 @@ class PaymentService(Generic[PaymentAdapter, SubscriptionAdapter, SubscriptionPl
         only where ``payment_status_machine``'s rules allow -- a stale or
         repeated update is history, not a change, and sends no signal.
         """
+        return self._write_status_update(payment, update, source)[0]
+
+    def _write_status_update(
+        self, payment: PaymentModel, update: PaymentStatusUpdate, source: str
+    ) -> tuple[PaymentStatusUpdateModel, bool]:
+        """``_record_status_update``, also returning whether the status changed."""
         with transaction.atomic():
             status_update = PaymentStatusUpdateModel.objects.create(
                 status=update.status,
                 description=update.description or "",
                 external_id=update.update_external_id or "",
                 payment=payment,
+                source=source,
             )
-            record_payment_status(payment, update.status, update.original_status or "")
-        return status_update
+            changed = record_payment_status(payment, update.status, update.original_status or "")
+        return status_update, changed
+
+    def sync_payment_status(
+        self, payment: PaymentModel, *, min_interval: datetime.timedelta | None = None
+    ) -> bool:
+        """Ask the provider for ``payment``'s status and record it like a webhook.
+
+        For when no webhook comes: an environment that sends none (MercadoPago's
+        test environment sends no ``order`` notifications), or a notification
+        lost in production. Recorded through the webhook path's own code, so a
+        change writes a ``PaymentStatusUpdate`` row (``source="sync"``), follows
+        ``payment_status_machine``'s rules, and sends ``payment_status_changed``
+        on commit.
+
+        Only an open payment (``pending``, ``in_process``) that reached the
+        provider (has an ``external_id``) is asked about; anything else returns
+        ``False`` without a provider call. An answer that is the status already
+        stored, or ``unknown``, writes nothing -- a sweep asks about the same
+        pending payment many times, and would otherwise leave a row each time. A
+        ``PaymentError`` from the provider (``ProviderRequestRejectedError``,
+        an unconfigured provider) is logged and leaves the payment as it was.
+
+        ``min_interval`` skips a payment already asked about within that long,
+        through Django's cache (``cache.add``), so every process sharing the
+        cache shares the limit. With a per-process cache (``LocMemCache``, the
+        default) the limit is per process.
+
+        :return: Whether ``Payment.status`` changed.
+        """
+        if payment.status not in OPEN_PAYMENT_STATUSES or not payment.external_id:
+            return False
+        if min_interval is not None and not cache.add(
+            self._sync_cache_key(payment),
+            True,
+            timeout=max(1, math.ceil(min_interval.total_seconds())),
+        ):
+            return False
+        try:
+            update = self.check_payment_status(payment)
+        except PaymentError as error:
+            logger.warning(
+                "Could not sync payment status: payment_id=%s provider=%s error=%s http_status=%s",
+                payment.pk,
+                payment.payment_provider,
+                type(error).__name__,
+                getattr(error, "http_status", None),
+            )
+            return False
+        if update.status in (PaymentStatuses.UNKNOWN, payment.status):
+            return False
+        return self._write_status_update(payment, update, PaymentStatusUpdateSource.SYNC)[1]
+
+    def sync_payment_status_on_read(self, payment: PaymentModel) -> bool:
+        """``sync_payment_status`` throttled by
+        ``VINTA_BILLING["PAYMENT_STATUS_SYNC"]["ON_READ_INTERVAL"]``, for a
+        project's own endpoint that reads one payment. Does nothing while that
+        setting is ``None``, its default.
+
+        :return: Whether ``Payment.status`` changed.
+        """
+        interval = get_payment_status_sync_setting("ON_READ_INTERVAL")
+        if interval is None:
+            return False
+        return self.sync_payment_status(payment, min_interval=interval)
+
+    @staticmethod
+    def _sync_cache_key(payment: PaymentModel) -> str:
+        return f"vinta_billing:payment-status-sync:{payment.pk}"
 
     def get_subscription_by_external_id(self, external_id: str) -> SubscriptionModel | None:
         return SubscriptionModel.objects.filter(external_id=external_id).first()

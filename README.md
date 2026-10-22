@@ -533,6 +533,58 @@ pix = payment_service.get_pix_charge(payment)  # qr_code, qr_code_base64, ticket
 
 No card token is needed. An unpaid charge that runs out moves to `expired`.
 
+### When no webhook comes: syncing payment status
+
+A card charge's status comes back in the charge response. A Pix charge (or
+anything else the payer completes elsewhere) is confirmed only by the provider's
+webhook. Webhooks can get lost in production, or arrive while your server is
+down. Mercado Pago's test environment sends none at all for Orders API orders.
+`PaymentService.sync_payment_status(payment)` asks the provider instead and
+records the answer the way a webhook would: it writes a `PaymentStatusUpdate`
+row with `source="sync"`, follows the same status rules, and sends
+`payment_status_changed` on commit.
+
+It only asks about open payments (`pending`, `in_process`) that reached the
+provider. If the provider refuses the request, or answers with the status
+already stored or `unknown`, nothing is written.
+
+**Schedule the sweep in every deployment.** In production it's what catches a
+lost webhook:
+
+```python
+# e.g. Celery beat, every 5 minutes
+from vinta_billing import jobs
+
+jobs.sync_open_payments()  # open payments created 2 minutes to 2 days ago
+```
+
+It hands each payment to `jobs.sync_payment_status_for_payment` through
+`JOB_DISPATCHER`, like the per-subscription jobs. If your queue only runs job
+functions from an explicit list, add that one.
+
+**Sync on read where webhooks don't arrive** (local development, test
+environments, e2e runs against Mercado Pago's sandbox). Call
+`payment_service.sync_payment_status_on_read(payment)` from your own endpoint
+that returns one payment, such as the checkout page's status poll. It does
+nothing until you set an interval:
+
+```python
+VINTA_BILLING = {
+    "PAYMENT_STATUS_SYNC": {
+        # Ask the provider at most this often per payment when a payment is
+        # read. None (the default) turns it off; leave it off in production.
+        "ON_READ_INTERVAL": datetime.timedelta(seconds=10),
+        # The sweep's window. Defaults shown.
+        "SWEEP_MIN_AGE": datetime.timedelta(minutes=2),
+        "SWEEP_MAX_AGE": datetime.timedelta(days=2),
+    },
+}
+```
+
+Each value is a `timedelta` or a number of seconds. The interval is enforced
+through Django's cache. With a shared cache (Redis, Memcached), every process
+shares the limit. With the default `LocMemCache`, each process keeps its own.
+
 ## REST API
 
 The shipped viewsets are offered as routes rather than a ready-made `urls.py`,
