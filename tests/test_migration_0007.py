@@ -2,8 +2,8 @@
 
 Rewinds to ``0006`` and replays forward, on a database holding a payment and a
 refund written before the migration, and checks the rows survive both ways.
-Ends on ``0007`` again, so the rest of the suite runs against the schema it
-expects.
+Ends on the latest migration again, so the rest of the suite runs against the
+schema it expects.
 """
 
 from decimal import Decimal
@@ -11,12 +11,18 @@ from decimal import Decimal
 import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.loader import MigrationLoader
 
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 BEFORE = ("vinta_billing", "0006_drop_organization_columns")
 AFTER = ("vinta_billing", "0007_payment_provider_data_refund_idempotency_key")
+
+
+def _latest():
+    (leaf,) = MigrationLoader(None, ignore_no_migrations=True).graph.leaf_nodes("vinta_billing")
+    return leaf
 
 
 def _migrate(target):
@@ -54,7 +60,9 @@ def test_unapplying_and_reapplying_keeps_existing_rows(billing_profile):
         assert old_apps.get_model("vinta_billing", "Payment").objects.count() == 1
         assert old_apps.get_model("vinta_billing", "Refund").objects.count() == 1
     finally:
-        _migrate(AFTER)
+        # Every later migration too, not just 0007: the rest of the suite runs
+        # against the current models.
+        _migrate(_latest())
 
     payment.refresh_from_db()
     assert payment.provider_data is None

@@ -1,5 +1,57 @@
 # History
 
+## 0.11.0
+
+### Read a payment's status from the provider when no webhook comes
+
+A Pix charge is confirmed only by the provider's webhook, and webhooks don't
+always come. Mercado Pago's test environment sends none for Orders API orders,
+and in production one can be lost or arrive while the server is down.
+`check_payment_status` returned the provider's answer without recording it, and
+the recording step (`_record_status_update`) was private, so each project wrote
+its own sync. A sync built on `record_payment_status` also left no history row.
+
+- **`PaymentService.sync_payment_status(payment, *, min_interval=None) -> bool`**
+  asks the provider about an open payment (`pending`, `in_process`, with an
+  `external_id`) and records the answer through the webhook path's own code:
+  it writes a `PaymentStatusUpdate` row, follows `payment_status_machine`'s
+  rules, and sends `payment_status_changed` on commit. It returns whether
+  `Payment.status` changed.
+  - Payments that aren't open, or never reached the provider, are not sent to
+    it.
+  - A `PaymentError` from the provider (`ProviderRequestRejectedError`, an
+    unconfigured provider) is logged at `warning` without payer data, and the
+    payment is left as it was.
+  - An answer of `unknown`, or of the status already stored, writes nothing. A
+    sweep asks about the same pending charge many times.
+  - `min_interval` skips a payment asked about within that interval, through
+    Django's cache (`cache.add`). The limit is shared across processes with a
+    shared cache, and per process with `LocMemCache`.
+- **`PaymentService.sync_payment_status_on_read(payment)`** is that sync,
+  throttled by the new `ON_READ_INTERVAL` setting. Call it from your own
+  endpoint that reads one payment. It does nothing while the setting is `None`,
+  its default.
+- **`jobs.sync_open_payments(min_age=None, max_age=None)`** is a sweep like
+  `process_dunning`. It finds open payments with an `external_id` created
+  between `max_age` and `min_age` ago, and dispatches one
+  `jobs.sync_payment_status_for_payment` per payment through `JOB_DISPATCHER`,
+  iterating with `.iterator()`. Schedule it in every deployment. If your queue
+  only runs job functions from an explicit list, add
+  `sync_payment_status_for_payment` to it.
+- **`VINTA_BILLING["PAYMENT_STATUS_SYNC"]`** is a new settings block:
+  `ON_READ_INTERVAL` (default `None`), `SWEEP_MIN_AGE` (2 minutes) and
+  `SWEEP_MAX_AGE` (2 days).
+  - Each value is a `timedelta` or a number of seconds. A project overriding
+    the block sets only the keys it changes.
+  - Anything else raises `ImproperlyConfigured`: an unknown key, a negative or
+    zero interval, or a `SWEEP_MIN_AGE` not shorter than `SWEEP_MAX_AGE`.
+- **`PaymentStatusUpdate.source`** (`webhook` or `sync`) says what reported an
+  update. Migration `0008` adds it with default `webhook`, which is what every
+  existing row is, and reverses cleanly.
+
+The package's own API has no endpoint that reads a single payment, so nothing
+in it calls `sync_payment_status_on_read`. Call it from yours.
+
 ## 0.10.1
 
 MercadoPago Orders API webhooks were all refused, so a Pix charge made through

@@ -45,6 +45,13 @@ from vinta_billing.signals import payment_status_changed, refund_status_changed,
 logger = logging.getLogger(__name__)
 
 
+#: Statuses of a charge the provider has but has not settled: the payer may
+#: still pay, or the provider is still deciding. What
+#: ``PaymentService.sync_payment_status`` asks the provider about.
+OPEN_PAYMENT_STATUSES: frozenset[str] = frozenset(
+    {PaymentStatuses.PENDING, PaymentStatuses.IN_PROCESS}
+)
+
 #: Statuses a charge ends in. Nothing moves a charge out of one.
 FINAL_PAYMENT_STATUSES: frozenset[str] = frozenset(
     {

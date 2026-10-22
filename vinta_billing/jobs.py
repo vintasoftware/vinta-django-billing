@@ -8,7 +8,14 @@ There are two shapes. A *sweep* (``process_dunning``, ``meter_event_occurrences`
 ``close_billing_periods``, ``check_approaching_limits``) finds the subscriptions
 that need work and hands each one to a *per-subscription job*. The sweeps do not
 decide how that hand-off happens: they call a ``dispatch`` callable, which
-defaults to running the job inline.
+defaults to running the job inline. ``sync_open_payments`` is the same shape over
+payments, handing each one to ``sync_payment_status_for_payment``.
+
+A project that keeps an explicit list of the job functions its queue may run
+(a dispatcher that refuses anything not on it) needs every per-item job on it:
+``meter_subscription_event_occurrences``, ``process_dunning_for_subscription``,
+``close_subscription_billing_period``, ``check_approaching_limits_for_subscription``
+and, since 0.11.0, ``sync_payment_status_for_payment``.
 
 Wiring it to Celery is about fifteen lines in the project:
 
@@ -54,13 +61,14 @@ from typing import Any
 
 from django.utils import timezone
 
-from vinta_billing.conf import get_object_from_setting
+from vinta_billing.conf import get_object_from_setting, get_payment_status_sync_setting
 from vinta_billing.constants import BillingState
-from vinta_billing.models import Subscription
+from vinta_billing.models import Payment, Subscription
 from vinta_billing.services.container import resolve_service
 from vinta_billing.services.cycle_close_service import CycleCloseService
 from vinta_billing.services.dunning_service import DunningService
 from vinta_billing.services.metering_service import MeteringService
+from vinta_billing.services.payment_status_machine import OPEN_PAYMENT_STATUSES
 from vinta_billing.services.usage_warning_service import UsageWarningService
 
 
@@ -363,3 +371,61 @@ def check_approaching_limits_for_subscription(
         )
         return
     usage_warning_service.check_subscription(subscription)
+
+
+def sync_open_payments(
+    min_age: datetime.timedelta | None = None,
+    max_age: datetime.timedelta | None = None,
+    dispatch: Dispatch | None = None,
+) -> None:
+    """Beat entry point: fan out one status sync per open payment, for the
+    webhooks that never came.
+
+    Selects payments still ``pending`` or ``in_process`` that reached the
+    provider (have an ``external_id``) and were created between ``max_age`` and
+    ``min_age`` ago -- by default ``PAYMENT_STATUS_SYNC``'s ``SWEEP_MAX_AGE`` (2
+    days) and ``SWEEP_MIN_AGE`` (2 minutes). The lower bound leaves a fresh
+    charge to its webhook; the upper one stops asking about a charge nobody is
+    going to pay. Belongs in every deployment's schedule: in production it is
+    what catches a lost webhook.
+    """
+    dispatch = dispatch or get_dispatcher()
+    now = timezone.now()
+    min_age = min_age if min_age is not None else get_payment_status_sync_setting("SWEEP_MIN_AGE")
+    max_age = max_age if max_age is not None else get_payment_status_sync_setting("SWEEP_MAX_AGE")
+    assert min_age is not None and max_age is not None
+    payment_ids = (
+        Payment.objects.filter(
+            status__in=OPEN_PAYMENT_STATUSES,
+            created__lte=now - min_age,
+            created__gte=now - max_age,
+        )
+        .exclude(external_id="")
+        .values_list("pk", flat=True)
+        .order_by("pk")
+    )
+    for payment_id in payment_ids.iterator():
+        dispatch(sync_payment_status_for_payment, payment_id)
+
+
+def sync_payment_status_for_payment(payment_id: int, payment_service: Any | None = None) -> None:
+    """Ask the provider for one payment's status and record it, through
+    ``PaymentService.sync_payment_status``.
+
+    Idempotent under at-least-once redelivery: a second run hears the status the
+    first one recorded and writes nothing. A payment deleted, or settled, between
+    fan-out and execution is skipped, and an unexpected failure is logged rather
+    than raised (same reasoning as ``process_dunning_for_subscription``): the
+    next sweep asks again.
+    """
+    payment_service = payment_service or resolve_service("payment_service")
+    payment = Payment.objects.filter(pk=payment_id).first()
+    if payment is None:
+        logger.info("Skipping status sync for payment %s: it no longer exists.", payment_id)
+        return
+    try:
+        payment_service.sync_payment_status(payment)
+    except Exception:
+        logger.exception(
+            "Status sync failed for payment %s; the next sweep asks again.", payment_id
+        )
